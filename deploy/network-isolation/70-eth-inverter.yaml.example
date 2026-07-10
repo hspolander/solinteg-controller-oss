@@ -1,0 +1,23 @@
+# netplan config: renames a second NIC to a stable name (survives reboots/USB-port changes,
+# since it's matched by MAC, not by whatever name the kernel happens to assign) and gives it a
+# static IP on the isolated inverter subnet.
+#
+# Install as /etc/netplan/70-eth-inverter.yaml (any filename that sorts after your existing
+# netplan configs works — netplan applies them in lexical order), then:
+#   sudo netplan try      # applies with a 2-min auto-revert if it breaks your SSH session
+#   sudo netplan apply    # once you've confirmed it's fine
+#
+# Find your adapter's MAC first: plug it in, then `ip link` — look for the new interface (it
+# will have some kernel-assigned name like enx... or usb0 before this config renames it).
+network:
+  version: 2
+  ethernets:
+    eth-inverter:                          # your choice of name — must match SOLINTEG_HOST's
+                                            # interface in the dnsmasq config below
+      match:
+        macaddress: "AA:BB:CC:DD:EE:FF"     # <-- replace with your adapter's real MAC
+      set-name: eth-inverter
+      addresses: [192.168.99.1/24]          # <-- pick any RFC1918 range that doesn't collide
+                                            #     with your home LAN; .1 is this box's side
+      dhcp4: no
+      dhcp6: no

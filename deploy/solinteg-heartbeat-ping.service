@@ -1,0 +1,19 @@
+[Unit]
+Description=Ping an external dead-man's-switch so a fully silent NUC gets noticed
+# Deliberately does nothing but a bare curl — no Python, no dependency on telemetry.db or
+# any other solinteg service — so this keeps working even if everything else on the box is
+# broken. If the NUC is powered off or its network is down, this simply doesn't run, which
+# is exactly the silence the external service (see deploy/README.md) is watching for; a
+# failed/unreachable ping is swallowed here rather than alerted on locally, since a local
+# alert would face the same network problem.
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=solinteg
+EnvironmentFile=/opt/solinteg/solinteg.env
+ExecStart=/bin/sh -c 'test -n "$HEALTHCHECKS_PING_URL" && curl -fsS --max-time 20 "$HEALTHCHECKS_PING_URL" -o /dev/null || true'
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

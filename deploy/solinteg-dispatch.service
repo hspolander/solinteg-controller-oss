@@ -1,0 +1,25 @@
+[Unit]
+Description=Solinteg battery dispatch loop (applies optimizer plan to the inverter)
+After=network-online.target solinteg-poller.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=solinteg
+WorkingDirectory=/opt/solinteg/app
+EnvironmentFile=/opt/solinteg/solinteg.env
+ExecStart=/opt/solinteg/app/.venv/bin/python /opt/solinteg/app/scripts/dispatch_loop.py
+Restart=always
+RestartSec=15
+# Disarmed by default (SOLINTEG_CONTROL_ARMED unset in solinteg.env) — safe to run as
+# soon as this unit is enabled; it only starts writing registers once armed there.
+# Sandbox: whole FS read-only except /opt/solinteg (telemetry.db).
+# ReadWritePaths only carves exceptions out of ProtectSystem — it does nothing alone.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/solinteg
+
+[Install]
+WantedBy=multi-user.target

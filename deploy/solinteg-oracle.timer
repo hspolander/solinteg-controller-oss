@@ -1,0 +1,14 @@
+[Unit]
+Description=Nightly hindsight-oracle scoring
+
+[Timer]
+# 04:40 — well after midnight (both days' readings complete), after the 03:15 backup, and
+# during hours the price/plan pipeline is idle. The route's 14-day sweep makes any single
+# missed night self-healing on the next run.
+OnCalendar=*-*-* 04:40:00
+# If the NUC was powered off at the scheduled time, run once on next boot to catch up.
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

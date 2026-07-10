@@ -1,0 +1,27 @@
+# dnsmasq config: runs a DHCP-only server (no DNS — port=0 avoids conflicting with
+# systemd-resolved) scoped strictly to the isolated inverter interface, handing out exactly one
+# reserved address to the inverter by MAC. Nothing else on this interface gets an address, and
+# this dnsmasq instance never touches any other interface.
+#
+# Install as /etc/dnsmasq.d/eth-inverter.conf, then:
+#   sudo systemctl restart dnsmasq
+#   sudo systemctl status dnsmasq   # confirm it started clean — a typo here can affect dnsmasq's
+#                                   # handling of OTHER interfaces too if except-interface is wrong
+#
+# Find the inverter's MAC: before moving it to the isolated link, check `ip neigh` while it's
+# still reachable on your home LAN, or check its physical label/documentation.
+interface=eth-inverter                      # <-- your isolated NIC's name (must match netplan)
+except-interface=eno1                       # <-- list EVERY other interface on this box (home
+#except-interface=wlp58s0                   #     LAN NIC, WiFi, Tailscale, loopback) so dnsmasq
+#except-interface=tailscale0                #     never listens on them — uncomment/add as needed
+except-interface=lo
+bind-dynamic
+
+port=0                                       # disable DNS — this instance is DHCP-only
+dhcp-authoritative
+dhcp-range=192.168.99.2,192.168.99.2,255.255.255.0,12h   # <-- must match netplan's subnet above
+dhcp-option=option:router,192.168.99.1                    # <-- this box's address on that subnet
+dhcp-option=option:dns-server,1.1.1.1,8.8.8.8             # public resolvers (this dnsmasq doesn't
+                                                            # itself serve DNS, just hands out
+                                                            # someone else's resolvers)
+dhcp-host=AA:BB:CC:DD:EE:FF,192.168.99.2    # <-- inverter's real MAC, reserved to its address

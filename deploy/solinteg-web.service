@@ -1,0 +1,27 @@
+[Unit]
+Description=Solinteg controller web app (Next.js)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=solinteg
+WorkingDirectory=/opt/solinteg/app
+EnvironmentFile=/opt/solinteg/solinteg.env
+# Next.js production server. Build first with: npm run build
+ExecStart=/usr/bin/npm run start
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+Environment=PORT=3000
+# Sandbox: whole FS read-only except /opt/solinteg (.next cache, the solinteg user's
+# home — npm wants $HOME/.npm — and telemetry.db). This unit parses untrusted internet
+# data (price/forecast APIs), so it gets the same hardening as the pollers.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/solinteg
+
+[Install]
+WantedBy=multi-user.target

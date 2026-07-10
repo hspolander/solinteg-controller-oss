@@ -1,0 +1,23 @@
+[Unit]
+Description=Solinteg inverter Modbus poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=solinteg
+WorkingDirectory=/opt/solinteg/app
+EnvironmentFile=/opt/solinteg/solinteg.env
+ExecStart=/opt/solinteg/app/.venv/bin/python /opt/solinteg/app/scripts/modbus_poller.py
+Restart=always
+RestartSec=10
+# Sandbox: whole FS read-only except /opt/solinteg (live.json + telemetry.db).
+# ReadWritePaths only carves exceptions out of ProtectSystem — it does nothing alone.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/solinteg
+
+[Install]
+WantedBy=multi-user.target

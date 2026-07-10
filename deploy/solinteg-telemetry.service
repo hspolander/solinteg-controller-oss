@@ -1,0 +1,18 @@
+[Unit]
+Description=Capture solinteg telemetry by rendering the dashboard once
+# The home page render logs the price curve + optimizer run to telemetry.db.
+# This makes data capture automatic instead of depending on someone opening the dashboard.
+After=solinteg-web.service
+Requires=solinteg-web.service
+
+[Service]
+Type=oneshot
+User=solinteg
+Group=solinteg
+# -f: fail (non-zero) on HTTP errors so a bad render shows up in the journal.
+ExecStart=/usr/bin/curl -fsS -o /dev/null --max-time 30 http://localhost:3000/
+# Sandbox: curl only talks to localhost and writes nothing (no ReadWritePaths needed).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

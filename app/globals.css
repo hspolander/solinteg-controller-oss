@@ -1,0 +1,164 @@
+@import "tailwindcss";
+
+:root {
+  --page-bg: #eef1f6;
+  --card-bg: #ffffff;
+  --card-border: #e6ebf2;
+  --card-shadow: 0 22px 48px -30px rgba(60, 80, 120, 0.28), inset 0 1px 0 #fff;
+  --text: #1e2733;
+  --text-muted: #8a97a8;
+  --divider: #e2e7ee;
+  --track-bg: #eef1f6;
+  --badge-bg: #eef2f8;
+  --badge-color: #4a5261;
+  --node-bg: #f6f8fb;
+  --node-idle-border: #eef1f6;
+  --node-idle-text: #a2acba;
+  --node-idle-stroke: #cdd5df;
+  --live-dot: #2fae6a;
+  --logo-color: #16a97a;
+
+  --color-buy: #12a06b;
+  --color-sell: #2e9bff;
+  --color-solar: #f0a52a;
+  --color-soc: #7b5cff;
+  --color-charge-band: #e5484d;
+  --color-sell-band: #2e6edc;
+  --color-now: #f5a623;
+  --color-now-text: #231a08;
+  --grid-line: #eef1f6;
+  --axis-text: #98a2b3;
+  --zone-today: rgba(0, 0, 0, 0.014);
+  --zone-tomorrow: rgba(70, 100, 170, 0.055);
+
+  /* Net-favorable/unfavorable/balanced trading result. --econ-spent is
+     deliberately a different red than --color-charge-band and unrelated to
+     --color-buy (green) — a mismatch inherited from the source design, not
+     a bug; don't "fix" it into false consistency. */
+  --econ-green: #12a06b;
+  --econ-red: #e5484d;
+  --econ-gray: #8a97a8;
+  --econ-spent: #e5484d;
+  --econ-earned: #2e9bff;
+
+  /* Warning/amber accent — Dispatch card (AVVAKTAR badge, warning line, gauge mid-tier).
+     Distinct from --color-now (the chart's "now" marker) even though both land in the
+     amber family; kept separate so one can change without coupling to the other. */
+  --color-warning: #c9791a;
+
+  --flow-solar: #f5a623;
+  --flow-battery: #7b5cff;
+  --flow-sky: #2e9bff;
+  --flow-red: #ff5a52;
+  --flow-house-accent: #16a97a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page-bg: radial-gradient(130% 80% at 50% -10%, #141d2a 0%, #0a0d13 60%, #080a0f 100%);
+    --card-bg-grad: linear-gradient(180deg, #141c28 0%, #0e131b 100%);
+    --card-border: rgba(255, 255, 255, 0.08);
+    --card-shadow: 0 24px 50px -26px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    --text: #eaf0f7;
+    --text-muted: rgba(255, 255, 255, 0.5);
+    --divider: rgba(255, 255, 255, 0.09);
+    --track-bg: rgba(255, 255, 255, 0.1);
+    --badge-bg: rgba(255, 255, 255, 0.08);
+    --badge-color: #eaf0f7;
+    --node-bg: #0f1620;
+    --node-idle-border: rgba(255, 255, 255, 0.09);
+    --node-idle-text: rgba(255, 255, 255, 0.42);
+    --node-idle-stroke: rgba(255, 255, 255, 0.18);
+    --live-dot: #3ad37e;
+    --logo-color: #35d19a;
+
+    --color-buy: #35d19a;
+    --color-sell: #56b4ff;
+    --color-solar: #ffb23e;
+    --color-soc: #a58bff;
+    --color-charge-band: #ff6b63;
+    --color-sell-band: #5b8cff;
+    --grid-line: rgba(255, 255, 255, 0.07);
+    --axis-text: rgba(255, 255, 255, 0.42);
+    --zone-today: rgba(255, 255, 255, 0.018);
+    --zone-tomorrow: rgba(96, 120, 180, 0.1);
+
+    --econ-green: #3ee0a6;
+    --econ-red: #ff6b63;
+    --econ-gray: #98a2b3;
+    --econ-earned: #4fb0ff;
+    --color-warning: #f0a83e;
+
+    --flow-battery: #9b87ff;
+    --flow-sky: #4fb0ff;
+    --flow-red: #ff6b63;
+    --flow-house-accent: #35d19a;
+  }
+}
+
+@theme inline {
+  --font-heading: var(--font-space-grotesk);
+  --font-body: var(--font-manrope);
+
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-divider: var(--divider);
+  --color-badge: var(--badge-bg);
+  --color-buy: var(--color-buy);
+  --color-sell: var(--color-sell);
+  --color-solar: var(--color-solar);
+  --color-soc: var(--color-soc);
+  --color-econ-green: var(--econ-green);
+  --color-econ-red: var(--econ-red);
+  --color-econ-gray: var(--econ-gray);
+  --color-warning: var(--color-warning);
+
+  --animate-live-pulse: live-pulse 2s ease-out infinite;
+  --animate-flow-dash: flow-dash 0.85s linear infinite;
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+@keyframes flow-dash {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+
+.card-surface {
+  border-radius: 22px;
+  background: var(--card-bg-grad, var(--card-bg));
+  border: 1px solid var(--card-border);
+  box-shadow: var(--card-shadow);
+  color: var(--text);
+}
+
+/* Interactive chip/toggle affordance — hover background is a separate CSS rule (not inline
+   style) since the active/inactive border and opacity ARE set inline per-instance and inline
+   styles would otherwise always beat a :hover rule on the same property. */
+.chip {
+  cursor: pointer;
+  transition: background-color 0.15s ease, opacity 0.15s ease, transform 0.1s ease;
+}
+.chip:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+.chip:active {
+  transform: scale(0.96);
+}
+
+body {
+  background: var(--page-bg);
+  color: var(--text);
+  font-family: var(--font-body), system-ui, sans-serif;
+}

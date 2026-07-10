@@ -1,0 +1,61 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# local runtime data (poller output + telemetry DB live on the NUC, not in git)
+live.json
+*.db
+*.db-wal
+*.db-shm
+
+# python
+__pycache__/
+*.pyc
+
+# your own site's data — see solar-data/README.md; personal to each installation, never shared
+solar-data/*
+!solar-data/README.md
+
+# NUC vendor driver/firmware downloads (large binaries, re-downloadable from Intel/ASUS)
+files/
+
+# Claude Code local skill-cache lockfile — machine-specific, regenerated automatically
+skills-lock.json

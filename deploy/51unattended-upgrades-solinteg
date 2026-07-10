@@ -1,0 +1,14 @@
+// Local override, installed to /etc/apt/apt.conf.d/51unattended-upgrades-solinteg (loads
+// after the stock 50unattended-upgrades, so these settings win). Part of the resilience plan
+// (2026-07-07): unattended-upgrades was already installing security patches, but a kernel or
+// libc update that needs a reboot to actually take effect was sitting installed-but-inactive
+// indefinitely on a box nobody logs into to reboot by hand. A reboot only happens when
+// /var/run/reboot-required exists (i.e. an update actually needs one) - not every night.
+//
+// Automatic-Reboot-WithUsers is "true" deliberately: this is a single-purpose controller box,
+// not a shared login host, so a forgotten SSH session should never be able to indefinitely
+// block a security reboot. The 03:30 local-timezone-of-the-box (this NUC's clock is UTC, see
+// timedatectl) window is chosen to minimize the odds of interrupting anyone actually working.
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+Unattended-Upgrade::Automatic-Reboot-Time "03:30";

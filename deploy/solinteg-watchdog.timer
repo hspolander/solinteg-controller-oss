@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the solinteg dispatch-loop watchdog every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+# No catch-up value in re-running a liveness check for a past moment in time — it only
+# matters whether the loop is alive NOW, which the next real tick already covers.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

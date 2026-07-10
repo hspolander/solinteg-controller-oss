@@ -1,0 +1,13 @@
+# NAT snippet: lets the inverter reach the internet (its own cloud/phone-app reporting) via this
+# box's main interface, without exposing the inverter's subnet to anything else.
+#
+# Insert this block near the TOP of /etc/ufw/before.rules (NAT tables run before the filter
+# rules ufw manages normally) — ufw ships a *filter block already; add this as a new *nat block
+# either right before it or right after ufw's own header comments. Don't replace anything
+# already in the file.
+*nat
+:POSTROUTING ACCEPT [0:0]
+# Masquerade the isolated inverter subnet behind this box's main interface's address, so the
+# inverter's own outbound traffic (cloud reporting) looks like it's coming from this box.
+-A POSTROUTING -s 192.168.99.0/24 -o eno1 -j MASQUERADE   # <-- replace subnet + your main NIC name
+COMMIT

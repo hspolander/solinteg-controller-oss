@@ -1,0 +1,5 @@
+# Python dependencies for the Solinteg Modbus poller/controller.
+# Install into a venv on the NUC:  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# 3.13+ API: read_holding_registers(addr, count=N, device_id=ID); write_register(addr, val, device_id=ID).
+# The slave= kwarg (and positional count) from earlier 3.x were removed — see scripts/*.py.
+pymodbus>=3.13,<4

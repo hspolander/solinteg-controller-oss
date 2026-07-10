@@ -1,0 +1,16 @@
+# Lets youruser (replace with YOUR OWN login username below before installing, same as any
+# sudoers rule) run scripts/telemetry-ro.sh as root without a password, for routine health
+# checks (sqlite3 SELECTs, journalctl reads) — without granting general passwordless sudo,
+# which was deliberately removed. Install with:
+#   sudo cp deploy/solinteg-telemetry-ro.sudoers /etc/sudoers.d/solinteg-telemetry-ro
+#   sudo chmod 440 /etc/sudoers.d/solinteg-telemetry-ro
+#   sudo visudo -c
+#
+# No arguments are pinned here — sudoers omits them entirely, which means "any arguments are
+# allowed" (see `man sudoers`). The command is still safe to run passwordlessly because
+# telemetry-ro.sh itself is the enforcement point: it only implements a fixed set of
+# read-only operations (a validated single SELECT, journalctl on an allowlisted solinteg-*
+# unit, or cat-ing the heartbeat file) and rejects everything else. Do not add other commands
+# to this file without the same care — a bare NOPASSWD on e.g. sqlite3 or journalctl directly
+# would let the caller pass arbitrary arguments (extension loading, PRAGMA writes, etc.).
+youruser ALL=(root) NOPASSWD: /usr/local/bin/solinteg-telemetry-ro

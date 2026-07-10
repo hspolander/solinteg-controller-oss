@@ -1,0 +1,13 @@
+[Unit]
+Description=Hourly solinteg telemetry capture
+
+[Timer]
+# Top of every hour. Cheap (a localhost render), and captures the post-13:00
+# day-ahead price release plus how the plan shifts through the day.
+OnCalendar=hourly
+# If the NUC was powered off at a scheduled time, run once on next boot to catch up.
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

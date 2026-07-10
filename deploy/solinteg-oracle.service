@@ -1,0 +1,20 @@
+[Unit]
+Description=Score completed days against the hindsight-optimal dispatch oracle
+# GET /api/oracle sweeps the last 14 scorable days and computes any missing oracle_daily rows.
+# A day D needs D+1's actuals, so the newest scorable day is always two days back — hence
+# nightly, not hourly.
+After=solinteg-web.service
+Requires=solinteg-web.service
+
+[Service]
+Type=oneshot
+User=solinteg
+Group=solinteg
+# -f: fail (non-zero) on HTTP errors so a bad run shows up in the journal. The JSON body (per-day
+# regret summaries and skip reasons) goes to stdout → journal, which is the run's audit trail.
+ExecStart=/usr/bin/curl -fsS --max-time 120 http://localhost:3000/api/oracle
+# Sandbox: curl only talks to localhost and writes nothing (the web app owns the DB write).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

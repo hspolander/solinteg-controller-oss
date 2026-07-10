@@ -1,0 +1,22 @@
+[Unit]
+Description=Force-load iTCO_wdt and re-arm systemd's runtime watchdog (works around the kernel's default module blacklist)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Plain `modprobe` loads the module regardless of the kernel's default blacklist — unlike
+# systemd-modules-load.service (which reads /etc/modules-load.d/*.conf), confirmed on-device
+# 2026-07-10 to explicitly honor that blacklist: it logs "Module 'iTCO_wdt' is deny-listed (by
+# kmod)" and does nothing. This service replaces 99-solinteg-hwwatchdog-modules-load.conf, which
+# looked correct but never actually worked for exactly that reason.
+ExecStart=/usr/sbin/modprobe iTCO_wdt
+# PID1 only checks for /dev/watchdog ONCE, at its own startup — before any unit (including this
+# one) can possibly have run yet. daemon-reexec makes the already-running systemd manager
+# re-check and actually arm RuntimeWatchdogSec (see 99-solinteg-hwwatchdog.conf) against the
+# now-existing device. Safe: daemon-reexec preserves all running services' state — it's the same
+# operation systemd package upgrades trigger routinely, not a restart or reboot.
+ExecStart=/usr/bin/systemctl daemon-reexec
+
+[Install]
+WantedBy=multi-user.target
