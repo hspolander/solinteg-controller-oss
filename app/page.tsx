@@ -10,13 +10,16 @@ import {
   readDailyEconomics,
   readTodaySocHistory,
   readRecentControlActions,
+  readRecentOracleDays,
 } from '@/lib/telemetry';
 import { buildDispatchCardData } from '@/lib/dispatch-card';
+import { buildOracleCardData } from '@/lib/oracle-card';
 import { buildActualSocByTime } from '@/lib/chart-utils';
 import { summarize, stockholmDateOf } from '@/lib/economics';
 import AppShell from '@/app/components/AppShell';
 import EarningsCard from '@/app/components/EarningsCard';
 import LiveInverterPanel from '@/app/components/LiveInverterPanel';
+import OracleCard from '@/app/components/OracleCard';
 import type { DispatchSlot } from '@/lib/optimizer';
 import type { EconSummary } from '@/lib/economics';
 
@@ -102,6 +105,15 @@ export default async function Home() {
   // until it has logged at least one).
   const dispatchData = buildDispatchCardData(readRecentControlActions(), new Date());
 
+  // Nightly hindsight-oracle scoring, for the Facit card (best-effort; null until the
+  // first fully-armed day has been scored — see lib/oracle-card.ts).
+  let oracleData = null;
+  try {
+    oracleData = buildOracleCardData(readRecentOracleDays());
+  } catch (err) {
+    console.error('buildOracleCardData failed, rendering without the Facit card data:', err);
+  }
+
   return (
     <AppShell>
       {/* 2026-07-03 v5 layout: same 2 rows × 3 columns as v4. Batterihälsa no longer exists as
@@ -114,7 +126,9 @@ export default async function Home() {
           the ≥1600px breakpoint only — that's where row 1 (Elpriser) sits directly above row
           2 (Elhandel); the narrow single-column stack keeps the wider gap-5 since Dispatch/
           Systemstatus sit between them there instead. */}
-      <div className="grid grid-cols-1 gap-x-5 gap-y-5 min-[1600px]:grid-cols-[minmax(640px,1fr)_380px_minmax(640px,1fr)] min-[1600px]:grid-rows-[auto_auto] min-[1600px]:items-start min-[1600px]:gap-y-2">
+      {/* Row 3 (added 2026-07-11): Facit spans all three columns under everything — column 3's
+          LiveInverterPanel still spans only rows 1-2, so the full width is free there. */}
+      <div className="grid grid-cols-1 gap-x-5 gap-y-5 min-[1600px]:grid-cols-[minmax(640px,1fr)_380px_minmax(640px,1fr)] min-[1600px]:grid-rows-[auto_auto_auto] min-[1600px]:items-start min-[1600px]:gap-y-2">
         {data ? (
           <PriceChart
             data={data}
@@ -138,6 +152,7 @@ export default async function Home() {
         )}
         <LiveInverterPanel initialData={inverterData} initialDispatchData={dispatchData} />
         <EarningsCard summary={earnings} />
+        <OracleCard data={oracleData} />
       </div>
     </AppShell>
   );

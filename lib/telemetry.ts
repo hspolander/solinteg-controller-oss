@@ -352,6 +352,68 @@ export function readRecentControlActions(limit = 12): LatestControlAction[] {
   }
 }
 
+/**
+ * One scored day from oracle_daily, as the dashboard's Facit card consumes it
+ * (lib/oracle-card.ts). Money fields are öre; regret splits can be NULL when the
+ * terminal-constrained DP was infeasible for that day (see deploy/schema.sql).
+ */
+export interface OracleDaySummaryRow {
+  date: string; // Stockholm day D
+  status: string; // 'ok' | 'shadow' | 'degraded' | 'skipped_no_readings'
+  armedFraction: number | null;
+  regretOre: number | null;
+  regretIntradayOre: number | null;
+  regretCarryOre: number | null;
+  achievedTotalOre: number | null;
+  oracleTotalOre: number | null;
+  baselineNetOre: number | null;
+}
+
+/**
+ * The last `limit` scored days from oracle_daily, oldest first (most recent last) —
+ * feeds the dashboard's Facit card. All statuses are returned (the card renders
+ * non-'ok' days muted rather than hiding them); returns [] if the table doesn't
+ * exist yet (first sweep hasn't run) or telemetry is off.
+ */
+export function readRecentOracleDays(limit = 14): OracleDaySummaryRow[] {
+  const handle = getDb();
+  if (!handle) return [];
+  try {
+    const rows = handle
+      .prepare(
+        `SELECT date, status, armed_fraction, regret_ore, regret_intraday_ore,
+                regret_carry_ore, achieved_total_ore, oracle_total_ore, baseline_net_ore
+         FROM oracle_daily ORDER BY date DESC LIMIT ?`,
+      )
+      .all(limit) as {
+      date: string;
+      status: string;
+      armed_fraction: number | null;
+      regret_ore: number | null;
+      regret_intraday_ore: number | null;
+      regret_carry_ore: number | null;
+      achieved_total_ore: number | null;
+      oracle_total_ore: number | null;
+      baseline_net_ore: number | null;
+    }[];
+    return rows
+      .map((r) => ({
+        date: r.date,
+        status: r.status,
+        armedFraction: r.armed_fraction,
+        regretOre: r.regret_ore,
+        regretIntradayOre: r.regret_intraday_ore,
+        regretCarryOre: r.regret_carry_ore,
+        achievedTotalOre: r.achieved_total_ore,
+        oracleTotalOre: r.oracle_total_ore,
+        baselineNetOre: r.baseline_net_ore,
+      }))
+      .reverse();
+  } catch {
+    return [];
+  }
+}
+
 // ── Hindsight-oracle wiring (lib/oracle.ts computes, app/api/oracle/route.ts orchestrates) ──
 
 /** Full poller rows for oracle scoring, oldest first, UTC ISO range [sinceIso, beforeIso). */
