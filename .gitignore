@@ -59,3 +59,8 @@ files/
 
 # Claude Code local skill-cache lockfile — machine-specific, regenerated automatically
 skills-lock.json
+
+# Ellevio meter-history downloads (personal consumption data + the session cookie used to
+# fetch it — regenerate with scripts/fetch-ellevio-history.py, see its docstring)
+solar-data/ellevio/
+ellevio-cookie.txt
