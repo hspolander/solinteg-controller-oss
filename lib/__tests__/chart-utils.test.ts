@@ -10,6 +10,7 @@ import {
   buildXTicks,
   computeNowSlotTime,
   computePriceMax,
+  computePriceMin,
   computeSolarMax,
   indexToX,
   priceYScale,
@@ -368,6 +369,23 @@ describe('computePriceMax', () => {
   });
 });
 
+describe('computePriceMin', () => {
+  it('is 0 for an empty or all-positive series (the everyday case)', () => {
+    expect(computePriceMin([])).toBe(0);
+    expect(computePriceMin([makePoint('a', { buy: 244, sell: 60 })])).toBe(0);
+  });
+
+  it('rounds down to the next 20 below the lowest value minus headroom', () => {
+    // min = -12 (sell) → -10 headroom = -22 → floor to next 20 = -40
+    expect(computePriceMin([makePoint('a', { buy: 50, sell: -12 })])).toBe(-40);
+  });
+
+  it('considers buy as well as sell', () => {
+    const data = [makePoint('a', { buy: -5, sell: 10 })];
+    expect(computePriceMin(data)).toBe(Math.floor((-5 - 10) / 20) * 20);
+  });
+});
+
 describe('computeSolarMax', () => {
   it('floors at 0.5 for a zero-solar series', () => {
     expect(computeSolarMax([])).toBe(0.5);
@@ -385,6 +403,15 @@ describe('priceYScale / socYScale / solarYScale', () => {
     const g = buildChartGeometry();
     expect(priceYScale(0, 200, g)).toBeCloseTo(g.baseY);
     expect(priceYScale(200, 200, g)).toBeCloseTo(g.padT);
+  });
+
+  it('priceYScale with a negative min keeps negative prices inside the plot', () => {
+    const g = buildChartGeometry();
+    expect(priceYScale(-40, 200, g, -40)).toBeCloseTo(g.baseY); // the axis min sits on the baseline
+    expect(priceYScale(200, 200, g, -40)).toBeCloseTo(g.padT);
+    const yNeg = priceYScale(-10, 200, g, -40); // a negative price: below the 0-line, inside the plot
+    expect(yNeg).toBeLessThan(g.baseY);
+    expect(yNeg).toBeGreaterThan(priceYScale(0, 200, g, -40));
   });
 
   it('socYScale uses a fixed 0-100 domain regardless of a price max', () => {

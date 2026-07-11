@@ -5,9 +5,11 @@
 #   ./deploy/to-nuc.sh
 #
 # What it does: packs the working tree (excluding node_modules/.next/.venv/secrets/local
-# data), copies it to the NUC's /tmp, then rsyncs it into /opt/solinteg/app, rebuilds as the
-# `solinteg` user, and restarts the service — the same steps documented in CLAUDE.md's
-# "Deployment & operations" section, just as one command instead of the usual multi-step dance.
+# data), copies it to the NUC's /tmp, rsyncs it into a persistent staging dir
+# (<app>-staging), builds there as the `solinteg` user, and only on a successful build
+# swaps the staged tree into /opt/solinteg/app and restarts the services — a broken build
+# never touches the running deployment. Same steps as CLAUDE.md's "Deployment & operations"
+# section, just as one command instead of the usual multi-step dance.
 #
 # Needs the NUC's sudo password for the privileged steps (copying into /opt/solinteg/app,
 # rebuilding as `solinteg`, restarting the service) — passwordless sudo was deliberately
@@ -50,16 +52,26 @@ echo "==> Staging on the NUC..."
 ssh "${NUC_USER}@${NUC_HOST}" \
   "rm -rf /tmp/solinteg-deploy && mkdir -p /tmp/solinteg-deploy && tar xzf /tmp/solinteg-deploy.tar.gz -C /tmp/solinteg-deploy && rm /tmp/solinteg-deploy.tar.gz"
 
-echo "==> Deploying (rsync into place, rebuild as solinteg, restart)..."
+echo "==> Deploying (stage + build first, swap into place only if the build passes)..."
+# The password crosses into the remote script base64-encoded: its alphabet ([A-Za-z0-9+/=])
+# can't break out of the quoting, unlike the old raw single-quote wrapping, which broke on
+# (or worse, silently mangled) passwords containing quotes/backslashes/$.
+SOLPW_B64="$(printf '%s' "$SOLINTEG_SUDO_PASSWORD" | base64 | tr -d '\n')"
+STAGING_DIR="${REMOTE_APP_DIR}-staging"
 ssh "${NUC_USER}@${NUC_HOST}" bash -s <<REMOTE_EOF
 set -e
-SOLPW='${SOLINTEG_SUDO_PASSWORD}'
+SOLPW="\$(printf '%s' '${SOLPW_B64}' | base64 -d)"
 
+# Stage and build BEFORE touching the live tree — a failed build must leave the running
+# deployment untouched (the old in-place rsync left live sources and the running build out
+# of sync whenever the rebuild failed). The staging dir persists between deploys so
+# node_modules/.next build caches carry over and rebuilds stay fast.
+echo "\$SOLPW" | sudo -S mkdir -p '${STAGING_DIR}'
 echo "\$SOLPW" | sudo -S rsync -a --delete \
   --exclude 'node_modules' --exclude '.next' --exclude '.venv' \
-  /tmp/solinteg-deploy/ '${REMOTE_APP_DIR}/'
+  /tmp/solinteg-deploy/ '${STAGING_DIR}/'
 
-echo "\$SOLPW" | sudo -S chown -R solinteg:solinteg '${REMOTE_APP_DIR}'
+echo "\$SOLPW" | sudo -S chown -R solinteg:solinteg '${STAGING_DIR}'
 
 # Source solinteg.env before building — some config (pricing/site constants in
 # lib/constants.ts) is read via Next's 'use cache' + Partial Prerendering, so it gets baked
@@ -67,7 +79,14 @@ echo "\$SOLPW" | sudo -S chown -R solinteg:solinteg '${REMOTE_APP_DIR}'
 # these set means the build sees only the hardcoded fallback defaults even if the deployed env
 # file overrides them, silently diverging from what the running service's OTHER (non-cached)
 # code paths see.
-echo "\$SOLPW" | sudo -S -u solinteg env HOME=/opt/solinteg bash -lc "cd '${REMOTE_APP_DIR}' && set -a && source /opt/solinteg/solinteg.env && set +a && npm ci && npm run build"
+echo "\$SOLPW" | sudo -S -u solinteg env HOME=/opt/solinteg bash -lc "cd '${STAGING_DIR}' && set -a && source /opt/solinteg/solinteg.env && set +a && npm ci && npm run build"
+
+# Build validated — swap the staged tree (INCLUDING node_modules and the fresh .next) into
+# place. .venv is live-only (the Python services' venv, never staged) and must survive.
+echo "\$SOLPW" | sudo -S rsync -a --delete --exclude '.venv' \
+  '${STAGING_DIR}/' '${REMOTE_APP_DIR}/'
+
+echo "\$SOLPW" | sudo -S chown -R solinteg:solinteg '${REMOTE_APP_DIR}'
 
 echo "\$SOLPW" | sudo -S systemctl restart solinteg-web
 sleep 2

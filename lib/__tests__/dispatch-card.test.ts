@@ -140,6 +140,49 @@ describe('buildDispatchCardData', () => {
     expect(result?.current.reason).toContain('delvis från nätet');
   });
 
+  it('labels a discharge with net grid export as a grid sale at the sell price', () => {
+    const result = buildDispatchCardData(
+      [
+        action({
+          outcome: 'applied',
+          plannedAction: 'discharge',
+          powerW: 2000,
+          detailJson: { gridKwh: -0.4, sellOre: 180.5, buyOre: 250.1 },
+        }),
+      ],
+      now,
+    );
+    expect(result?.current.reason).toContain('Laddar ur 2.0 kW');
+    expect(result?.current.reason).toContain('säljer till nätet');
+    expect(result?.current.reason).toContain('180.5');
+  });
+
+  it('labels a discharge without net export as covering the house load at the avoided buy price', () => {
+    const result = buildDispatchCardData(
+      [
+        action({
+          outcome: 'applied',
+          plannedAction: 'discharge',
+          powerW: 490,
+          detailJson: { gridKwh: 0.02, sellOre: 180.5, buyOre: 250.1 },
+        }),
+      ],
+      now,
+    );
+    expect(result?.current.reason).toContain('täcker husets förbrukning');
+    expect(result?.current.reason).toContain('250.1');
+    expect(result?.current.reason).not.toContain('säljer till nätet');
+  });
+
+  it('reads a discharge row without gridKwh (pre-grid_kwh telemetry) as self-use, not a sale', () => {
+    const result = buildDispatchCardData(
+      [action({ outcome: 'applied', plannedAction: 'discharge', powerW: 490, detailJson: { sellOre: 180.5 } })],
+      now,
+    );
+    expect(result?.current.reason).toContain('täcker husets förbrukning');
+    expect(result?.current.reason).not.toContain('säljer till nätet');
+  });
+
   it('builds an idle reasoning sentence naming the next action when known', () => {
     const result = buildDispatchCardData(
       [

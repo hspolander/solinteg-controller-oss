@@ -53,8 +53,9 @@ function contiguousRuns(points: (Point | null)[]): Point[][] {
   return runs;
 }
 
-function priceTicks(max: number): number[] {
-  return [0, max * 0.25, max * 0.5, max * 0.75, max];
+function priceTicks(min: number, max: number): number[] {
+  const span = max - min;
+  return [min, min + span * 0.25, min + span * 0.5, min + span * 0.75, max];
 }
 
 function tag(key: string, x: number, y: number, text: string, color: string) {
@@ -106,6 +107,7 @@ export default function PriceChart({
     geometry,
     timeIndex,
     priceMax,
+    priceMin,
     solarMax,
   } = useChartData(data, solarProfiles, solarForecast, dispatchSchedule, actualSocByTime);
 
@@ -133,12 +135,12 @@ export default function PriceChart({
   const xAt = (i: number) => indexToX(i, count, geo);
 
   const buyPath = useMemo(
-    () => buildLinePath(chartData.map((d, i): Point => [xAt(i), priceYScale(d.buy, priceMax, geo)])),
-    [chartData, priceMax, geo],
+    () => buildLinePath(chartData.map((d, i): Point => [xAt(i), priceYScale(d.buy, priceMax, geo, priceMin)])),
+    [chartData, priceMax, priceMin, geo],
   );
   const sellPath = useMemo(
-    () => buildLinePath(chartData.map((d, i): Point => [xAt(i), priceYScale(d.sell, priceMax, geo)])),
-    [chartData, priceMax, geo],
+    () => buildLinePath(chartData.map((d, i): Point => [xAt(i), priceYScale(d.sell, priceMax, geo, priceMin)])),
+    [chartData, priceMax, priceMin, geo],
   );
   const solarTopPoints = useMemo(
     () => chartData.map((d, i): Point => [xAt(i), solarYScale(d.solarKwh, solarMax, geo)]),
@@ -375,14 +377,27 @@ export default function PriceChart({
           })}
 
         {/* gridlines + left price axis */}
-        {priceTicks(priceMax).map((v, i) => (
+        {priceTicks(priceMin, priceMax).map((v, i) => (
           <g key={i}>
-            <line x1={geo.padL} y1={priceYScale(v, priceMax, geo)} x2={geo.padL + geo.plotW} y2={priceYScale(v, priceMax, geo)} stroke="var(--grid-line)" strokeWidth={1} />
-            <text x={geo.padL - 6} y={priceYScale(v, priceMax, geo) + 3.5} textAnchor="end" fontSize={10} fill="var(--axis-text)" style={{ fontFamily: 'var(--font-body)' }}>
+            <line x1={geo.padL} y1={priceYScale(v, priceMax, geo, priceMin)} x2={geo.padL + geo.plotW} y2={priceYScale(v, priceMax, geo, priceMin)} stroke="var(--grid-line)" strokeWidth={1} />
+            <text x={geo.padL - 6} y={priceYScale(v, priceMax, geo, priceMin) + 3.5} textAnchor="end" fontSize={10} fill="var(--axis-text)" style={{ fontFamily: 'var(--font-body)' }}>
               {Math.round(v)}
             </text>
           </g>
         ))}
+        {/* zero line, emphasized only when the axis extends below it (negative-price day) */}
+        {priceMin < 0 && (
+          <line
+            x1={geo.padL}
+            y1={priceYScale(0, priceMax, geo, priceMin)}
+            x2={geo.padL + geo.plotW}
+            y2={priceYScale(0, priceMax, geo, priceMin)}
+            stroke="var(--axis-text)"
+            strokeWidth={1}
+            strokeDasharray="2 3"
+            opacity={0.7}
+          />
+        )}
         <text x={geo.padL - 6} y={geo.padT - 8} textAnchor="end" fontSize={9} fontWeight={700} fill="var(--axis-text)" style={{ fontFamily: 'var(--font-body)' }}>
           öre/kWh
         </text>
@@ -495,8 +510,8 @@ export default function PriceChart({
             if (xn == null) return null;
             const buyNowV = Math.round(nowPoint.buy);
             const sellNowV = Math.round(nowPoint.sell);
-            let byY = priceYScale(nowPoint.buy, priceMax, geo);
-            let syY = priceYScale(nowPoint.sell, priceMax, geo);
+            let byY = priceYScale(nowPoint.buy, priceMax, geo, priceMin);
+            let syY = priceYScale(nowPoint.sell, priceMax, geo, priceMin);
             if (Math.abs(byY - syY) < 20) syY = byY + 20;
             return (
               <g>
@@ -526,8 +541,8 @@ export default function PriceChart({
         {hover && hoverPoint && (
           <g pointerEvents="none">
             <line x1={xAt(hover.index)} y1={geo.padT} x2={xAt(hover.index)} y2={geo.baseY} stroke="var(--text-muted)" strokeWidth={1} strokeDasharray="3 3" opacity={0.6} />
-            <circle cx={xAt(hover.index)} cy={priceYScale(hoverPoint.sell, priceMax, geo)} r={3.5} fill="var(--color-sell)" stroke="var(--card-bg)" strokeWidth={1.5} />
-            <circle cx={xAt(hover.index)} cy={priceYScale(hoverPoint.buy, priceMax, geo)} r={3.5} fill="var(--color-buy)" stroke="var(--card-bg)" strokeWidth={1.5} />
+            <circle cx={xAt(hover.index)} cy={priceYScale(hoverPoint.sell, priceMax, geo, priceMin)} r={3.5} fill="var(--color-sell)" stroke="var(--card-bg)" strokeWidth={1.5} />
+            <circle cx={xAt(hover.index)} cy={priceYScale(hoverPoint.buy, priceMax, geo, priceMin)} r={3.5} fill="var(--color-buy)" stroke="var(--card-bg)" strokeWidth={1.5} />
             {hasPlan && layers.soc && hoverPoint.socPct != null && (
               <circle cx={xAt(hover.index)} cy={socYScale(hoverPoint.socPct, geo)} r={3.5} fill="var(--color-soc)" stroke="var(--card-bg)" strokeWidth={1.5} />
             )}

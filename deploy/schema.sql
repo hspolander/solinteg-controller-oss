@@ -127,6 +127,9 @@ CREATE TABLE IF NOT EXISTS control_actions (
                                     --   buy_ore, sell_ore                             — this slot's price
                                     --   solar_shortfall_kwh, solar_shortfall_limit_kwh — charge actions only
                                     --   soc_drift_kwh, soc_drift_limit_kwh             — charge/discharge only
+                                    --   grid_kwh                                       — discharge only: the plan's
+                                    --                                                    net grid exchange for the
+                                    --                                                    slot (+import/−export)
                                     -- Deliberately never parsed FROM `detail` (regex on a log sentence
                                     -- is fragile) — both are built independently from the same source
                                     -- numbers in dispatch_loop.py.
@@ -142,9 +145,9 @@ CREATE INDEX IF NOT EXISTS idx_control_ts ON control_actions(timestamp);
 -- regret_intraday_ore (same start AND end SoC as reality — pure within-day timing) +
 -- regret_carry_ore (cost of handing D+1 the wrong SoC) = regret_ore.
 -- Headline numbers are the status='ok' rows only: 'shadow' = armed < 90% of the day (the bar
--- is 90%, not ~100%: the dispatch loop is structurally planless/silent for the first 1-2 h
--- after every Stockholm midnight, so genuinely armed days measure 0.92-0.97 — that lull's
--- cost is deliberately part of regret), 'degraded' = reading coverage < 95% or a midnight SoC
+-- is 90%, not ~100%: without solinteg-telemetry.timer's 00:03 Stockholm entry the dispatch
+-- loop is structurally planless/silent for the first 1-2 h after every Stockholm midnight —
+-- genuinely armed days then measure only 0.92-0.97; with it they score ~0.99), 'degraded' = reading coverage < 95% or a midnight SoC
 -- anchor interpolated across > 30 min, 'skipped_no_readings' = unscorable.
 -- All money in öre; kr = öre / 100.
 CREATE TABLE IF NOT EXISTS oracle_daily (

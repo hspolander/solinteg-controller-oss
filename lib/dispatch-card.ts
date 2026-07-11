@@ -102,8 +102,17 @@ function buildReason(a: LatestControlAction): { reason: string; warning?: string
       };
     }
     if (a.plannedAction === 'discharge') {
-      const priceNote = d.sellOre != null ? ` för ${d.sellOre.toFixed(1)} öre/kWh` : '';
-      return { reason: `Laddar ur ${powerKw.toFixed(1)} kW — säljer till nätet${priceNote}.` };
+      // The plan's net grid exchange decides the framing: net export means the discharge
+      // sells to the grid; otherwise it covers the house load (the common case), where the
+      // relevant price is the avoided buy, not the sell price. Rows written before
+      // grid_kwh existed have no figure — read those as self-use, the usual reality.
+      const selling = d.gridKwh != null && d.gridKwh < -0.1;
+      if (selling) {
+        const priceNote = d.sellOre != null ? ` för ${d.sellOre.toFixed(1)} öre/kWh` : '';
+        return { reason: `Laddar ur ${powerKw.toFixed(1)} kW — säljer till nätet${priceNote}.` };
+      }
+      const priceNote = d.buyOre != null ? ` (slipper köpa för ${d.buyOre.toFixed(1)} öre/kWh)` : '';
+      return { reason: `Laddar ur ${powerKw.toFixed(1)} kW — täcker husets förbrukning${priceNote}.` };
     }
     // idle
     if (a.detail && (a.detail.startsWith('no optimizer plan') || a.detail.startsWith('now falls outside'))) {

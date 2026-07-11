@@ -13,12 +13,21 @@ Run as a one-shot systemd timer (deploy/solinteg-healthcheck.timer), a few minut
 Alerts are de-duplicated via a small state file: each detected issue alerts once, then again
 only after HEALTHCHECK_ALERT_COOLDOWN_S if still unresolved (a persistent problem gets a
 periodic reminder, not a notification every run), plus a "resolved" notice once it clears.
+One-shot notices (state keys prefixed "oneshot:") are different: sent exactly once ever,
+never repeated, never "resolved" — for milestones rather than problems.
 
 Environment (beyond notify.py's own NTFY_*):
   TELEMETRY_DB_PATH             SQLite path (default /opt/solinteg/telemetry.db)
   HEALTHCHECK_STATE_PATH        dedup state (default /opt/solinteg/healthcheck-state.json)
   HEALTHCHECK_ALERT_COOLDOWN_S  minimum time between repeat alerts for the same issue
                                 (default 14400 = 4 h)
+  PLAN_GRACE_AFTER_MIDNIGHT_S   suppress the "no prices/plan today" checks this long after
+                                Stockholm midnight (default 1800) — the rows only exist once
+                                the first post-midnight render lands (solinteg-telemetry.timer
+                                runs a few minutes past midnight for exactly this)
+  ORACLE_REVIEW_MIN_DAYS        one-shot: send a single "oracle-review data is ready" notice
+                                once this many status='ok' oracle_daily rows exist
+                                (default 16; 0 disables)
   POLLER_STALE_S                readings table max age before flagging (default 300 — 10x
                                 the poller's 30 s interval)
   WEATHER_STALE_S               weather table max age before flagging (default 1800 — the
@@ -50,6 +59,12 @@ POLLER_STALE_S = int(os.environ.get("POLLER_STALE_S", "300"))
 WEATHER_STALE_S = int(os.environ.get("WEATHER_STALE_S", "1800"))
 CONTROL_ERROR_WINDOW_S = int(os.environ.get("CONTROL_ERROR_WINDOW_S", "900"))
 DISK_FREE_MIN_PCT = float(os.environ.get("DISK_FREE_MIN_PCT", "10"))
+PLAN_GRACE_AFTER_MIDNIGHT_S = int(os.environ.get("PLAN_GRACE_AFTER_MIDNIGHT_S", "1800"))
+ORACLE_REVIEW_MIN_DAYS = int(os.environ.get("ORACLE_REVIEW_MIN_DAYS", "16"))
+
+# State keys with this prefix are one-shot notices: sent once, then remembered forever —
+# excluded from both the cooldown re-alert path and the "resolved" sweep in main().
+ONESHOT_PREFIX = "oneshot:"
 
 UTC = timezone.utc
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
@@ -97,7 +112,15 @@ def check_weather_stale(con: sqlite3.Connection, now: datetime):
     return None
 
 
-def check_todays_plan(con: sqlite3.Connection, today: str):
+def check_todays_plan(con: sqlite3.Connection, today: str, now: datetime):
+    # Both rows only exist once the FIRST dashboard render after Stockholm midnight has
+    # logged the new day's snapshot + plan (solinteg-telemetry.timer runs a few minutes past
+    # midnight for exactly this). Until then their absence is scheduling, not failure — this
+    # alert used to false-fire around 00:05 depending on timer phase.
+    local = now.astimezone(STOCKHOLM)
+    seconds_into_day = local.hour * 3600 + local.minute * 60 + local.second
+    if seconds_into_day < PLAN_GRACE_AFTER_MIDNIGHT_S:
+        return None
     if safe_scalar(con, "SELECT 1 FROM price_snapshots WHERE date = ?", (today,)) is None:
         return ("no_price_snapshot_today", notify.PRIORITY_HIGH,
                 "Solinteg: no prices logged today",
@@ -146,12 +169,29 @@ def check_disk_space(path: str = "/"):
     return None
 
 
+def oracle_review_ready(con: sqlite3.Connection):
+    """One-shot notice: judging the oracle's regret numbers needs a body of scored days
+    before medians mean anything — page once when that body exists, instead of relying on
+    someone remembering to check. status='ok' only: shadow/degraded days don't measure
+    live decision quality. Returns (key, title, message) or None."""
+    if ORACLE_REVIEW_MIN_DAYS <= 0:
+        return None
+    n = safe_scalar(con, "SELECT COUNT(*) FROM oracle_daily WHERE status = 'ok'")
+    if n is None or n < ORACLE_REVIEW_MIN_DAYS:
+        return None
+    return (ONESHOT_PREFIX + "oracle_review_ready",
+            "Solinteg: oracle review data is ready",
+            f"oracle_daily now has {n} fully-armed ('ok') days — enough to judge median "
+            f"regret rather than single-day noise. Worth reviewing how dispatch is doing "
+            f"against the hindsight oracle.")
+
+
 def run_checks(con: sqlite3.Connection, now: datetime):
     today = stockholm_date(now)
     checks = [
         check_poller_stale(con, now),
         check_weather_stale(con, now),
-        check_todays_plan(con, today),
+        check_todays_plan(con, today, now),
         check_control_errors(con, now),
         check_disk_space(),
     ]
@@ -186,6 +226,7 @@ def main() -> int:
 
     try:
         issues = run_checks(con, now)
+        oneshots = [n for n in (oracle_review_ready(con),) if n is not None]
     finally:
         con.close()
 
@@ -204,8 +245,20 @@ def main() -> int:
         else:
             log.info("%s still present (suppressed, last alerted %s)", key, prior["last_alert"])
 
-    # Anything previously flagged but no longer present has resolved.
+    # One-shot notices: sent at most once ever. Only recorded on a CONFIRMED publish, so a
+    # failed send retries on the next run instead of silently marking itself done.
+    for key, title, message in oneshots:
+        if key not in state:
+            if notify.send(title, message, priority=notify.PRIORITY_DEFAULT,
+                           tags=["chart_with_upwards_trend"]):
+                state[key] = {"sent": now.isoformat()}
+                log.info("one-shot notice sent: %s", key)
+
+    # Anything previously flagged but no longer present has resolved. One-shot keys are
+    # milestones, not issues — they never "resolve" and must survive here forever.
     for key in list(state.keys()):
+        if key.startswith(ONESHOT_PREFIX):
+            continue
         if key not in seen_keys:
             notify.send(f"Solinteg: resolved — {key}", "This issue is no longer detected.",
                         priority=notify.PRIORITY_DEFAULT, tags=["white_check_mark"])

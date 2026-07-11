@@ -8,6 +8,7 @@ import {
   buildTimeIndex,
   buildXTicks,
   computePriceMax,
+  computePriceMin,
   computeSolarMax,
 } from '@/lib/chart-utils';
 import type { PriceData } from '@/lib/prices';
@@ -53,6 +54,7 @@ export function useChartData(
   const geometry = useMemo(() => buildChartGeometry(1040, 410), []);
   const timeIndex = useMemo(() => buildTimeIndex(chartData), [chartData]);
   const priceMax = useMemo(() => computePriceMax(chartData), [chartData]);
+  const priceMin = useMemo(() => computePriceMin(chartData), [chartData]);
   const solarMax = useMemo(() => computeSolarMax(chartData), [chartData]);
 
   return {
@@ -66,6 +68,7 @@ export function useChartData(
     geometry,
     timeIndex,
     priceMax,
+    priceMin,
     solarMax,
   };
 }

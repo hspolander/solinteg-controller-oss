@@ -266,6 +266,7 @@ export interface ControlActionDetail {
   solarShortfallLimitKwh?: number;
   socDriftKwh?: number;
   socDriftLimitKwh?: number;
+  gridKwh?: number; // discharge only: the plan's net grid exchange, +import/−export
   nextAction?: 'charge' | 'discharge';
   nextActionTime?: string;
 }
@@ -303,6 +304,7 @@ function parseDetailJson(raw: string | null): ControlActionDetail | null {
     if (typeof parsed.solar_shortfall_limit_kwh === 'number') detail.solarShortfallLimitKwh = parsed.solar_shortfall_limit_kwh;
     if (typeof parsed.soc_drift_kwh === 'number') detail.socDriftKwh = parsed.soc_drift_kwh;
     if (typeof parsed.soc_drift_limit_kwh === 'number') detail.socDriftLimitKwh = parsed.soc_drift_limit_kwh;
+    if (typeof parsed.grid_kwh === 'number') detail.gridKwh = parsed.grid_kwh;
     if (parsed.next_action === 'charge' || parsed.next_action === 'discharge') detail.nextAction = parsed.next_action;
     if (typeof parsed.next_action_time === 'string') detail.nextActionTime = parsed.next_action_time;
     return detail;

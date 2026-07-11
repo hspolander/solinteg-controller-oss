@@ -86,6 +86,12 @@ SAFETY:
     funds mostly from solar are skipped conservatively. Funding numbers are logged in
     `detail` on EVERY forced-charge decision (like the SoC-divergence numbers) so the
     threshold can be tuned from real control_actions data.
+  - An idle decision only writes the auto/General register when the loop's own last
+    confirmed write left something else set (loop_in_auto, main loop) — idle slot
+    boundaries still log their control_actions row (armed-coverage measurement reads row
+    cadence as "loop alive", see lib/oracle.ts's ARMED_SEGMENT_CAP_MS), but no longer
+    re-poke General mode every 15 min, which would blindly overwrite a mode the owner set
+    by hand via the inverter's own app.
   - SIGTERM/SIGINT and normal shutdown always revert to auto.
   - Every loop iteration — idle or not, successful or not — touches a heartbeat file
     (DISPATCH_HEARTBEAT_PATH). This is deliberately NOT the same signal as a fresh
@@ -351,6 +357,8 @@ def decide(con: sqlite3.Connection, now: datetime):
 
     numbers is a dict of the exact figures behind this decision — buy_ore/sell_ore for
     the current slot; solar_shortfall_kwh/solar_shortfall_limit_kwh for a charge action;
+    grid_kwh (the plan's net grid exchange, +import/−export) for a discharge action, so
+    the dashboard can tell a grid sale from covering the house load;
     next_action/next_action_time (the next non-idle slot's action + startTime) for an
     idle action, so the dashboard can say e.g. "next charge at 14:45" — for the
     dashboard's Dispatch card (see log_action's detail_json). Always a dict, never None;
@@ -390,6 +398,14 @@ def decide(con: sqlite3.Connection, now: datetime):
                 numbers["next_action"] = future["action"]
                 numbers["next_action_time"] = future["startTime"]
                 break
+
+    if action == "discharge":
+        # The plan's net grid exchange for this slot (+import/−export, DispatchSlot.gridKwh)
+        # — lets the dashboard say whether this discharge sells to the grid or just covers
+        # the house load, instead of labelling every discharge a grid sale.
+        grid_kwh = dispatch[idx].get("gridKwh")
+        if grid_kwh is not None:
+            numbers["grid_kwh"] = round(float(grid_kwh), 3)
 
     solar_skip, detail = False, ""
     if action == "charge":
@@ -451,6 +467,13 @@ def main() -> None:
                      "Safe for shadow-mode validation against the live plan.")
 
     last_target = None  # (slot_time, effective_action, effective_power) — post-guard, as applied
+    # True when the loop's own last confirmed write/revert left the inverter in auto (or an
+    # idle decision needed no write because of this flag). Gates idle register writes: an
+    # idle decision while this is True logs its control_actions row but writes nothing, so
+    # a mode the owner set by hand is never stomped by idle slot boundaries. Starts False
+    # (inverter state unknown) so the first idle decision after a restart still writes auto
+    # once — that's the self-heal for a setpoint a crashed prior instance left forced.
+    loop_in_auto = False
     last_write_monotonic = 0.0
     # Set the moment decide() fails and we've reverted for it; cleared the moment decide()
     # succeeds again. Without this, a PERSISTENT decide() failure (e.g. a corrupt
@@ -501,7 +524,7 @@ def main() -> None:
             needs_apply = target != last_target or (due_for_reassert and effective_action != "idle")
 
             if needs_apply:
-                inv = Inverter()
+                inv = None  # opened lazily — an idle→idle slot boundary needs no connection
                 applied_action, applied_power = action, power_w
                 outcome = "applied"
                 try:
@@ -515,6 +538,7 @@ def main() -> None:
                         applied_action, applied_power = "idle", 0
                         outcome = "skipped_solar_shortfall"
                     elif action != "idle" and expected_soc_kwh is not None:
+                        inv = Inverter()
                         actual_soc_kwh = inv.soc_pct() / 100 * BATTERY_KWH
                         drift = abs(actual_soc_kwh - expected_soc_kwh)
                         # Recorded on EVERY charge/discharge decision, not just ones that trip
@@ -537,7 +561,18 @@ def main() -> None:
                             )
                             applied_action, applied_power = "idle", 0
                             outcome = "skipped_divergence"
-                    apply_target(inv, applied_action, applied_power)
+                    # Never stomp an owner-set mode: when the loop's own last write already
+                    # left the inverter in auto, an idle decision (planned, or a guard demotion
+                    # above) needs no register write — re-poking General mode at every idle
+                    # slot boundary would blindly overwrite a mode set by hand via the
+                    # inverter's app. The row below is STILL logged: it carries the skip
+                    # outcomes, and armed-coverage measurement reads row cadence as "loop
+                    # alive" (silence > ARMED_SEGMENT_CAP_MS counts as down — lib/oracle.ts).
+                    if not (applied_action == "idle" and loop_in_auto):
+                        if inv is None:
+                            inv = Inverter()
+                        apply_target(inv, applied_action, applied_power)
+                    loop_in_auto = applied_action == "idle"
                     log_action(con, slot_time, applied_action, applied_power, outcome, detail, detail_json=numbers)
                     log.info("slot=%s action=%s power=%dW armed=%s -> %s%s",
                               slot_time, applied_action, applied_power, ARMED, outcome,
@@ -548,17 +583,22 @@ def main() -> None:
                     # Revert first, log second — a DB error in log_action must never skip
                     # the fail-safe (telemetry.db is shared WAL, contention is realistic).
                     try:
+                        if inv is None:
+                            inv = Inverter()
                         return_to_auto(inv)
                         outcome, detail = "error_reverted", str(exc)
+                        loop_in_auto = True
                     except Exception as exc2:  # noqa: BLE001
                         log.error("fail-safe return_to_auto also failed: %s", exc2)
                         outcome, detail = "error_revert_failed", f"{exc} | revert also failed: {exc2}"
+                        loop_in_auto = False  # inverter state unconfirmed — next idle must write
                     try:
                         log_action(con, slot_time, applied_action, applied_power, outcome, detail, detail_json=numbers)
                     except Exception as exc3:  # noqa: BLE001
                         log.error("log_action failed after apply error: %s", exc3)
                 finally:
-                    inv.close()
+                    if inv is not None:
+                        inv.close()
                 if outcome == "error_revert_failed":
                     # Both the apply AND the fail-safe revert failed — the inverter
                     # may still be running the PREVIOUS slot's forced setpoint.

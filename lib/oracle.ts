@@ -63,12 +63,14 @@ const MIN_READING_COVERAGE = 0.95;
  *  than this means the loop was down ⇒ counted NOT armed. Callers should fetch events from
  *  one cap-length BEFORE the window so a pre-midnight row covers the day's first minutes. */
 export const ARMED_SEGMENT_CAP_MS = 20 * 60_000;
-/** Armed-coverage floor for status 'ok'. Not 0.999: measured armed days score 0.92–0.97
- *  because the dispatch loop is structurally planless (and silent — it logs nothing while it
- *  has no plan for the new day) for the first 1–2 h after EVERY Stockholm midnight, until the
- *  next top-of-hour telemetry render produces the new day's optimizer run. That lull is part
- *  of the pipeline being scored — its cost belongs INSIDE regret, not in a reason to exclude
- *  the day. This floor only filters genuinely disarmed/shadow days. */
+/** Armed-coverage floor for status 'ok'. Not 0.999: without solinteg-telemetry.timer's 00:03
+ *  Stockholm entry the dispatch loop is structurally planless (and silent — it logs nothing
+ *  while it has no plan for the new day) for the first 1–2 h after EVERY Stockholm midnight,
+ *  until the next top-of-hour telemetry render produces the new day's optimizer run — armed
+ *  days then measure only 0.92–0.97. That lull is part of the pipeline being scored — its cost
+ *  belongs INSIDE regret, not a reason to exclude the day, and the floor must keep admitting
+ *  such days. With the midnight entry armed days score ~0.99; the floor only filters genuinely
+ *  disarmed/shadow days. */
 const FULLY_ARMED = 0.9;
 /** A midnight SoC interpolated across a reading gap wider than this can't anchor the day. */
 const SOC_BOUNDARY_MAX_SPAN_MS = 30 * 60_000;

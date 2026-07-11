@@ -5,6 +5,12 @@ Description=Hourly solinteg telemetry capture
 # Top of every hour. Cheap (a localhost render), and captures the post-13:00
 # day-ahead price release plus how the plan shifts through the day.
 OnCalendar=hourly
+# Plus a few minutes past STOCKHOLM midnight (explicit timezone — the NUC's system clock
+# may not be Stockholm): the render is what produces the new day's price snapshot +
+# optimizer plan, and without this entry the dispatch loop sits planless (safely in auto,
+# but silent and unoptimized) for up to an hour into every new day — the "midnight lull"
+# visible as reduced armed_fraction in oracle_daily and priced into its regret.
+OnCalendar=*-*-* 00:03:00 Europe/Stockholm
 # If the NUC was powered off at a scheduled time, run once on next boot to catch up.
 Persistent=true
 RandomizedDelaySec=60

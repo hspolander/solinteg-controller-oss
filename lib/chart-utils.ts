@@ -208,6 +208,15 @@ export function computePriceMax(chartData: ChartPoint[]): number {
   return Math.max(100, Math.ceil((max + 10) / 20) * 20);
 }
 
+/** Real-data-derived price axis min (öre/kWh): 0 on a normal day, but a negative round number
+ *  (with headroom, mirroring computePriceMax) when any price dips below zero — negative spot
+ *  prices are real on sunny/windy days, and a 0-floored axis would draw them outside the plot. */
+export function computePriceMin(chartData: ChartPoint[]): number {
+  const min = chartData.reduce((m, d) => Math.min(m, d.buy, d.sell), 0);
+  if (min >= 0) return 0; // headroom only once something actually dips below zero
+  return Math.floor((min - 10) / 20) * 20;
+}
+
 /** Real-data-derived solar axis max (kWh/slot): headroom above the highest slot, floored so a
  *  near-zero solar day (winter) still gets a sane axis. */
 export function computeSolarMax(chartData: ChartPoint[]): number {
@@ -215,8 +224,10 @@ export function computeSolarMax(chartData: ChartPoint[]): number {
   return Math.max(0.5, max * 1.15);
 }
 
-export function priceYScale(value: number, max: number, geometry: ChartGeometry): number {
-  return geometry.padT + (1 - value / max) * geometry.plotH;
+/** min defaults to 0 (the everyday case); pass computePriceMin's value so days with negative
+ *  prices keep every point inside the plot instead of dropping below the baseline. */
+export function priceYScale(value: number, max: number, geometry: ChartGeometry, min = 0): number {
+  return geometry.padT + (1 - (value - min) / (max - min)) * geometry.plotH;
 }
 
 /** Battery SoC is always shown on a fixed 0–100% scale. */
