@@ -4,6 +4,7 @@ import {
   avgDailyConsumptionByMonth,
   hddNormalByMonth,
   HDD_T_BASE_C,
+  hourShareByMonth,
   LOAD_SLOPE_KWH_PER_HDD,
 } from '../consumption-data';
 
@@ -57,20 +58,60 @@ describe('dailyLoadKwh', () => {
   });
 });
 
+describe('hourShareByMonth', () => {
+  it('has 12 months × 24 hours, each row summing to 1', () => {
+    expect(hourShareByMonth).toHaveLength(12);
+    for (const row of hourShareByMonth) {
+      expect(row).toHaveLength(24);
+      expect(row.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 3);
+      for (const v of row) expect(v).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('reflects the measured winter shape: midday trough below the morning/evening peaks', () => {
+    // Only valid for this installation's measured profile (heat-pump household); a site
+    // regenerating its own hourShareByMonth may have a different shape — the invariant
+    // that matters for the formula is the sums-to-1 test above.
+    const jan = hourShareByMonth[0];
+    expect(jan[12]).toBeLessThan(jan[7]); // midday < morning peak
+    expect(jan[12]).toBeLessThan(jan[17]); // midday < evening peak
+  });
+});
+
 describe('slotConsumptionKwh', () => {
-  it('spreads the daily load uniformly across 96 slots', () => {
-    // 0.7°C is Jan's month-normal temp (adjustment cancels), so this is just the baseline/96.
+  it("distributes the daily load by the month's measured hour share, quartered per slot", () => {
+    // 0.7°C is Jan's month-normal temp (adjustment cancels), so the day total is the baseline.
     const v = slotConsumptionKwh('2026-01-15T12:00:00', { '2026-01-15': 0.7 });
-    expect(v).toBeCloseTo(avgDailyConsumptionByMonth[0] / 96, 4);
+    expect(v).toBeCloseTo((avgDailyConsumptionByMonth[0] * hourShareByMonth[0][12]) / 4, 4);
   });
 
-  it('falls back to the baseline when the date is missing from the temp map', () => {
+  it('sums back to the daily total across all 96 slots of a normal day', () => {
+    let sum = 0;
+    for (let h = 0; h < 24; h++) {
+      for (const mm of ['00', '15', '30', '45']) {
+        sum += slotConsumptionKwh(`2026-01-15T${String(h).padStart(2, '0')}:${mm}:00`, {
+          '2026-01-15': 0.7,
+        });
+      }
+    }
+    // precision 1 (±0.05 kWh): the committed shares are rounded to 4 decimals, so a row
+    // sums to 1±0.001 and the day total inherits that rounding, not a formula error.
+    expect(sum).toBeCloseTo(avgDailyConsumptionByMonth[0], 1);
+  });
+
+  it('gives all four slots of an hour the same value', () => {
+    const at = (mm: string) => slotConsumptionKwh(`2026-07-15T18:${mm}:00`, null);
+    expect(at('15')).toBeCloseTo(at('00'), 10);
+    expect(at('45')).toBeCloseTo(at('00'), 10);
+  });
+
+  it('falls back to the baseline day total when the date is missing from the temp map', () => {
     const v = slotConsumptionKwh('2026-01-15T12:00:00', { '2026-02-01': 5 });
-    expect(v).toBeCloseTo(avgDailyConsumptionByMonth[0] / 96, 4);
+    expect(v).toBeCloseTo((avgDailyConsumptionByMonth[0] * hourShareByMonth[0][12]) / 4, 4);
   });
 
-  it('falls back to the baseline when no temp map is given', () => {
+  it('falls back to the baseline day total when no temp map is given', () => {
     const v = slotConsumptionKwh('2026-07-15T00:00:00', null);
-    expect(v).toBeCloseTo(avgDailyConsumptionByMonth[6] / 96, 4);
+    expect(v).toBeCloseTo((avgDailyConsumptionByMonth[6] * hourShareByMonth[6][0]) / 4, 4);
   });
 });

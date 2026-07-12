@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildSolarProfiles, buildOptimizerSlots } from '../pipeline';
 import { SKATT_OVERFÖRING } from '../constants';
-import { avgDailyConsumptionByMonth } from '../consumption-data';
+import { avgDailyConsumptionByMonth, hourShareByMonth } from '../consumption-data';
 import type { PriceData } from '../prices';
 
 function makeData(overrides: Partial<PriceData> = {}): PriceData {
@@ -101,16 +101,17 @@ describe('buildOptimizerSlots', () => {
   it('populates consumptionKwh from the weather-aware load model', () => {
     const data = makeData(); // June
     // At the month-normal HDD (June hddNormal 0.2 → today HDD 0.2 at 12.8 °C) the
-    // adjustment cancels, so the daily baseline just spreads over 96 slots.
+    // adjustment cancels, so the daily baseline distributes by the measured hour shares
+    // (slot 0 starts 12:00 → June's hour-12 share, quartered per 15-min slot).
     const slots = buildOptimizerSlots(data, null, buildSolarProfiles(data), { '2026-06-28': 12.8 });
     expect(slots[0].consumptionKwh).toBeGreaterThan(0);
-    expect(slots[0].consumptionKwh).toBeCloseTo(avgDailyConsumptionByMonth[5] / 96, 3);
+    expect(slots[0].consumptionKwh).toBeCloseTo((avgDailyConsumptionByMonth[5] * hourShareByMonth[5][12]) / 4, 3);
   });
 
   it('falls back to the baseline load when no temperature map is provided', () => {
     const data = makeData();
     const slots = buildOptimizerSlots(data, null, buildSolarProfiles(data));
-    expect(slots[0].consumptionKwh).toBeCloseTo(avgDailyConsumptionByMonth[5] / 96, 2);
+    expect(slots[0].consumptionKwh).toBeCloseTo((avgDailyConsumptionByMonth[5] * hourShareByMonth[5][12]) / 4, 2);
   });
 
   // ── Provenance tags (for telemetry: forecast-vs-actual validation needs to tell a real

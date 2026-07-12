@@ -20,30 +20,45 @@ const DATA_DIR = path.resolve(__dirname, '..', 'solar-data');
 const LAT = 57.64;
 const LON = 11.78;
 
-// ── 1. Read all plant reports → date → daily total consumption (kWh) ──────────
-// CSV columns: Date | Daily PV Yield | Daily inverter output | Daily exported | Daily consumption | Daily imported
-function readReport(file) {
+// ── 1. Read the daily-consumption series ──────────────────────────────────────
+// Preferred source: solar-data/consumption-daily-corrected.csv (Date | consumption),
+// built by scripts/build-corrected-consumption.py — the raw plant reports' first winter
+// is physically impossible (old inverter meter misconfig, found 2026-07-11 by
+// cross-checking against the Ellevio billing meter) and they miss May-Nov 2022 entirely.
+// Fallback for sites without a corrected series: every solar-data/*.csv in the plant-report
+// layout (Date | PV Yield | inverter output | exported | consumption | imported).
+function readReport(file, consumptionCol) {
   const out = [];
   for (const line of fs.readFileSync(file, 'utf-8').split(/\r?\n/)) {
     const r = line.split(',');
     const date = r[0];
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue; // skips header row and blank lines
-    const consumption = parseFloat(r[4]);
+    const consumption = parseFloat(r[consumptionCol]);
     if (!isFinite(consumption)) continue;
     out.push({ date, consumption });
   }
   return out;
 }
 
-const files = fs.readdirSync(DATA_DIR).filter((f) => f.toLowerCase().endsWith('.csv'));
+const CORRECTED = path.join(DATA_DIR, 'consumption-daily-corrected.csv');
 const byDate = new Map(); // date → consumption (last file wins; dedupes the 2023-11-1 duplicate)
-for (const f of files) {
-  for (const { date, consumption } of readReport(path.join(DATA_DIR, f))) {
-    byDate.set(date, consumption);
+let sourceNote;
+if (fs.existsSync(CORRECTED)) {
+  for (const { date, consumption } of readReport(CORRECTED, 1)) byDate.set(date, consumption);
+  sourceNote = 'corrected series (Ellevio-validated)';
+} else {
+  const files = fs
+    .readdirSync(DATA_DIR)
+    .filter((f) => f.toLowerCase().endsWith('.csv') && !f.startsWith('consumption-daily'));
+  for (const f of files) {
+    for (const { date, consumption } of readReport(path.join(DATA_DIR, f), 4)) {
+      byDate.set(date, consumption);
+    }
   }
+  sourceNote = `${files.length} raw plant reports (build the corrected series if you can — see header)`;
 }
 const dates = [...byDate.keys()].sort();
-console.log(`Read ${files.length} reports → ${dates.length} unique days (${dates[0]} .. ${dates.at(-1)})`);
+console.log(`Read ${sourceNote} → ${dates.length} unique days (${dates[0]} .. ${dates.at(-1)})`);
 
 // ── 2. Daily mean temperature from Open-Meteo Archive ─────────────────────────
 const url =

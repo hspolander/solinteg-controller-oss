@@ -2,6 +2,7 @@ import {
   avgDailyConsumptionByMonth,
   hddNormalByMonth,
   HDD_T_BASE_C,
+  hourShareByMonth,
   LOAD_SLOPE_KWH_PER_HDD,
 } from './consumption-data';
 
@@ -33,13 +34,17 @@ export function dailyLoadKwh(month: number, dailyMeanTemp: number | null | undef
 /**
  * Expected household consumption for one 15-min slot (kWh).
  *
- * The daily total is spread uniformly across the 96 slots. We deliberately do
- * NOT impose an intraday shape: the only available hourly series is grid import,
- * whose shape is dominated by a night-tariff timer (hot-water / scheduled battery
- * charging) rather than genuine load — exactly the behaviour the optimizer is
- * meant to replace. A uniform split keeps the weather-aware daily energy honest
- * without baking in that artefact. Replace with a measured total-load profile if
- * one becomes available.
+ * The daily total is distributed by the measured hour-of-day shape
+ * (hourShareByMonth — true billing-meter load from each month's PV/battery-clean
+ * window, added 2026-07-11; each of an hour's four slots gets a quarter of that
+ * hour's share). This replaced a uniform 1/96 split, which under-allocated winter
+ * load ~30-40% at exactly the morning/evening price peaks. The pre-2026-07 concern
+ * that hourly import was distorted by a night-tariff timer applied to a different,
+ * inverter-side series — the DSO meter history this profile is built from measures
+ * the whole house.
+ *
+ * On DST-transition days the 92/100 real slots make the shares sum to ≈±1 h/24 of
+ * a day rather than exactly 1 — same accepted noise as slotSolarKwh's fallback.
  *
  * @param startTime ISO-like local timestamp "YYYY-MM-DDTHH:MM:SS"
  * @param tempByDate date → forecast daily mean temperature (°C)
@@ -50,6 +55,8 @@ export function slotConsumptionKwh(
 ): number {
   const date = startTime.slice(0, 10);
   const month = parseInt(startTime.slice(5, 7), 10);
+  const hour = parseInt(startTime.slice(11, 13), 10);
   const temp = tempByDate?.[date] ?? null;
-  return dailyLoadKwh(month, temp) / 96;
+  const share = hourShareByMonth[month - 1]?.[hour] ?? 1 / 24;
+  return (dailyLoadKwh(month, temp) * share) / 4;
 }
