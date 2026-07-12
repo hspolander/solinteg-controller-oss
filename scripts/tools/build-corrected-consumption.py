@@ -20,7 +20,7 @@ Rules, per day:
   after 2026-01-19          excluded — battery era (hybrid inverter night-charging makes
                             import ≠ load, and the old plant report ends there anyway).
 
-Usage: python scripts/build-corrected-consumption.py
+Usage: python scripts/tools/build-corrected-consumption.py
 """
 import csv
 import json
@@ -28,7 +28,7 @@ from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 ELLEVIO_DIR = ROOT / "solar-data" / "ellevio"
 PLANT_CSV = ROOT / "solar-data" / "Plant Reports 2022-2026.csv"
 OUT = ROOT / "solar-data" / "consumption-daily-corrected.csv"

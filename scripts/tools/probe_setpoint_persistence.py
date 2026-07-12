@@ -23,8 +23,13 @@ Prerequisites (same as the sign probe):
 """
 
 import logging
+import os
 import sys
 import time
+
+# inverter_control lives with the runtime services (scripts/services/); this file is a
+# manual diagnostic tool, so it reaches over explicitly.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "services"))
 
 from inverter_control import (
     ARMED,

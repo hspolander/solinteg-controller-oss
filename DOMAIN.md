@@ -87,18 +87,18 @@ MHT-20K-40, this owner's panels/contract). A new adopter needs to replace four g
 sources, in this order — each script depends on the previous one's output, so running them out
 of order produces numbers that don't mean anything:
 
-1. **`scripts/process-smhi-data.ts <csv>`** — historical hourly GHI for your own location →
+1. **`scripts/tools/process-smhi-data.ts <csv>`** — historical hourly GHI for your own location →
    `lib/irradiance-data.ts`'s `avgGhiByMonthHour`. Source doesn't have to be SMHI specifically;
    any station-level or reanalysis GHI archive with enough history works, as long as you can get
    it into the same CSV shape this script expects (see its own header comment).
-2. **`scripts/build-load-model.mjs`** — reads `solar-data/*.csv` (your own household's daily
+2. **`scripts/tools/build-load-model.mjs`** — reads `solar-data/*.csv` (your own household's daily
    consumption export) + Open-Meteo Archive temperatures for your coordinates → `HDD_T_BASE_C`,
    `LOAD_SLOPE_KWH_PER_HDD`, `hddNormalByMonth` in `lib/consumption-data.ts`. Needs network
    access (Open-Meteo Archive) and at least a full year of your own consumption history to fit
    anything meaningful — a partial year will fit, just less reliably.
-3. **`scripts/process-inverter-data.ts <csv>`** — the same (or a matching) CSV export →
+3. **`scripts/tools/process-inverter-data.ts <csv>`** — the same (or a matching) CSV export →
    `avgDailyProductionByMonth` / `avgDailyConsumptionByMonth` in `lib/consumption-data.ts`.
-4. **`scripts/build-solar-calibration.ts`** — run AFTER steps 1 and 3 both reflect your own
+4. **`scripts/tools/build-solar-calibration.ts`** — run AFTER steps 1 and 3 both reflect your own
    site: divides your measured production (step 3) by the raw GHI-model estimate (step 1, run
    through `lib/solar.ts`'s `ghiToKwh()` and your own `SOLAR_ARRAYS` in `lib/constants.ts`) →
    `solarCalibrationByMonth`.

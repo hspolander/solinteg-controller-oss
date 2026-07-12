@@ -16,7 +16,7 @@ import {
 // fallback default for when the env var is unset, and those two defaults can't be imported
 // across the TS/Python boundary to compare directly. This test is the guard against those two
 // defaults silently drifting apart.
-const scriptsDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
+const scriptsDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'services');
 
 function extractNumber(file: string, pattern: RegExp): number {
   const text = readFileSync(join(scriptsDir, file), 'utf-8');

@@ -39,7 +39,7 @@ specific reasons.
   solar-aware charging, cheapest-hour buying) and `lib/__tests__/optimizer.test.ts` for the tests
   that pin them — treat those tests as the spec if you touch this file.
 - **A Next.js dashboard** (`app/`) — live inverter state, the price/dispatch chart, earnings.
-- **A Python control loop** (`scripts/dispatch_loop.py` + `scripts/inverter_control.py`) —
+- **A Python control loop** (`scripts/services/dispatch_loop.py` + `scripts/services/inverter_control.py`) —
   applies the optimizer's plan to the real inverter via Modbus, gated behind an explicit
   `SOLINTEG_CONTROL_ARMED` safety flag (unset by default: shadow mode, computes and logs real
   decisions without ever touching the inverter).

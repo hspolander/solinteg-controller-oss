@@ -16,7 +16,7 @@ build-load-model.mjs's structure):
 
 Prints R²/RMSE overall and for Nov-Feb specifically — the months where it matters.
 
-Usage: python scripts/probe-wind-load.py   (network: Open-Meteo Archive)
+Usage: python scripts/tools/probe-wind-load.py   (network: Open-Meteo Archive)
 """
 import csv
 import json
@@ -25,7 +25,7 @@ from collections import defaultdict
 from math import sqrt
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 SERIES = ROOT / "solar-data" / "consumption-daily-corrected.csv"
 LAT, LON = 57.64, 11.78  # keep in sync with lib/constants.ts
 WINTER = {11, 12, 1, 2}

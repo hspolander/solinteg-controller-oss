@@ -34,6 +34,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import common  # sibling module (scripts/services/) — script dir is sys.path[0]
+
 APP_KEY = os.environ.get("ECOWITT_APPLICATION_KEY", "")
 API_KEY = os.environ.get("ECOWITT_API_KEY", "")
 MAC = os.environ.get("ECOWITT_MAC", "")
@@ -50,10 +52,7 @@ log = logging.getLogger(__name__)
 
 
 def init_db(path: Path) -> sqlite3.Connection:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(path), check_same_thread=False)
-    con.execute("PRAGMA journal_mode=WAL")   # shared with inverter poller + web app
-    con.execute("PRAGMA busy_timeout=5000")
+    con = common.telemetry_connect(path)
     # Canonical schema for all telemetry.db tables: deploy/schema.sql — keep this in sync.
     con.execute("""
         CREATE TABLE IF NOT EXISTS weather (

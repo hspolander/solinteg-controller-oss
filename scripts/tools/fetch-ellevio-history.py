@@ -10,7 +10,7 @@ own within hours). Capture it via DevTools -> Network -> the consumption XHR ->
 "Copy as cURL" and extract the cookie header value.
 
 Usage:
-  python scripts/fetch-ellevio-history.py --site <deliverySiteId> \
+  python scripts/tools/fetch-ellevio-history.py --site <deliverySiteId> \
       --from 2023-09-20 --to 2026-07-10 [--resolution QuarterHourly] \
       [--chunk-days 7] [--out solar-data/ellevio] [--cookie-file ellevio-cookie.txt]
 

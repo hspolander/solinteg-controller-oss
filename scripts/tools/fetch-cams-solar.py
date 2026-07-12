@@ -17,7 +17,7 @@ Output is the same `timestamp,solar_wm2` CSV shape compare-ecowitt-smhi.mjs's --
 already produces, so the two scripts' output is directly comparable.
 
 Usage:
-  python scripts/fetch-cams-solar.py --email you@example.com --start 2026-02-22 \
+  python scripts/tools/fetch-cams-solar.py --email you@example.com --start 2026-02-22 \
     --end 2026-07-02 --out solar-data/cams_archipelago.csv
 
 Requires: pip install pvlib

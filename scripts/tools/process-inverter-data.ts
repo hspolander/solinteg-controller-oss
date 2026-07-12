@@ -2,7 +2,7 @@
 //   1. A human-readable monthly summary table
 //   2. TypeScript-ready constants to paste into lib/consumption-data.ts
 //
-// Usage: npx tsx scripts/process-inverter-data.ts "path/to/Plant Reports 2022-2026.csv"
+// Usage: npx tsx scripts/tools/process-inverter-data.ts "path/to/Plant Reports 2022-2026.csv"
 //
 // Expected CSV columns (comma-separated, no quotes):
 //   Date, Daily PV Yield(kWh), Daily inverter output(kWh),
@@ -13,7 +13,7 @@ import * as path from 'node:path';
 
 const file = process.argv[2];
 if (!file) {
-  console.error('Usage: npx tsx scripts/process-inverter-data.ts <csv-file>');
+  console.error('Usage: npx tsx scripts/tools/process-inverter-data.ts <csv-file>');
   process.exit(1);
 }
 

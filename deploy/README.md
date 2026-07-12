@@ -7,7 +7,7 @@ your own IPs/hostnames/device names throughout.
 
 ```
 ┌─ solinteg-poller.service ─┐   reads inverter over Modbus TCP every 30 s,
-│  scripts/modbus_poller.py │   writes /opt/solinteg/live.json
+│  scripts/services/modbus_poller.py │   writes /opt/solinteg/live.json
 └───────────┬───────────────┘
             │ live.json
             ▼
@@ -109,6 +109,28 @@ journalctl -u solinteg-weather -f     # watch: solar=... W/m2  temp=... C  wind=
 Uses the Ecowitt cloud API (the gateway isn't reachable on the wired subnet). Stdlib-only,
 so no extra pip installs. Rows are keyed by station observation time and deduped.
 
+## 8b. Uponor Smatrix room-climate poller (optional)
+
+Logs per-room temperature, setpoint, humidity and demand state (actuator open = actively
+heating) from the Smatrix Pulse controller's local JNAP API into `room_climate` — a live
+call-for-heat signal collected ahead of any optimizer use (evidence first, wiring second).
+Requires the Pulse communication module (R-208); find its IP in the router UI and give it
+a DHCP reservation first.
+
+```bash
+sudo cp deploy/solinteg-uponor.service /etc/systemd/system/
+# set UPONOR_HOST in /opt/solinteg/solinteg.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now solinteg-uponor
+journalctl -u solinteg-uponor -f     # watch: N rooms, N in demand, temp ...
+```
+
+Commissioning check: `UPONOR_HOST=<ip> /opt/solinteg/app/.venv/bin/python \
+  /opt/solinteg/app/scripts/services/uponor_poller.py --once` prints every room — compare
+against the Smatrix Pulse app. Stdlib-only, no extra pip installs. NOTE: the JNAP API is
+write-capable with NO authentication (anyone on the LAN can change setpoints); the poller
+is strictly read-only — it only ever sends GetAttributes.
+
 ## 9. Alerting (watchdog, healthcheck, dead-man's switch)
 
 Three more timer-triggered services, none of them long-running:
@@ -159,12 +181,12 @@ The thresholds above are sane defaults — tune them from real data once you hav
 
 Passwordless sudo was deliberately removed on the reference deployment, so
 every `sudo -u solinteg sqlite3 ...` health check needs the login password typed in.
-`scripts/telemetry-ro.sh` is a narrow exception: a root-owned wrapper that only implements a
+`scripts/services/telemetry-ro.sh` is a narrow exception: a root-owned wrapper that only implements a
 few read-only shapes (a single validated `SELECT`, `journalctl` on an allowlisted `solinteg-*`
 unit, or reading the heartbeat file) — everything else it rejects. One-time setup:
 
 ```bash
-sudo cp scripts/telemetry-ro.sh /usr/local/bin/solinteg-telemetry-ro
+sudo cp scripts/services/telemetry-ro.sh /usr/local/bin/solinteg-telemetry-ro
 sudo chown root:root /usr/local/bin/solinteg-telemetry-ro
 sudo chmod 755 /usr/local/bin/solinteg-telemetry-ro
 
@@ -181,7 +203,7 @@ sudo solinteg-telemetry-ro logs solinteg-dispatch "-24 hours"
 sudo solinteg-telemetry-ro heartbeat
 ```
 
-If `scripts/telemetry-ro.sh` changes, re-copy it to `/usr/local/bin/solinteg-telemetry-ro` and
+If `scripts/services/telemetry-ro.sh` changes, re-copy it to `/usr/local/bin/solinteg-telemetry-ro` and
 re-apply the chown/chmod above — the sudoers rule points at that installed path, not the repo.
 
 ## 11. Remote access (Tailscale)
@@ -303,7 +325,7 @@ sudo apt install -y smartmontools
 grep -n "^DEVICESCAN" /etc/smartd.conf   # confirm the default DEVICESCAN + smartd-runner line
                                           # is present and uncommented; Ubuntu ships it enabled
                                           # by default, but verify rather than assume
-sudo install -m 755 scripts/smart-alert.sh /etc/smartmontools/run.d/10solinteg-ntfy
+sudo install -m 755 scripts/services/smart-alert.sh /etc/smartmontools/run.d/10solinteg-ntfy
 sudo systemctl enable --now smartd
 lsblk                                    # find your own disk's device name — NVMe drives show as
                                           # /dev/nvme0n1, SATA/SSD as /dev/sda, etc.
@@ -313,7 +335,7 @@ sudo smartctl -a /dev/nvme0n1 | grep -i "test_result\|health"  # check the resul
 ```
 
 **12f. Disk-space alert** - already wired into `solinteg-healthcheck.timer` (see
-`scripts/healthcheck.py`'s `check_disk_space`, added 2026-07-07) - no separate install step,
+`scripts/services/healthcheck.py`'s `check_disk_space`, added 2026-07-07) - no separate install step,
 it runs with the next healthcheck cycle. Alerts if free space on `/` drops below
 `DISK_FREE_MIN_PCT` (default 10%).
 
@@ -411,12 +433,12 @@ sudo systemctl restart solinteg-web solinteg-poller
 # If any deploy/*.service or *.timer changed, reinstall and reload them too:
 sudo cp deploy/solinteg-*.service deploy/solinteg-*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl restart solinteg-poller solinteg-web solinteg-weather solinteg-dispatch \
+sudo systemctl restart solinteg-poller solinteg-web solinteg-weather solinteg-uponor solinteg-dispatch \
         solinteg-watchdog
 
-# If scripts/telemetry-ro.sh changed (e.g. a new unit added to its ALLOWED_UNITS allowlist —
+# If scripts/services/telemetry-ro.sh changed (e.g. a new unit added to its ALLOWED_UNITS allowlist —
 # see §10), the installed wrapper is a copy, not a symlink, so it needs reinstalling too:
-sudo install -m 755 scripts/telemetry-ro.sh /usr/local/bin/solinteg-telemetry-ro
+sudo install -m 755 scripts/services/telemetry-ro.sh /usr/local/bin/solinteg-telemetry-ro
 ```
 
 `solinteg-watchdog` also opens its own Modbus connection (via `inverter_control.py` — see §13) to

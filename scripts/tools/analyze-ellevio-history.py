@@ -17,7 +17,7 @@ activity; in Nov-Feb Göteborg solar is 1-5 kWh/day so winter import ≈ load ev
 the PV install. The monthly table (1) is the evidence for that judgment, not an
 assumption — check it before trusting a season.
 
-Usage: python scripts/analyze-ellevio-history.py [--dir solar-data/ellevio] [--json-out profile.json]
+Usage: python scripts/tools/analyze-ellevio-history.py [--dir solar-data/ellevio] [--json-out profile.json]
 """
 import argparse
 import json

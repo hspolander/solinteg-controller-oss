@@ -7,7 +7,7 @@
 // Pulls real (non-forecast, non-climatological) hourly-ish data from both APIs
 // for the same UTC window, aligns to UTC hour, and reports the ratio by month.
 //
-// Usage:  node scripts/compare-ecowitt-smhi.mjs [startDate] [endDate] [--out-csv path.csv]
+// Usage:  node scripts/tools/compare-ecowitt-smhi.mjs [startDate] [endDate] [--out-csv path.csv]
 //   Dates are YYYY-MM-DD (UTC). Defaults: startDate = 2026-02-22 (earliest date
 //   SMHI's "latest-months" rolling window reliably returns), endDate = today.
 //   --out-csv also dumps our own station's raw fetched points as timestamp,solar_wm2

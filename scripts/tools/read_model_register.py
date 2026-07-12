@@ -10,10 +10,15 @@ still-open precondition in MODBUS.md's table ("Never read in any script").
 Pure read — no SOLINTEG_CONTROL_ARMED gate needed, no registers written.
 
 Usage:
-  SOLINTEG_HOST=192.168.1.50 python3 scripts/read_model_register.py
+  SOLINTEG_HOST=192.168.99.2 python3 scripts/tools/read_model_register.py
 """
 
+import os
 import sys
+
+# inverter_control lives with the runtime services (scripts/services/); this file is a
+# manual diagnostic tool, so it reaches over explicitly.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "services"))
 
 from inverter_control import Inverter, REG_WORK_MODE
 

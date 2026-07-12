@@ -4,11 +4,12 @@
 -- processes write it concurrently (WAL mode), each creating its own table(s) at startup with
 -- CREATE TABLE IF NOT EXISTS. Keep those inline definitions in sync with THIS file:
 --
---   readings         → scripts/modbus_poller.py   (inverter, every 30 s)
---   weather          → scripts/weather_poller.py  (Ecowitt cloud API, every 60 s)
+--   readings         → scripts/services/modbus_poller.py   (inverter, every 30 s)
+--   weather          → scripts/services/weather_poller.py  (Ecowitt cloud API, every 60 s)
+--   room_climate     → scripts/services/uponor_poller.py   (Uponor Smatrix JNAP, every 300 s)
 --   price_snapshots  → lib/telemetry.ts            (web app, per price fetch)
 --   optimizer_runs   → lib/telemetry.ts            (web app, per optimizer run)
---   control_actions  → scripts/dispatch_loop.py    (dispatch decisions, on slot change / reassert)
+--   control_actions  → scripts/services/dispatch_loop.py    (dispatch decisions, on slot change / reassert)
 --   oracle_daily     → lib/telemetry.ts            (web app, nightly via solinteg-oracle.timer)
 --
 -- WAL + a busy timeout are set by each writer so the concurrent access is safe.
@@ -54,6 +55,24 @@ CREATE TABLE IF NOT EXISTS weather (
     pressure_hpa  REAL,              -- relative
     rain_rate_mmh REAL,
     rain_day_mm   REAL
+);
+
+-- Per-room climate from the Uponor Smatrix Pulse underfloor-heating controller (local JNAP
+-- API, read-only). demand is the value that matters: actuator open = room actively calling
+-- for heat — collected ahead of any optimizer use (evidence first, wiring second).
+-- Temps arrive as deci-°F and are stored converted: °C = (raw − 320) / 18; the controller's
+-- invalid-sensor sentinel (raw ≥ 4508) and no-RH-sensor sentinel (0) are stored as NULL.
+CREATE TABLE IF NOT EXISTS room_climate (
+    timestamp     TEXT NOT NULL,      -- poll time (UTC ISO) — instantaneous state, no device time exists
+    thermostat    TEXT NOT NULL,      -- Uponor id 'C{controller}_T{thermostat}', e.g. 'C1_T1'
+    room_temp_c   REAL,               -- NULL = sensor invalid (controller sentinel)
+    setpoint_c    REAL,
+    rh_pct        REAL,               -- NULL = no humidity sensor
+    demand        INTEGER,            -- 1 = actuator open (room actively heating/cooling)
+    eco           INTEGER,            -- 1 = thermostat in ECO setback
+    sys_heat_cool INTEGER,            -- system-wide: 0 = heating, 1 = cooling
+    sys_away      INTEGER,            -- system-wide forced-ECO ("away") active
+    PRIMARY KEY (timestamp, thermostat)
 );
 
 -- The daily price curve the optimizer planned against. Upserted on date: the last write of the

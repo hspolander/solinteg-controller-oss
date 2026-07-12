@@ -7,7 +7,7 @@ Type=oneshot
 User=solinteg
 WorkingDirectory=/opt/solinteg/app
 EnvironmentFile=/opt/solinteg/solinteg.env
-ExecStart=/opt/solinteg/app/.venv/bin/python /opt/solinteg/app/scripts/healthcheck.py
+ExecStart=/opt/solinteg/app/.venv/bin/python /opt/solinteg/app/scripts/services/healthcheck.py
 # Sandbox: whole FS read-only except /opt/solinteg (dedup state file). Reads telemetry.db
 # read-only (see healthcheck.py) so it needs no write access there at all.
 NoNewPrivileges=true

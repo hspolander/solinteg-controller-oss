@@ -98,7 +98,7 @@ SAFETY:
     control_actions row: those are only written on an actual target change or the periodic
     reassert, so a long, healthy idle stretch can leave control_actions silent for hours by
     design (see the reassert comment above) — that silence must not look like a dead loop.
-    scripts/watchdog.py, a separate process, watches this file: if it goes stale while
+    scripts/services/watchdog.py, a separate process, watches this file: if it goes stale while
     armed, it forces the inverter back to auto itself, since a hard crash here (OOM kill,
     power loss) skips this script's own SIGTERM/SIGINT fail-safe entirely.
 
@@ -112,7 +112,7 @@ Environment variables (beyond inverter_control.py's own SOLINTEG_* / SOLINTEG_CO
   DISPATCH_SOLAR_SHORTFALL_KWH  extra grid kWh a forced charge may buy vs the plan before
                                 falling back to auto (default 0.5)
   INVERTER_DATA_PATH            the poller's live.json (default /opt/solinteg/live.json)
-  DISPATCH_HEARTBEAT_PATH       liveness file for scripts/watchdog.py (default
+  DISPATCH_HEARTBEAT_PATH       liveness file for scripts/services/watchdog.py (default
                                 /opt/solinteg/dispatch-heartbeat.json)
 """
 
@@ -126,6 +126,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import common  # sibling module (scripts/services/) — script dir is sys.path[0]
 from inverter_control import (
     ARMED,
     Inverter,
@@ -168,9 +169,7 @@ HEARTBEAT_PATH = os.environ.get("DISPATCH_HEARTBEAT_PATH", "/opt/solinteg/dispat
 
 
 def init_db(path: str) -> sqlite3.Connection:
-    con = sqlite3.connect(path, check_same_thread=False)
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA busy_timeout=5000")
+    con = common.telemetry_connect(path)
     # Canonical schema for all telemetry.db tables: deploy/schema.sql — keep this in sync.
     con.execute("""
         CREATE TABLE IF NOT EXISTS control_actions (

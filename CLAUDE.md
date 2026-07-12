@@ -149,11 +149,11 @@ process-smhi-data.ts → build-load-model.mjs → process-inverter-data.ts → b
 (each depends on the previous one's output; run in this order, not standalone).
 
 ```
-scripts/process-smhi-data.ts        station GHI CSV → lib/irradiance-data.ts's avgGhiByMonthHour
-scripts/process-inverter-data.ts   monthly production/consumption averages from a combined CSV
-scripts/build-load-model.mjs        reads solar-data/*.csv + Open-Meteo Archive temps → HDD load-model
+scripts/tools/process-smhi-data.ts        station GHI CSV → lib/irradiance-data.ts's avgGhiByMonthHour
+scripts/tools/process-inverter-data.ts   monthly production/consumption averages from a combined CSV
+scripts/tools/build-load-model.mjs        reads solar-data/*.csv + Open-Meteo Archive temps → HDD load-model
                                     constants (parses CSV directly; needs network)
-scripts/build-solar-calibration.ts  measured production ÷ raw GHI-model estimate → solarCalibrationByMonth
+scripts/tools/build-solar-calibration.ts  measured production ÷ raw GHI-model estimate → solarCalibrationByMonth
 ```
 
 ## Deployment & operations
@@ -161,7 +161,7 @@ scripts/build-solar-calibration.ts  measured production ÷ raw GHI-model estimat
 See `README.md` for the quick-start and `deploy/README.md` for the full NUC/systemd setup guide.
 Summary: the app + Python Modbus poller/dispatch loop run as systemd services on a dedicated
 Linux box (not Vercel — this needs a persistent local process with LAN access to the inverter).
-Eight systemd units (plus their timers), all reading `/opt/solinteg/solinteg.env` (mode 600,
+Nine systemd units (plus their timers), all reading `/opt/solinteg/solinteg.env` (mode 600,
 holds secrets — never commit it) — see `deploy/README.md` for what each one does.
 
 **Hardware gotchas (see MODBUS.md for the full register-level detail):**
@@ -175,7 +175,7 @@ holds secrets — never commit it) — see `deploy/README.md` for what each one 
 **Safety model:** every register write is gated behind `SOLINTEG_CONTROL_ARMED` — unset, it's a
 no-op (shadow mode: the dispatch loop computes and logs real decisions but never touches the
 inverter). Set it only after you've independently verified your own inverter's sign convention
-and setpoint persistence — see `scripts/probe_50207_sign.py` / `scripts/probe_setpoint_persistence.py`
+and setpoint persistence — see `scripts/tools/probe_50207_sign.py` / `scripts/tools/probe_setpoint_persistence.py`
 and MODBUS.md. **Always re-verify the current armed state before assuming either way** — check
 via `journalctl -u solinteg-dispatch -n 5` (look for `ARMED=True/False` in the startup line) or
 `sudo grep ARMED /opt/solinteg/solinteg.env` (must be `sudo` — a plain read fails

@@ -1,5 +1,5 @@
 # Lets youruser (replace with YOUR OWN login username below before installing, same as any
-# sudoers rule) run scripts/telemetry-ro.sh as root without a password, for routine health
+# sudoers rule) run scripts/services/telemetry-ro.sh as root without a password, for routine health
 # checks (sqlite3 SELECTs, journalctl reads) — without granting general passwordless sudo,
 # which was deliberately removed. Install with:
 #   sudo cp deploy/solinteg-telemetry-ro.sudoers /etc/sudoers.d/solinteg-telemetry-ro

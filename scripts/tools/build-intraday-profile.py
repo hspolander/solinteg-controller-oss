@@ -19,14 +19,14 @@ reports — see build-corrected-consumption.py):
 
 Prints the 12x24 TS array literal (each row sums to 1) plus per-month diagnostics.
 
-Usage: python scripts/build-intraday-profile.py
+Usage: python scripts/tools/build-intraday-profile.py
 """
 import json
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 ELLEVIO_DIR = ROOT / "solar-data" / "ellevio"
 
 PRE_PV_END = date(2023, 3, 31)

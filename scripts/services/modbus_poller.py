@@ -45,6 +45,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import common  # sibling module (scripts/services/) — script dir is sys.path[0]
+
 try:
     from pymodbus.client import ModbusTcpClient
 except ImportError:
@@ -162,10 +164,7 @@ def write_atomic(path: Path, data: dict) -> None:
 
 
 def init_db(path: Path) -> sqlite3.Connection:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(path), check_same_thread=False)
-    con.execute("PRAGMA journal_mode=WAL")   # concurrent access with the Next.js web app
-    con.execute("PRAGMA busy_timeout=5000")
+    con = common.telemetry_connect(path)
     # Canonical schema for all telemetry.db tables: deploy/schema.sql — keep this in sync.
     con.execute("""
         CREATE TABLE IF NOT EXISTS readings (

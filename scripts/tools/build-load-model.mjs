@@ -6,7 +6,7 @@
 // scanning Tbase for the best R². Prints the fitted constants to paste into
 // lib/consumption-data.ts plus a monthly sanity table.
 //
-// Usage:  node scripts/build-load-model.mjs
+// Usage:  node scripts/tools/build-load-model.mjs
 // Requires network (Open-Meteo Archive).
 
 import * as fs from 'node:fs';
@@ -14,7 +14,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.resolve(__dirname, '..', 'solar-data');
+const DATA_DIR = path.resolve(__dirname, '..', '..', 'solar-data');
 // Keep in sync with lib/constants.ts's SITE_LATITUDE/SITE_LONGITUDE (the canonical source,
 // overridable via env there) — this is a one-off offline script, not part of the running app.
 const LAT = 57.64;
@@ -22,7 +22,7 @@ const LON = 11.78;
 
 // ── 1. Read the daily-consumption series ──────────────────────────────────────
 // Preferred source: solar-data/consumption-daily-corrected.csv (Date | consumption),
-// built by scripts/build-corrected-consumption.py — the raw plant reports' first winter
+// built by scripts/tools/build-corrected-consumption.py — the raw plant reports' first winter
 // is physically impossible (old inverter meter misconfig, found 2026-07-11 by
 // cross-checking against the Ellevio billing meter) and they miss May-Nov 2022 entirely.
 // Fallback for sites without a corrected series: every solar-data/*.csv in the plant-report
@@ -135,7 +135,7 @@ console.log('\n// ── Paste into lib/consumption-data.ts ──────�
 console.log(`/** Weather-normalised daily load: load = avgDailyConsumptionByMonth[m] + LOAD_SLOPE_KWH_PER_HDD * (HDD − hddNormalByMonth[m]),`);
 console.log(` *  HDD = max(0, HDD_T_BASE_C − dailyMeanTemp °C). Keeps the measured monthly level (captures non-temperature`);
 console.log(` *  seasonality incl. the April plateau) and adds a within-month heating sensitivity that self-zeroes in summer.`);
-console.log(` *  Fitted by scripts/build-load-model.mjs over ${best.n} days (${dates[0]}..${dates.at(-1)}); within-R²=${best.r2.toFixed(3)}, RMSE=${best.rmse.toFixed(1)} kWh/day.`);
+console.log(` *  Fitted by scripts/tools/build-load-model.mjs over ${best.n} days (${dates[0]}..${dates.at(-1)}); within-R²=${best.r2.toFixed(3)}, RMSE=${best.rmse.toFixed(1)} kWh/day.`);
 console.log(` *  NOTE: low within-R² — daily load is dominated by non-temperature factors; the seasonal baseline is the main signal. */`);
 console.log(`export const HDD_T_BASE_C = ${best.tb};`);
 console.log(`export const LOAD_SLOPE_KWH_PER_HDD = ${best.slope.toFixed(2)};`);
