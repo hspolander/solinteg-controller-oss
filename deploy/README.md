@@ -109,28 +109,6 @@ journalctl -u solinteg-weather -f     # watch: solar=... W/m2  temp=... C  wind=
 Uses the Ecowitt cloud API (the gateway isn't reachable on the wired subnet). Stdlib-only,
 so no extra pip installs. Rows are keyed by station observation time and deduped.
 
-## 8b. Uponor Smatrix room-climate poller (optional)
-
-Logs per-room temperature, setpoint, humidity and demand state (actuator open = actively
-heating) from the Smatrix Pulse controller's local JNAP API into `room_climate` — a live
-call-for-heat signal collected ahead of any optimizer use (evidence first, wiring second).
-Requires the Pulse communication module (R-208); find its IP in the router UI and give it
-a DHCP reservation first.
-
-```bash
-sudo cp deploy/solinteg-uponor.service /etc/systemd/system/
-# set UPONOR_HOST in /opt/solinteg/solinteg.env
-sudo systemctl daemon-reload
-sudo systemctl enable --now solinteg-uponor
-journalctl -u solinteg-uponor -f     # watch: N rooms, N in demand, temp ...
-```
-
-Commissioning check: `UPONOR_HOST=<ip> /opt/solinteg/app/.venv/bin/python \
-  /opt/solinteg/app/scripts/services/uponor_poller.py --once` prints every room — compare
-against the Smatrix Pulse app. Stdlib-only, no extra pip installs. NOTE: the JNAP API is
-write-capable with NO authentication (anyone on the LAN can change setpoints); the poller
-is strictly read-only — it only ever sends GetAttributes.
-
 ## 9. Alerting (watchdog, healthcheck, dead-man's switch)
 
 Three more timer-triggered services, none of them long-running:
@@ -433,7 +411,7 @@ sudo systemctl restart solinteg-web solinteg-poller
 # If any deploy/*.service or *.timer changed, reinstall and reload them too:
 sudo cp deploy/solinteg-*.service deploy/solinteg-*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl restart solinteg-poller solinteg-web solinteg-weather solinteg-uponor solinteg-dispatch \
+sudo systemctl restart solinteg-poller solinteg-web solinteg-weather solinteg-dispatch \
         solinteg-watchdog
 
 # If scripts/services/telemetry-ro.sh changed (e.g. a new unit added to its ALLOWED_UNITS allowlist —

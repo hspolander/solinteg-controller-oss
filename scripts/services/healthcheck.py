@@ -25,9 +25,6 @@ Environment (beyond notify.py's own NTFY_*):
                                 Stockholm midnight (default 1800) — the rows only exist once
                                 the first post-midnight render lands (solinteg-telemetry.timer
                                 runs a few minutes past midnight for exactly this)
-  UPONOR_STALE_S                room_climate table max age before flagging (default 1800;
-                                only relevant once solinteg-uponor is enabled — a never-
-                                started poller reports as "no data", which is fine)
   ORACLE_REVIEW_MIN_DAYS        one-shot: send a single "oracle-review data is ready" notice
                                 once this many status='ok' oracle_daily rows exist
                                 (default 16; 0 disables)
@@ -63,7 +60,6 @@ WEATHER_STALE_S = int(os.environ.get("WEATHER_STALE_S", "1800"))
 CONTROL_ERROR_WINDOW_S = int(os.environ.get("CONTROL_ERROR_WINDOW_S", "900"))
 DISK_FREE_MIN_PCT = float(os.environ.get("DISK_FREE_MIN_PCT", "10"))
 PLAN_GRACE_AFTER_MIDNIGHT_S = int(os.environ.get("PLAN_GRACE_AFTER_MIDNIGHT_S", "1800"))
-UPONOR_STALE_S = int(os.environ.get("UPONOR_STALE_S", "1800"))
 ORACLE_REVIEW_MIN_DAYS = int(os.environ.get("ORACLE_REVIEW_MIN_DAYS", "16"))
 
 # State keys with this prefix are one-shot notices: sent once, then remembered forever —
@@ -114,43 +110,6 @@ def check_weather_stale(con: sqlite3.Connection, now: datetime):
                 f"just falls back to climatology until this recovers. Check solinteg-weather "
                 f"and the Ecowitt station/cloud API.")
     return None
-
-
-def check_uponor_stale(con: sqlite3.Connection, now: datetime):
-    latest = safe_scalar(con, "SELECT MAX(timestamp) FROM room_climate")
-    if latest is None:
-        return None  # poller not enabled yet (or never ran) — collection is optional, don't nag
-    age = (now - datetime.fromisoformat(latest)).total_seconds()
-    if age > UPONOR_STALE_S:
-        return ("uponor_stale", notify.PRIORITY_LOW, "Solinteg: room-climate data is stale",
-                f"Last room_climate row was {age:.0f}s ago. Non-urgent — this is data"
-                f" collection only, nothing downstream consumes it yet. Check solinteg-uponor"
-                f" and whether the Smatrix controller's IP changed (it needs a DHCP"
-                f" reservation).")
-    return None
-
-
-def check_uponor_valve_errors(con: sqlite3.Connection):
-    """Any room the controller itself flagged with a valve/actuator fault, as of the most
-    recent poll only (not 'ever') — a transient blip that clears by the next poll cycle
-    self-resolves instead of alerting forever. Unlike the staleness checks above, this is a
-    real hardware fault report from the controller, not a data-freshness proxy — the same
-    priority tier as poller_stale/control_errors, not weather's informational tier."""
-    try:
-        rows = con.execute(
-            "SELECT thermostat FROM room_climate WHERE timestamp = "
-            "(SELECT MAX(timestamp) FROM room_climate) AND valve_error = 1"
-        ).fetchall()
-    except sqlite3.Error:
-        return None
-    if not rows:
-        return None
-    rooms = ", ".join(r[0] for r in rows)
-    return ("uponor_valve_error", notify.PRIORITY_HIGH, "Solinteg: heating valve fault",
-            f"The Uponor controller reports a valve/actuator fault on: {rooms}. That room's "
-            f"loop may be stuck open or closed — check the physical thermostat/manifold "
-            f"(most Uponor displays show a fault icon directly) rather than relying on this "
-            f"alert alone.")
 
 
 def check_todays_plan(con: sqlite3.Connection, today: str, now: datetime):
@@ -232,8 +191,6 @@ def run_checks(con: sqlite3.Connection, now: datetime):
     checks = [
         check_poller_stale(con, now),
         check_weather_stale(con, now),
-        check_uponor_stale(con, now),
-        check_uponor_valve_errors(con),
         check_todays_plan(con, today, now),
         check_control_errors(con, now),
         check_disk_space(),
