@@ -12,9 +12,16 @@ What IS comparable is duty PER DEGREE of heating need, approximated here as
 "need" the same amount of heat if equally well insulated/sized. A room whose duty rises
 faster than the others as it gets colder outside is losing heat faster than its
 neighbors — worth checking for drafts, poor insulation, a missing door seal, etc.
-Note this does NOT correct for room floor area (not available here) — a genuinely larger
-room will rank as a heavier consumer even if equally well built; supply each room's m² to
-get a true per-m² comparison instead of this room-to-room one.
+Room names + floor areas (optional — scripts/tools/room-config.json, {thermostat_id:
+{"name", "area_m2"}}) let the report show real names instead of raw IDs and add a per-m²
+normalized column. That per-m² normalization assumes each room's loop was DESIGNED with
+roughly similar heating capacity per m² (a common but unverified installer assumption,
+not something derivable from this data) — the un-normalized "Duty/°C need" column below
+does NOT depend on that assumption at all (it compares a loop against its OWN behavior at
+different outdoor temps, not against other rooms' size), so treat it as the primary
+signal and the per-m² column as a secondary, assumption-dependent view. Without a room
+config file at all, room floor area is simply unknown — a genuinely larger room will still
+rank as a heavier consumer on the primary metric even if equally well built.
 
 This measures RELATIVE heat-loop effort (valve-open time / modulation duty), not an
 isolated electrical watt figure — the heat pump and its water loop are shared across all
@@ -27,20 +34,23 @@ may be split across two heads (larger rooms) or use only head1, in which case he
 0 (not NULL), indistinguishable from "closed"; max() is the simplest number that's
 correct whether a room has one head or two.
 
-Usage: python scripts/tools/analyze-room-heat-demand.py [--db path] [--days 14]
+Usage: python scripts/tools/analyze-room-heat-demand.py [--db path] [--days 14] [--room-config path]
 Defaults to TELEMETRY_DB_PATH or /opt/solinteg/telemetry.db — run on the NUC (or against a
 copy) since telemetry.db lives only there. Requires enough winter data with real heating
 demand to say anything — reports "not enough active-heating samples yet" otherwise
 (expected through at least autumn 2026, added mid-July when the whole system is idle).
 """
 import argparse
+import json
 import os
 import sqlite3
 import sys
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 MIN_ACTIVE_SAMPLES = 20  # per room, with demand=1 or valve open — below this, ranking is noise
+DEFAULT_ROOM_CONFIG = Path(__file__).with_name("room-config.json")
 
 
 def connect_ro(path: str) -> sqlite3.Connection:
@@ -65,11 +75,33 @@ def nearest_temp(ts: str, outdoor: list, idx_hint: int) -> tuple:
     return (outdoor[i][1] if i < n else None), i
 
 
+def load_room_config(path) -> dict:
+    """{thermostat_id: {"name": str, "area_m2": float}} — entirely optional; every caller
+    below degrades to the raw thermostat ID when a room (or the file) isn't present."""
+    if not path or not Path(path).exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError) as exc:
+        print(f"Warning: couldn't read room config {path}: {exc} — continuing without it.")
+        return {}
+
+
+def label(room: str, room_config: dict) -> str:
+    name = room_config.get(room, {}).get("name")
+    return f"{name} ({room})" if name else room
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=os.environ.get("TELEMETRY_DB_PATH", "/opt/solinteg/telemetry.db"))
     ap.add_argument("--days", type=int, default=90, help="lookback window (default 90 days)")
+    ap.add_argument("--room-config", default=str(DEFAULT_ROOM_CONFIG),
+                     help="JSON {thermostat_id: {name, area_m2}} — optional, adds names and a "
+                          "per-m² column; defaults to room-config.json next to this script")
     args = ap.parse_args()
+    room_config = load_room_config(args.room_config)
 
     con = connect_ro(args.db)
     rows = con.execute(
@@ -104,26 +136,31 @@ def main() -> int:
     ranking = []
     any_errors = []
     for room, samples in per_room.items():
-        if any(s["valve_error"] for s in samples):
-            any_errors.append(room)
+        area_m2 = room_config.get(room, {}).get("area_m2")
+        verr = any(s["valve_error"] for s in samples)
+        if verr:
+            any_errors.append(label(room, room_config))
         active = [s for s in samples if s["outdoor_c"] is not None and s["setpoint_c"] is not None]
         # "Heating need" for a sample: how much colder outside than the room wants to be —
         # clamped at 0 so a mild/warm sample (no real call for heat expected) doesn't count
         # as negative need and distort the ratio.
         needy = [s for s in active if max(0.0, s["setpoint_c"] - s["outdoor_c"]) > 0.5]
-        if len(needy) < MIN_ACTIVE_SAMPLES:
-            ranking.append((room, None, len(needy), any(s["valve_error"] for s in samples)))
-            continue
-        mean_duty = sum(max(s["valve_pct"], s["pwm"]) for s in needy) / len(needy)
-        mean_need = sum(max(0.0, s["setpoint_c"] - s["outdoor_c"]) for s in needy) / len(needy)
-        mean_undershoot = sum(max(0.0, s["setpoint_c"] - s["room_temp_c"]) for s in needy
-                               if s["room_temp_c"] is not None) / len(needy)
-        duty_per_degree = mean_duty / mean_need if mean_need > 0 else None
-        ranking.append((room, duty_per_degree, len(needy), any(s["valve_error"] for s in samples),
-                         mean_duty, mean_need, mean_undershoot))
+        row = {"room": room, "label": label(room, room_config), "area_m2": area_m2,
+               "samples": len(needy), "valve_error": verr, "duty_per_degree": None}
+        if len(needy) >= MIN_ACTIVE_SAMPLES:
+            mean_duty = sum(max(s["valve_pct"], s["pwm"]) for s in needy) / len(needy)
+            mean_need = sum(max(0.0, s["setpoint_c"] - s["outdoor_c"]) for s in needy) / len(needy)
+            mean_undershoot = sum(max(0.0, s["setpoint_c"] - s["room_temp_c"]) for s in needy
+                                   if s["room_temp_c"] is not None) / len(needy)
+            duty_per_degree = mean_duty / mean_need if mean_need > 0 else None
+            row.update(mean_duty=mean_duty, mean_need=mean_need, mean_undershoot=mean_undershoot,
+                       duty_per_degree=duty_per_degree,
+                       duty_per_degree_per_m2=duty_per_degree / area_m2
+                       if duty_per_degree is not None and area_m2 else None)
+        ranking.append(row)
 
-    scored = [r for r in ranking if r[1] is not None]
-    unscored = [r for r in ranking if r[1] is None]
+    scored = [r for r in ranking if r["duty_per_degree"] is not None]
+    unscored = [r for r in ranking if r["duty_per_degree"] is None]
 
     # Valve-error flag is worth surfacing regardless of how much duty-cycle data exists for
     # that room, so check it before the "not enough data" early-return, not only inside it.
@@ -134,26 +171,48 @@ def main() -> int:
     if not scored:
         print(f"Not enough active-heating samples yet (need >= {MIN_ACTIVE_SAMPLES}/room with a "
               f"real setpoint-vs-outdoor gap) — expected through at least autumn 2026. "
-              f"{len(unscored)} room(s) seen, all with too little heating-demand data so far.")
+              f"{len(unscored)} room(s) seen, all with too little heating-demand data so far: "
+              f"{', '.join(r['label'] for r in unscored)}")
         return 0
 
-    scored.sort(key=lambda r: r[1], reverse=True)
-    print(f"{'Room':10s} {'Duty/°C need':>13s} {'MeanDuty%':>10s} {'MeanNeed°C':>11s} "
-          f"{'Undershoot°C':>13s} {'Samples':>8s}")
-    for room, dpd, n, verr, duty, need, undershoot in scored:
-        flag = "  VALVE ERROR" if verr else ""
-        print(f"{room:10s} {dpd:13.2f} {duty:10.1f} {need:11.1f} {undershoot:13.1f} {n:8d}{flag}")
+    scored.sort(key=lambda r: r["duty_per_degree"], reverse=True)
+    has_any_area = any(r["area_m2"] for r in scored)
+    header = f"{'Room':28s} {'Duty/°C need':>13s} {'MeanDuty%':>10s} {'MeanNeed°C':>11s} {'Undershoot°C':>13s} {'Samples':>8s}"
+    if has_any_area:
+        header += f" {'Duty/°C/m²':>11s}"
+    print(header)
+    for r in scored:
+        line = (f"{r['label']:28s} {r['duty_per_degree']:13.2f} {r['mean_duty']:10.1f} "
+                f"{r['mean_need']:11.1f} {r['mean_undershoot']:13.1f} {r['samples']:8d}")
+        if has_any_area:
+            per_m2 = r.get("duty_per_degree_per_m2")
+            line += f" {per_m2:11.3f}" if per_m2 is not None else f" {'—':>11s}"
+        print(line + ("  VALVE ERROR" if r["valve_error"] else ""))
 
     if len(scored) >= 2:
         worst, best = scored[0], scored[-1]
-        if best[1] > 0:
-            print(f"\n{worst[0]} works {worst[1] / best[1]:.1f}x harder per degree of heating need "
-                  f"than {best[0]} — the largest gap in this window.")
-    print("\nNot corrected for room floor area — a larger room ranks as a heavier consumer even "
-          "if equally well insulated; supply room m² for a true per-m² comparison.")
+        if best["duty_per_degree"] > 0:
+            print(f"\n{worst['label']} works {worst['duty_per_degree'] / best['duty_per_degree']:.1f}x "
+                  f"harder per degree of heating need than {best['label']} — the largest gap in "
+                  f"this window (raw loop-effort metric, no area assumption).")
+
+    area_scored = [r for r in scored if r.get("duty_per_degree_per_m2") is not None]
+    if len(area_scored) == len(scored) and len(area_scored) >= 2:
+        area_scored = sorted(area_scored, key=lambda r: r["duty_per_degree_per_m2"], reverse=True)
+        worst, best = area_scored[0], area_scored[-1]
+        if best["duty_per_degree_per_m2"] > 0:
+            print(f"Per m²: {worst['label']} works "
+                  f"{worst['duty_per_degree_per_m2'] / best['duty_per_degree_per_m2']:.1f}x harder "
+                  f"than {best['label']} for its size — ASSUMES similar per-m² loop design "
+                  f"capacity across rooms, not verified from this data.")
+    elif not has_any_area:
+        print("\nNo room floor area supplied (scripts/tools/room-config.json) — a larger room "
+              "ranks as a heavier consumer on the metric above even if equally well insulated; "
+              "add room m² there for the per-m² column too.")
+
     if unscored:
         print(f"{len(unscored)} room(s) skipped (too few active-heating samples): "
-              f"{', '.join(r[0] for r in unscored)}")
+              f"{', '.join(r['label'] for r in unscored)}")
     return 0
 
 
