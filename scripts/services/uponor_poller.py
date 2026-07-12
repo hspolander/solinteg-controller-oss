@@ -2,9 +2,11 @@
 """
 Polls the Uponor Smatrix Pulse underfloor-heating controller (its R-208 communication
 module's local JNAP HTTP API) and logs per-room climate to the shared telemetry.db
-(`room_climate` table): room temperature, setpoint, relative humidity, and — the value
-this exists for — the per-room DEMAND state (actuator open = actively heating), a live
-call-for-heat signal the battery optimizer's load model can't see from meter data.
+(`room_climate` table): room temperature, setpoint, relative humidity, the per-room
+DEMAND state (actuator open = actively heating — a live call-for-heat signal the battery
+optimizer's load model can't see from meter data), and — added 2026-07-12, for comparing
+how hard each room's loop works relative to the others — each
+room's valve-open percentage per head, PWM modulation duty, and a valve-fault flag.
 
 Collect-only by design (the weather-station precedent: log first, wire into decisions
 only once winter data shows the signal is worth it). STRICTLY
@@ -18,6 +20,25 @@ the ENTIRE system state as flat name/value string pairs. Temperatures are tenths
 degree Fahrenheit: °C = (raw − 320) / 18; raw ≥ 4508 means no sensor/invalid. The
 controller is known to dislike aggressive polling (Home Assistant uses 30 s; slab
 heating moves on hour timescales, so the default here is far gentler).
+
+Per-room loop-effort fields (confirmed present via a live raw GetAttributes dump
+2026-07-12, but not yet observed under real heating load — the whole system was idle
+mid-July, so every value below read as its "nothing happening" default; only cross-check
+against the app once winter gives real variation):
+  {room}_head1_valve_pos_percent / _head2_valve_pos_percent  0-100, actual valve opening.
+    A room's loop may be split across two heads (larger rooms) or just use head1; head2
+    reads 0 for a single-head room, indistinguishable from "closed" — see
+    scripts/tools/analyze-room-heat-demand.py, which takes max(head1, head2) as the
+    room's combined valve-open %, rather than baking that combination in here.
+  {room}_ufh_pwm_output           0-100 modulation duty, independent of valve position.
+  {room}_stat_valve_position_err  1 = the controller detected a valve/actuator fault —
+    surfaces a stuck or failed loop, which would otherwise look identical to "this room
+    just needs a lot of heat" in the duty-cycle numbers.
+NOT captured: per-head/controller supply-water temperature and manifold pump-relay state
+exist in the raw dump too, but their scale is unconfirmed (unlike room_temperature, never
+observed as anything but their own idle/sentinel values) and they describe the shared
+manifold, not a single room — out of scope for a per-room comparison. Reconsider only if
+a future question needs system-level (not per-room) heating-loop diagnostics.
 
 No extra dependencies — stdlib urllib, matching weather_poller.py.
 
@@ -34,6 +55,7 @@ Smatrix Pulse app's numbers).
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 import urllib.request
@@ -62,18 +84,31 @@ def init_db(path: Path):
     # Canonical schema for all telemetry.db tables: deploy/schema.sql — keep this in sync.
     con.execute("""
         CREATE TABLE IF NOT EXISTS room_climate (
-            timestamp     TEXT NOT NULL,      -- poll time (UTC ISO) — instantaneous state, no device time exists
-            thermostat    TEXT NOT NULL,      -- Uponor id 'C{controller}_T{thermostat}', e.g. 'C1_T1'
-            room_temp_c   REAL,               -- NULL = sensor invalid (controller sentinel)
-            setpoint_c    REAL,
-            rh_pct        REAL,               -- NULL = no humidity sensor
-            demand        INTEGER,            -- 1 = actuator open (room actively heating/cooling)
-            eco           INTEGER,            -- 1 = thermostat in ECO setback
-            sys_heat_cool INTEGER,            -- system-wide: 0 = heating, 1 = cooling
-            sys_away      INTEGER,            -- system-wide forced-ECO ("away") active
+            timestamp        TEXT NOT NULL,      -- poll time (UTC ISO) — instantaneous state, no device time exists
+            thermostat       TEXT NOT NULL,      -- Uponor id 'C{controller}_T{thermostat}', e.g. 'C1_T1'
+            room_temp_c      REAL,               -- NULL = sensor invalid (controller sentinel)
+            setpoint_c       REAL,
+            rh_pct           REAL,               -- NULL = no humidity sensor
+            demand           INTEGER,            -- 1 = actuator open (room actively heating/cooling)
+            eco              INTEGER,            -- 1 = thermostat in ECO setback
+            sys_heat_cool    INTEGER,            -- system-wide: 0 = heating, 1 = cooling
+            sys_away         INTEGER,            -- system-wide forced-ECO ("away") active
+            head1_valve_pct  REAL,               -- 0-100, this loop's valve opening
+            head2_valve_pct  REAL,               -- 0-100; reads 0 (not NULL) on a single-head room
+            pwm_output_pct   REAL,               -- 0-100 modulation duty
+            valve_error      INTEGER,            -- 1 = controller-detected valve/actuator fault
             PRIMARY KEY (timestamp, thermostat)
         )
     """)
+    # Additive migration for the table created 2026-07-12 before these columns existed —
+    # CREATE TABLE IF NOT EXISTS above is a no-op on an existing table, so old columns must
+    # be added explicitly. Safe to run repeatedly: ignores "duplicate column" if already applied.
+    for col in ("head1_valve_pct REAL", "head2_valve_pct REAL", "pwm_output_pct REAL",
+                "valve_error INTEGER"):
+        try:
+            con.execute(f"ALTER TABLE room_climate ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass  # already applied
     con.commit()
     return con
 
@@ -105,6 +140,11 @@ def temp_c(raw) -> float | None:
     return round((raw - 320) / 18, 1)
 
 
+def _pct(raw) -> float | None:
+    """A raw 0-100 percentage field — None only if the key is entirely missing."""
+    return None if raw is None else float(raw)
+
+
 def parse_rooms(d: dict) -> list[dict]:
     """One entry per present thermostat across all present controllers (C1..C4, T1..T12)."""
     sys_heat_cool = 1 if d.get("sys_heat_cool_mode") == "1" else 0
@@ -128,6 +168,10 @@ def parse_rooms(d: dict) -> list[dict]:
                 "eco": 1 if d.get(f"{key}_stat_cb_comfort_eco_mode") == "1" else 0,
                 "sys_heat_cool": sys_heat_cool,
                 "sys_away": sys_away,
+                "head1_valve_pct": _pct(d.get(f"{key}_head1_valve_pos_percent")),
+                "head2_valve_pct": _pct(d.get(f"{key}_head2_valve_pos_percent")),
+                "pwm_output_pct": _pct(d.get(f"{key}_ufh_pwm_output")),
+                "valve_error": 1 if d.get(f"{key}_stat_valve_position_err") == "1" else 0,
             })
     return rooms
 
@@ -136,8 +180,11 @@ def log_rooms(con, rooms: list[dict]) -> None:
     now = datetime.now(timezone.utc).isoformat()
     con.executemany(
         """INSERT OR IGNORE INTO room_climate
-           (timestamp, thermostat, room_temp_c, setpoint_c, rh_pct, demand, eco, sys_heat_cool, sys_away)
-           VALUES (:ts, :thermostat, :room_temp_c, :setpoint_c, :rh_pct, :demand, :eco, :sys_heat_cool, :sys_away)""",
+           (timestamp, thermostat, room_temp_c, setpoint_c, rh_pct, demand, eco, sys_heat_cool,
+            sys_away, head1_valve_pct, head2_valve_pct, pwm_output_pct, valve_error)
+           VALUES (:ts, :thermostat, :room_temp_c, :setpoint_c, :rh_pct, :demand, :eco,
+                   :sys_heat_cool, :sys_away, :head1_valve_pct, :head2_valve_pct,
+                   :pwm_output_pct, :valve_error)""",
         [{**r, "ts": now} for r in rooms],
     )
     con.commit()
@@ -150,8 +197,11 @@ def main() -> None:
     if "--once" in sys.argv:
         rooms = parse_rooms(fetch_all(HOST))
         for r in rooms:
+            valve = max(r["head1_valve_pct"] or 0, r["head2_valve_pct"] or 0)
             print(f"{r['thermostat']}: temp={r['room_temp_c']} °C  set={r['setpoint_c']} °C  "
-                  f"rh={r['rh_pct']}  demand={r['demand']}  eco={r['eco']}")
+                  f"rh={r['rh_pct']}  demand={r['demand']}  eco={r['eco']}  "
+                  f"valve={valve:.0f}%  pwm={r['pwm_output_pct']}%"
+                  f"{'  VALVE ERROR' if r['valve_error'] else ''}")
         print(f"{len(rooms)} rooms; system mode={'cooling' if rooms and rooms[0]['sys_heat_cool'] else 'heating'}"
               f"{' AWAY' if rooms and rooms[0]['sys_away'] else ''}")
         return
@@ -164,10 +214,12 @@ def main() -> None:
             if rooms:
                 log_rooms(con, rooms)
                 temps = [r["room_temp_c"] for r in rooms if r["room_temp_c"] is not None]
-                log.info("%d rooms, %d in demand, temp %.1f-%.1f °C",
+                errors = [r["thermostat"] for r in rooms if r["valve_error"]]
+                log.info("%d rooms, %d in demand, temp %.1f-%.1f °C%s",
                          len(rooms), sum(r["demand"] for r in rooms),
                          min(temps) if temps else float("nan"),
-                         max(temps) if temps else float("nan"))
+                         max(temps) if temps else float("nan"),
+                         f", VALVE ERROR: {', '.join(errors)}" if errors else "")
             else:
                 log.warning("controller answered but reported no present thermostats")
         except Exception as exc:  # noqa: BLE001 — keep the loop alive on any transient error

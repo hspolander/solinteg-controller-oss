@@ -62,16 +62,26 @@ CREATE TABLE IF NOT EXISTS weather (
 -- for heat — collected ahead of any optimizer use (evidence first, wiring second).
 -- Temps arrive as deci-°F and are stored converted: °C = (raw − 320) / 18; the controller's
 -- invalid-sensor sentinel (raw ≥ 4508) and no-RH-sensor sentinel (0) are stored as NULL.
+-- head1/2_valve_pct, pwm_output_pct, valve_error added 2026-07-12 for comparing how hard
+-- each room's loop works relative to the others (evidence first, wiring second) — a room's loop may be
+-- split across two heads (larger rooms) or use only head1; head2 then reads 0, not NULL,
+-- indistinguishable from "closed" (scripts/tools/analyze-room-heat-demand.py takes
+-- max(head1, head2) as the room's combined valve-open %). Values not yet observed under
+-- real heating load (added mid-July, system idle) — cross-check against the app in winter.
 CREATE TABLE IF NOT EXISTS room_climate (
-    timestamp     TEXT NOT NULL,      -- poll time (UTC ISO) — instantaneous state, no device time exists
-    thermostat    TEXT NOT NULL,      -- Uponor id 'C{controller}_T{thermostat}', e.g. 'C1_T1'
-    room_temp_c   REAL,               -- NULL = sensor invalid (controller sentinel)
-    setpoint_c    REAL,
-    rh_pct        REAL,               -- NULL = no humidity sensor
-    demand        INTEGER,            -- 1 = actuator open (room actively heating/cooling)
-    eco           INTEGER,            -- 1 = thermostat in ECO setback
-    sys_heat_cool INTEGER,            -- system-wide: 0 = heating, 1 = cooling
-    sys_away      INTEGER,            -- system-wide forced-ECO ("away") active
+    timestamp       TEXT NOT NULL,      -- poll time (UTC ISO) — instantaneous state, no device time exists
+    thermostat      TEXT NOT NULL,      -- Uponor id 'C{controller}_T{thermostat}', e.g. 'C1_T1'
+    room_temp_c     REAL,               -- NULL = sensor invalid (controller sentinel)
+    setpoint_c      REAL,
+    rh_pct          REAL,               -- NULL = no humidity sensor
+    demand          INTEGER,            -- 1 = actuator open (room actively heating/cooling)
+    eco             INTEGER,            -- 1 = thermostat in ECO setback
+    sys_heat_cool   INTEGER,            -- system-wide: 0 = heating, 1 = cooling
+    sys_away        INTEGER,            -- system-wide forced-ECO ("away") active
+    head1_valve_pct REAL,               -- 0-100, this loop's valve opening
+    head2_valve_pct REAL,               -- 0-100; reads 0 (not NULL) on a single-head room
+    pwm_output_pct  REAL,               -- 0-100 modulation duty, independent of valve position
+    valve_error     INTEGER,            -- 1 = controller-detected valve/actuator fault
     PRIMARY KEY (timestamp, thermostat)
 );
 
