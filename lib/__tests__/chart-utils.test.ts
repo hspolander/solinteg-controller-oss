@@ -125,7 +125,7 @@ describe('buildChartData', () => {
 
   it('sell = price field (spot + export bonus, folded in upstream); buy = priceIncludingTaxAndSurcharge + SKATT_OVERFÖRING (both shown)', () => {
     const prices = [makePrice('2026-06-28T12:00:00', 80, 120)];
-    const [pt] = buildChartData(prices, null, profiles, {});
+    const [pt] = buildChartData(prices, null, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING);
     expect(pt.sell).toBe(80);
     expect(pt.buy).toBe(120 + SKATT_OVERFÖRING);
   });
@@ -133,26 +133,26 @@ describe('buildChartData', () => {
   it('action comes from dispatchByTime lookup', () => {
     const prices = [makePrice('2026-06-28T10:00:00')];
     const dispatchByTime = { '2026-06-28T10:00:00': makeDispatch('2026-06-28T10:00:00', 'charge') };
-    const [pt] = buildChartData(prices, null, profiles, dispatchByTime);
+    const [pt] = buildChartData(prices, null, profiles, dispatchByTime, BATTERY_KWH, SKATT_OVERFÖRING);
     expect(pt.action).toBe('charge');
     expect(pt.socPct).toBeCloseTo((12 / BATTERY_KWH) * 100, 1); // socAfter 12 kWh
   });
 
   it('socPct is null when the slot has no dispatch plan', () => {
-    const [pt] = buildChartData([makePrice('2026-06-28T10:00:00')], null, profiles, {});
+    const [pt] = buildChartData([makePrice('2026-06-28T10:00:00')], null, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING);
     expect(pt.socPct).toBeNull();
   });
 
   it('action defaults to idle when slot is not in dispatchByTime', () => {
     const prices = [makePrice('2026-06-28T10:00:00')];
-    const [pt] = buildChartData(prices, null, profiles, {});
+    const [pt] = buildChartData(prices, null, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING);
     expect(pt.action).toBe('idle');
   });
 
   it('uses forecast kWh when available', () => {
     const prices = [makePrice('2026-06-28T12:00:00')]; // slotIndex(12,0) = 48
     const forecast = { '2026-06-28': Array(96).fill(0).map((_, i) => (i === 48 ? 2.5 : 0)) };
-    const [pt] = buildChartData(prices, forecast, profiles, {});
+    const [pt] = buildChartData(prices, forecast, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING);
     expect(pt.solarKwh).toBeCloseTo(2.5);
     expect(pt.solarSource).toBe('forecast');
   });
@@ -160,26 +160,26 @@ describe('buildChartData', () => {
   it('falls back to profile when forecast is null', () => {
     // June (month 6), local 14:00 = UTC 12:00, profiles[6][12] = 4.0 → /4 = 1.0 kWh/slot
     const prices = [makePrice('2026-06-28T14:00:00')];
-    const [pt] = buildChartData(prices, null, profiles, {});
+    const [pt] = buildChartData(prices, null, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING);
     expect(pt.solarKwh).toBeCloseTo(1.0);
     expect(pt.solarSource).toBe('typical');
   });
 
   it('preserves time from the source slot', () => {
     const prices = [makePrice('2026-06-28T06:30:00')];
-    const [pt] = buildChartData(prices, null, profiles, {});
+    const [pt] = buildChartData(prices, null, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING);
     expect(pt.time).toBe('2026-06-28T06:30:00');
   });
 
   it('actualSocPct is null when no actual reading was bucketed into this slot', () => {
-    const [pt] = buildChartData([makePrice('2026-06-28T10:00:00')], null, profiles, {});
+    const [pt] = buildChartData([makePrice('2026-06-28T10:00:00')], null, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING);
     expect(pt.actualSocPct).toBeNull();
   });
 
   it('actualSocPct is looked up by 16-char slot key (no seconds)', () => {
     const prices = [makePrice('2026-06-28T10:00:00')];
     const actualSocByTime = { '2026-06-28T10:00': 42.5 };
-    const [pt] = buildChartData(prices, null, profiles, {}, actualSocByTime);
+    const [pt] = buildChartData(prices, null, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING, actualSocByTime);
     expect(pt.actualSocPct).toBe(42.5);
   });
 });

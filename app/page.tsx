@@ -16,6 +16,7 @@ import { buildDispatchCardData } from '@/lib/dispatch-card';
 import { buildOracleCardData } from '@/lib/oracle-card';
 import { buildActualSocByTime } from '@/lib/chart-utils';
 import { summarize, stockholmDateOf } from '@/lib/economics';
+import { BATTERY_KWH, SKATT_OVERFÖRING } from '@/lib/constants';
 import AppShell from '@/app/components/AppShell';
 import EarningsCard from '@/app/components/EarningsCard';
 import LiveInverterPanel from '@/app/components/LiveInverterPanel';
@@ -138,6 +139,8 @@ export default async function Home() {
             startSocKwh={startSoc}
             socIsLive={inverterData != null}
             actualSocByTime={actualSocByTime}
+            batteryKwh={BATTERY_KWH}
+            skattOverforing={SKATT_OVERFÖRING}
           />
         ) : (
           <section className="card-surface box-border min-w-0 p-5 order-1 min-[1600px]:order-none min-[1600px]:[grid-column:1/span_2] min-[1600px]:[grid-row:1]">

@@ -1,4 +1,3 @@
-import { SKATT_OVERFÖRING, BATTERY_KWH } from './constants';
 import { slotSolarKwh } from './slot-utils';
 import { stockholmSlotKey } from './economics';
 import type { PriceSlot } from './prices';
@@ -86,13 +85,19 @@ export function buildActionBands(schedule: DispatchSlot[]): ActionBand[] {
  *  - buy  = full consumer price (priceIncludingTaxAndSurcharge + skatt/överföring) — what the
  *           optimizer decides on and what you pay to import.
  *  - sell = the sell price (spot + EXPORT_BONUS_ORE nätnytta) — what you actually receive per exported kWh.
- * dispatchByTime is a pre-keyed lookup.
+ * dispatchByTime is a pre-keyed lookup. batteryKwh/skattOverforing are passed in (rather than
+ * imported from lib/constants) because this runs inside a 'use client' hook (useChartData) —
+ * Next.js never exposes non-NEXT_PUBLIC_ env vars to the client bundle, so a direct import would
+ * silently read the hardcoded fallback instead of the deployment's real env-configured value.
+ * Callers must pass the values resolved server-side (see app/page.tsx).
  */
 export function buildChartData(
   prices: PriceSlot[],
   forecast: Record<string, number[]> | null | undefined,
   profiles: Record<number, number[]>,
   dispatchByTime: Record<string, DispatchSlot>,
+  batteryKwh: number,
+  skattOverforing: number,
   actualSocByTime: Record<string, number> = {},
 ): ChartPoint[] {
   return prices.map((slot) => {
@@ -100,9 +105,9 @@ export function buildChartData(
     const dispatch = dispatchByTime[slot.startTime];
     return {
       time: slot.startTime,
-      buy: slot.priceIncludingTaxAndSurcharge + SKATT_OVERFÖRING,
+      buy: slot.priceIncludingTaxAndSurcharge + skattOverforing,
       sell: slot.price,
-      socPct: dispatch ? Math.round((dispatch.socAfter / BATTERY_KWH) * 1000) / 10 : null,
+      socPct: dispatch ? Math.round((dispatch.socAfter / batteryKwh) * 1000) / 10 : null,
       actualSocPct: actualSocByTime[slot.startTime.slice(0, 16)] ?? null,
       solarKwh,
       solarSource,
