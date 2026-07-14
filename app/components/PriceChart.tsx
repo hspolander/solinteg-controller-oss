@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PriceData } from '@/lib/prices';
-import { BATTERY_KWH } from '@/lib/optimizer';
 import type { DispatchSlot } from '@/lib/optimizer';
 import {
   buildAreaPath,
@@ -25,6 +24,12 @@ interface Props {
   startSocKwh?: number; // SoC the optimizer planned from
   socIsLive?: boolean; // true = live inverter reading, false = 50% fallback
   actualSocByTime?: Record<string, number>; // real measured SoC %, keyed "YYYY-MM-DDTHH:MM"
+  // Resolved server-side (see app/page.tsx) and passed in rather than imported from
+  // lib/constants directly: this component is 'use client', and Next.js never exposes
+  // non-NEXT_PUBLIC_ env vars to the client bundle — a direct import would silently read the
+  // hardcoded fallback instead of the deployment's real env-configured value.
+  batteryKwh: number;
+  skattOverforing: number;
 }
 
 const BAND_COLOR: Record<BandKind, string> = {
@@ -95,6 +100,8 @@ export default function PriceChart({
   startSocKwh,
   socIsLive,
   actualSocByTime,
+  batteryKwh,
+  skattOverforing,
 }: Props) {
   const {
     actionBands,
@@ -109,7 +116,15 @@ export default function PriceChart({
     priceMax,
     priceMin,
     solarMax,
-  } = useChartData(data, solarProfiles, solarForecast, dispatchSchedule, actualSocByTime);
+  } = useChartData(
+    data,
+    solarProfiles,
+    solarForecast,
+    dispatchSchedule,
+    batteryKwh,
+    skattOverforing,
+    actualSocByTime,
+  );
 
   const hasActualSoc = chartData.some((d) => d.actualSocPct != null);
   const hasPlan = !!dispatchSchedule;
@@ -592,7 +607,7 @@ export default function PriceChart({
         <p className="mt-3 text-xs" style={{ color: 'var(--text-muted)' }}>
           {socIsLive && startSocKwh != null
             ? `Batteri-rekommendationer baserade på aktuell laddning ${Math.round(
-                (startSocKwh / BATTERY_KWH) * 100,
+                (startSocKwh / batteryKwh) * 100,
               )} % (${startSocKwh.toFixed(1)} kWh).`
             : 'Batteri-rekommendationer baserade på antaget 50 % (växelriktardata saknas).'}
         </p>
