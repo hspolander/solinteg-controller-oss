@@ -5,6 +5,15 @@ import type { InverterLiveData } from '@/lib/inverter';
 // Ignore sub-threshold dribbles so a line/node doesn't flicker state near 0 W.
 const FLOW_THRESHOLD_W = 20;
 
+// The flow diagram is designed at this fixed pixel size; FlowNode converts its left/top/size
+// props (still given in this coordinate space by every call site below) to percentages of it,
+// so the whole diagram scales down uniformly with the SVG's own viewBox scaling instead of
+// overflowing the card on narrow viewports (this card can render well under 360px wide).
+const DESIGN_W = 360;
+const DESIGN_H = 284;
+const NODE_W = 80;
+const NODE_H = 66;
+
 function kw(w: number): string {
   return `${(Math.abs(w) / 1000).toFixed(2)} kW`;
 }
@@ -102,11 +111,12 @@ function FlowNode({
 }) {
   return (
     <div
-      className="absolute flex w-20 flex-col items-center justify-center gap-0.5 rounded-2xl"
+      className="absolute flex flex-col items-center justify-center gap-0.5 rounded-2xl"
       style={{
-        left,
-        top,
-        height: 66,
+        left: `${(left / DESIGN_W) * 100}%`,
+        top: `${(top / DESIGN_H) * 100}%`,
+        width: `${(NODE_W / DESIGN_W) * 100}%`,
+        height: `${(NODE_H / DESIGN_H) * 100}%`,
         background: 'var(--node-bg)',
         border: `1px solid ${active ? `color-mix(in srgb, ${color} 45%, transparent)` : 'var(--node-idle-border)'}`,
         boxShadow: active
@@ -256,16 +266,19 @@ export default function PowerFlowCard({ data }: { data: InverterLiveData | null 
 
   return (
     <CardChrome>
-      {/* Fixed 360px-wide design, centered horizontally regardless of the card's actual width
-          (this card can now be anywhere from 380px to 1000px+ wide — see min-[1600px]:max-w-none
-          on CardChrome). Row spacing was compressed (380 -> 284 tall) to keep the whole card
-          under a 500px height budget; node size (66px) and horizontal layout are unchanged. */}
-      <div className="relative" style={{ width: 360, height: 284, maxWidth: '100%', margin: '0 auto' }}>
+      {/* Fixed 360x284 design, scaled down uniformly (via aspect-ratio + %-based FlowNode
+          positions, both keyed off DESIGN_W/DESIGN_H) below that width instead of overflowing —
+          this card can be well under 360px wide on a phone once the page's own padding is
+          subtracted. Above 360px (desktop) it renders at the exact original pixel design,
+          capped and centered by max-width/margin. */}
+      <div
+        className="relative"
+        style={{ width: '100%', maxWidth: DESIGN_W, aspectRatio: `${DESIGN_W} / ${DESIGN_H}`, margin: '0 auto' }}
+      >
         <svg
-          width={360}
-          height={284}
-          viewBox="0 0 360 284"
+          viewBox={`0 0 ${DESIGN_W} ${DESIGN_H}`}
           className="pointer-events-none absolute inset-0 z-[1]"
+          style={{ width: '100%', height: '100%' }}
         >
           <FlowConnector id="s" from={solA} to={solB} color="var(--flow-solar)" active={solarActive} />
           <FlowConnector id="b" from={bFrom} to={bTo} color="var(--flow-battery)" active={batteryActive} />

@@ -6,7 +6,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div
-      className="mx-auto flex max-w-[1720px] flex-col gap-[18px] px-[30px] pt-[26px] pb-[30px]"
+      className="mx-auto flex max-w-[1720px] flex-col gap-[18px] px-4 pt-[26px] pb-[30px] min-[480px]:px-5 min-[768px]:px-[30px]"
       style={{ fontFamily: 'var(--font-body)' }}
     >
       {/* Keeps the server props (chart/plan/SoC overlay) from freezing at load time —
