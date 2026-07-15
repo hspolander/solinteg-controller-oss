@@ -1,0 +1,16 @@
+[Unit]
+Description=Nightly offsite mirror of local backups via rclone (one-shot)
+After=network-online.target solinteg-backup.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=solinteg
+WorkingDirectory=/opt/solinteg/app
+EnvironmentFile=/opt/solinteg/solinteg.env
+ExecStart=/opt/solinteg/app/.venv/bin/python /opt/solinteg/app/scripts/services/backup_offsite.py
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/solinteg

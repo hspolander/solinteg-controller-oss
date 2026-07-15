@@ -281,15 +281,52 @@ sudo systemctl enable --now solinteg-backup.timer
 sudo systemctl start solinteg-backup.service   # fire once now to test
 ls -la /opt/solinteg/backups                   # should show telemetry-*.db + solinteg.env-*.bak
 ```
-This is LOCAL-only - it protects against DB corruption or a bad query, not a dead disk. For
-real offsite protection, periodically pull the backups directory to another machine over
-Tailscale, e.g.:
+This is LOCAL-only - it protects against DB corruption or a bad query, not a dead disk. If you
+have another always-on machine (a NAS, another PC), the simplest offsite option is periodically
+pulling the backups directory over Tailscale, e.g.:
 ```bash
 rsync -av <you>@<your-node>.<your-tailnet>.ts.net:/opt/solinteg/backups/ ./solinteg-backups/
 ```
-Worth doing every week or two by hand, or automating later with a scheduled task on the
-receiving end once a preferred destination (another PC, a NAS, a cloud bucket) is decided -
-not built here since that choice and its credentials are yours, not something to guess at.
+
+**No other always-on machine? `solinteg-backup-offsite.timer` mirrors to a cloud remote
+instead**, via `rclone` — free and automated, no second machine needed. Backblaze B2's free tier
+(10 GB storage, 1 GB/day download) is the recommended backend: nightly backups here run tens of
+MB with 21 kept locally, so 10 GB is years of headroom, and its auth is a plain key ID + key (no
+interactive OAuth flow, unlike Google Drive — important since this runs headless).
+
+Setup:
+1. Create a free Backblaze B2 account, a bucket, and an "application key" scoped to that bucket
+   (backblaze.com — a few minutes, no card required for the free tier).
+2. `sudo apt install rclone`
+3. Add to `/opt/solinteg/solinteg.env` (see the commented-out example block there):
+   ```
+   RCLONE_OFFSITE_DEST=b2:your-bucket-name
+   RCLONE_CONFIG_B2_TYPE=b2
+   RCLONE_CONFIG_B2_ACCOUNT=<application key id>
+   RCLONE_CONFIG_B2_KEY=<application key>
+   ```
+   No `rclone.conf` file is used — these env vars are rclone's own supported way to configure a
+   remote, so the credentials live only in `solinteg.env` (600-permissioned) like every other
+   secret here.
+4. Install and enable:
+   ```bash
+   sudo cp deploy/solinteg-backup-offsite.service deploy/solinteg-backup-offsite.timer /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now solinteg-backup-offsite.timer
+   sudo systemctl start solinteg-backup-offsite.service   # fire once now to test
+   rclone ls b2:your-bucket-name                          # confirm files landed
+   ```
+It runs at 03:35, after the local backup (03:15) — `rclone sync`, so the remote mirrors
+`BACKUP_DIR`'s own rotation rather than accumulating forever. Alerts via the existing ntfy setup
+on failure (`notify.py`, same as every other unit here). Leave `RCLONE_OFFSITE_DEST` unset to
+skip this layer entirely; the local-only backup still runs either way.
+
+**Restore from the offsite copy** (if the machine itself is gone, not just its disk):
+```bash
+rclone copy b2:your-bucket-name ./solinteg-backups-restore/
+# then follow the local restore steps below against the newest telemetry-*.db in that folder
+```
+
 **Restore** (only ever tested manually, do this once to be sure it actually works):
 ```bash
 sudo systemctl stop solinteg-web solinteg-poller solinteg-dispatch solinteg-weather

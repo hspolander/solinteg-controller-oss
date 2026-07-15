@@ -161,7 +161,7 @@ scripts/tools/build-solar-calibration.ts  measured production ÷ raw GHI-model e
 See `README.md` for the quick-start and `deploy/README.md` for the full NUC/systemd setup guide.
 Summary: the app + Python Modbus poller/dispatch loop run as systemd services on a dedicated
 Linux box (not Vercel — this needs a persistent local process with LAN access to the inverter).
-Eight systemd units (plus their timers), all reading `/opt/solinteg/solinteg.env` (mode 600,
+Nine systemd units (plus their timers), all reading `/opt/solinteg/solinteg.env` (mode 600,
 holds secrets — never commit it) — see `deploy/README.md` for what each one does.
 
 **Hardware gotchas (see MODBUS.md for the full register-level detail):**

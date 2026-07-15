@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the nightly solinteg offsite backup mirror
+
+[Timer]
+OnCalendar=*-*-* 03:35:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
