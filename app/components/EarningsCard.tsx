@@ -34,7 +34,7 @@ function Tile({ label, totals, digits }: { label: string; totals: EconTotals; di
 
   return (
     <div
-      className="flex flex-1 flex-col gap-1.5 rounded-2xl"
+      className="flex min-w-0 flex-1 flex-col gap-1.5 rounded-2xl"
       style={{ background: tint, padding: '9px 12px 10px' }}
     >
       <span className="text-[10.5px] font-bold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
@@ -128,10 +128,17 @@ export default function EarningsCard({ summary }: { summary: EconSummary | null 
         </div>
       </div>
 
-      <div className="flex items-stretch gap-3.5">
-        <Tile label="Idag" totals={summary.today} digits={2} />
-        <Tile label="Denna månad" totals={summary.month} digits={0} />
-        <Tile label="Totalt" totals={summary.allTime} digits={0} />
+      {/* @container: each Tile's content (a currency number plus an unbreakable single-word
+          caption like "Nettoförsäljning") has a real minimum width that doesn't shrink to fit a
+          phone-width card — stack the three vertically below the threshold instead of letting
+          the row overflow the card. Keyed off this row's own rendered width (container query),
+          not the viewport, since this card can be squeezed by layout as well as by screen size. */}
+      <div className="@container">
+        <div className="flex flex-col gap-2.5 @min-[600px]:flex-row @min-[600px]:items-stretch @min-[600px]:gap-3.5">
+          <Tile label="Idag" totals={summary.today} digits={2} />
+          <Tile label="Denna månad" totals={summary.month} digits={0} />
+          <Tile label="Totalt" totals={summary.allTime} digits={0} />
+        </div>
       </div>
 
       {/* Legend chips removed (v5) — the arrows + net-number color already make the color

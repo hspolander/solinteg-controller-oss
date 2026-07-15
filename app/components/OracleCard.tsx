@@ -170,19 +170,24 @@ export default function OracleCard({ data }: { data: OracleCardData | null }) {
       </div>
 
       <div className="flex flex-col gap-4 min-[900px]:flex-row min-[900px]:items-stretch">
-        <div className="flex flex-1 items-stretch gap-3.5">
-          <Tile
-            label={`Senast · ${dayLabel(data.latest.date)}`}
-            value={data.latest.regretKr == null ? '–' : kr(data.latest.regretKr)}
-            caption="tappat vs facit"
-            sub={split}
-          />
-          <Tile label={`Median · ${data.okDays} dygn`} value={kr(data.medianRegretKr)} caption="tappat per dygn" />
-          <Tile
-            label="Fångat värde"
-            value={data.medianCapturedPct == null ? '–' : `${Math.round(data.medianCapturedPct)} %`}
-            caption="av teoretiskt max"
-          />
+        {/* @container: stack the three tiles below this row's own rendered width, not the
+            viewport — above 900px this block shares the row with the trend chart (roughly half
+            the card width), so "is it narrow" depends on layout as well as screen size. */}
+        <div className="flex-1 @container">
+          <div className="flex flex-col gap-2.5 @min-[480px]:flex-row @min-[480px]:items-stretch @min-[480px]:gap-3.5">
+            <Tile
+              label={`Senast · ${dayLabel(data.latest.date)}`}
+              value={data.latest.regretKr == null ? '–' : kr(data.latest.regretKr)}
+              caption="tappat vs facit"
+              sub={split}
+            />
+            <Tile label={`Median · ${data.okDays} dygn`} value={kr(data.medianRegretKr)} caption="tappat per dygn" />
+            <Tile
+              label="Fångat värde"
+              value={data.medianCapturedPct == null ? '–' : `${Math.round(data.medianCapturedPct)} %`}
+              caption="av teoretiskt max"
+            />
+          </div>
         </div>
 
         <div className="relative flex-1" ref={containerRef}>
