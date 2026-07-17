@@ -86,6 +86,42 @@ SAFETY:
     funds mostly from solar are skipped conservatively. Funding numbers are logged in
     `detail` on EVERY forced-charge decision (like the SoC-divergence numbers) so the
     threshold can be tuned from real control_actions data.
+  - Before forcing a DISCHARGE, the plan-only power target (from slot_power_w, based
+    purely on the DP's own SoC trajectory) is corrected against live load/solar
+    (live_discharge_power_w, gated by DISPATCH_LIVE_LOAD_TRACKING) — added 2026-07-12
+    after an evening where an ordinary appliance spike (thousands of watts above the
+    load model's forecast for that slot) leaked straight to the grid at full retail
+    price: 50207 is a FIXED battery-power register, so holding the plan's forecast-
+    based figure while real load runs above forecast means the excess is bought from
+    the grid regardless of how much SoC sits unused in the battery. The correction
+    targets the plan's intended NET GRID POSITION for this slot (dispatch[idx].gridKwh,
+    +import/−export) rather than its fixed battery-power figure: given live pv_w/
+    house_load_w, `required_w = house_load_w − pv_w − planned_grid_w` is the battery
+    power that would make the REAL grid flow match what the plan intended, so a load
+    spike is absorbed by the battery instead of leaking to the grid, and — symmetric,
+    same formula — an over-forecast load lowers the discharge instead of over-
+    exporting. Only ever overrides the plan when live.json is fresh (same
+    LIVE_MAX_AGE_S staleness rule as the charge-side check); missing/stale data falls
+    back to the plan-only figure, unchanged from before this existed. Still clamped to
+    hardware limits (clamp_power_w) and still subject to the SoC-floor check inside
+    force_discharge and the SOC_DIVERGENCE_KWH guard below — deliberately NOT given its
+    own separate cap: a sustained forecast miss across many slots is exactly what
+    SOC_DIVERGENCE_KWH (multi-slot) and the SoC floor (absolute) are already for, and
+    every replan (hourly, or any dashboard view) re-anchors the DP to the real live SoC
+    anyway, so spending more of the reserve now than the plan assumed simply means the
+    next plan sees less energy available and re-optimizes the rest of the day around
+    that — the same "react now, let the next replan account for it" philosophy as the
+    solar-funding check above, not a new safety model. house_load_w/pv_w and the
+    resulting target are logged in `detail`/`detail_json` on every discharge decision,
+    live or plan-only, so this can be reviewed the same way as the other guards via control_actions. Three refinements added 2026-07-13 after the first night live:
+    (1) a live-tracked target of 0 W (surplus covers the house mid-slot) demotes the
+    tick to idle/auto instead of calling force_discharge(0) — EMS BattCtrl parked at
+    0 W blocks self-consumption, the exact anti-pattern MODBUS.md warns about
+    (inverter_control.py now also refuses 0 W as a backstop); (2) the divergence
+    guard's expectation is time-interpolated within the slot (plan_expected_soc_now)
+    so per-tick retargets late in a high-power slot don't read normal within-slot
+    depletion as drift; (3) retargets smaller than LIVE_LOAD_DEADBAND_W wait for the
+    next reassert, so load noise doesn't write the register every tick.
   - An idle decision only writes the auto/General register when the loop's own last
     confirmed write left something else set (loop_in_auto, main loop) — idle slot
     boundaries still log their control_actions row (armed-coverage measurement reads row
@@ -127,39 +163,15 @@ REPLAN TRIGGERS: beyond the timer-driven render cadence
 
 Environment variables (beyond inverter_control.py's own SOLINTEG_* / SOLINTEG_CONTROL_ARMED):
   TELEMETRY_DB_PATH             SQLite path (default /opt/solinteg/telemetry.db)
-  DISPATCH_LOOP_INTERVAL_S      how often to check for a slot change (default 60)
-  DISPATCH_REASSERT_S           max time between re-writes of an unchanged target (default 300)
-  DISPATCH_SOC_DIVERGENCE_KWH   max |plan-assumed − actual| starting SoC (kWh) before a
-                                forced target is skipped as stale (default 3.0; logged as
-                                'skipped_divergence')
-  DISPATCH_SOLAR_SHORTFALL_KWH  extra grid kWh a forced charge may buy vs the plan before
-                                falling back to auto (default 0.5)
-  INVERTER_DATA_PATH            the poller's live.json (default /opt/solinteg/live.json)
-  DISPATCH_HEARTBEAT_PATH       liveness file for scripts/services/watchdog.py (default
-                                /opt/solinteg/dispatch-heartbeat.json)
-  DISPATCH_REPLAN_TRIGGERS=0 kill switch, still being inside the DISPATCH_REPLAN_DEBOUNCE_S
-  window, "shadow" mode (logs the decision, never calls out), or the HTTP request itself
-  erroring or timing out — degrades to EXACTLY the behaviour from before this feature existed:
-  the loop keeps acting on the newest optimizer_runs row and simply waits for the next
-  timer-driven render to produce a fresher one. It never touches a register, a guard threshold,
-  or a fail-safe path directly — it can only ever cause the WEB APP to compute (and, SoC
-  permitting — see logOptimizerRun's publish gate — publish) a plan sooner than the timer
-  schedule would have on its own.
-
-Environment variables (beyond inverter_control.py's own SOLINTEG_* / SOLINTEG_CONTROL_ARMED):
-  TELEMETRY_DB_PATH             SQLite path (default /opt/solinteg/telemetry.db)
   DISPATCH_LOOP_INTERVAL_S      how often to check for a slot change (default 60) — also the
                                 dominant bound on how fast live_discharge_power_w can react to
                                 a sudden load (e.g. a heat pump compressor starting): worst case
                                 is roughly this value + POLL_INTERVAL (modbus_poller.py's own
                                 sampling interval, live.json can't be fresher than that) + the
-                                apply latency (~1 s now that inverter_control.py's fast path
-                                skips redundant setup writes when already mid-discharge, ~8-9 s
-                                on the first entry into a forced setpoint). Safe to lower well
-                                below the 60 s default for this reason — the fast path means a
-                                shorter interval mostly just means more (cheap, ~1 s) on-demand
-                                Modbus connections rather than more long ones; still worth
-                                watching journalctl for connection errors after lowering it a
+                                apply latency (each forced setpoint entry writes the full
+                                register sequence, ~8-9 s). Lowering this trades a faster
+                                reaction for more frequent on-demand Modbus connections —
+                                watch journalctl for connection errors after lowering it a
                                 lot, since the underlying dongle only tolerates one connection
                                 at a time (see MODBUS.md) and this doesn't change that ceiling,
                                 just how often it's approached.
@@ -214,7 +226,7 @@ import sqlite3
 import sys
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import common  # sibling module (scripts/services/) — script dir is sys.path[0]
@@ -251,6 +263,20 @@ SOC_DIVERGENCE_KWH = float(os.environ.get("DISPATCH_SOC_DIVERGENCE_KWH", "3.0"))
 # 2 kW of missing solar — small enough to cap the cost of a forecast bust, large enough that
 # ordinary forecast noise doesn't constantly veto planned charges.
 SOLAR_SHORTFALL_KWH = float(os.environ.get("DISPATCH_SOLAR_SHORTFALL_KWH", "0.5"))
+# Kill switch for live_discharge_power_w (see module docstring) — "0" reverts discharge
+# slots to the plan's fixed forecast-based power, same as before this existed.
+LIVE_LOAD_TRACKING_ENABLED = os.environ.get("DISPATCH_LIVE_LOAD_TRACKING", "1") != "0"
+# Round the live-tracked target to the nearest this-many watts — keeps the written
+# setpoint from carrying meaningless single-watt precision. The write-frequency control is
+# the DEADBAND below, not this rounding (first night's data: 100 W rounding alone produced
+# a write every ~81 s, ordinary load noise crosses one bucket almost every tick).
+LIVE_LOAD_ROUND_W = int(os.environ.get("DISPATCH_LIVE_LOAD_ROUND_W", "100"))
+# An unchanged-slot, unchanged-action retarget is only applied when it moves the power by
+# at least this much; smaller moves wait for the next REASSERT_S write (bounded cost:
+# 250 W held wrong for 300 s ≈ 0.02 kWh ≈ 4 öre — noise). A heat-pump-scale change
+# (thousands of W) clears this immediately, so reaction latency to the events this
+# tracking exists for is unaffected. Must be > LIVE_LOAD_ROUND_W to do anything.
+LIVE_LOAD_DEADBAND_W = int(os.environ.get("DISPATCH_LIVE_LOAD_DEADBAND_W", "250"))
 LIVE_JSON_PATH = os.environ.get("INVERTER_DATA_PATH", "/opt/solinteg/live.json")
 LIVE_MAX_AGE_S = 120  # same staleness rule as lib/inverter.ts
 # Same env var lib/constants.ts's BATTERY_RT_EFF reads (kept in sync by the cross-language test).
@@ -420,26 +446,95 @@ def expected_prev_soc_kwh(dispatch: list, idx: int, start_soc_kwh: float) -> flo
     return start_soc_kwh if idx == 0 else dispatch[idx - 1]["socAfter"]
 
 
+def plan_expected_soc_now(dispatch: list, idx: int, prev_soc: float, now: datetime) -> float:
+    """The plan's expected SoC at THIS MOMENT: the start-of-slot baseline advanced linearly
+    toward this slot's socAfter by the fraction of the slot already elapsed.
+
+    Added 2026-07-13. The divergence guard used to compare live SoC against the START-of-
+    slot expectation, which was fine when checks only ran at slot boundaries and occasional
+    reasserts — but live-load tracking (2026-07-12) re-checks on every retarget, i.e.
+    potentially every tick, all the way through the slot. Against a start-of-slot baseline,
+    a perfectly-on-plan 11 kW discharge reads as ~2.7 kWh of "drift" by the end of its own
+    slot — pure within-slot depletion, nearly the whole 3.0 kWh threshold — so a late-slot
+    retarget could false-trip skipped_divergence with zero real forecast error. Interpolating
+    the expectation to "now" makes drift mean what the guard intends: deviation FROM the
+    plan's trajectory, not progress ALONG it. (Anchor arithmetic matches
+    slot_index_for_instant — elapsed time since dispatch[0]'s own start, DST-safe the same
+    way.) `expected`/`drift` in control_actions rows changed meaning at this date — don't
+    mix pre/post distributions when tuning the threshold.
+    """
+    first_start = datetime.strptime(dispatch[0]["startTime"], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=STOCKHOLM)
+    slot_start_utc = first_start.astimezone(UTC) + timedelta(seconds=idx * 15 * 60)
+    frac = (now - slot_start_utc).total_seconds() / (15 * 60)
+    frac = min(1.0, max(0.0, frac))
+    return prev_soc + (dispatch[idx]["socAfter"] - prev_soc) * frac
+
+
 def slot_power_w(dispatch: list, idx: int, prev_soc: float) -> int:
     """Battery power needed this slot to realize the planned socAfter transition."""
     delta_kwh = dispatch[idx]["socAfter"] - prev_soc
     return clamp_power_w(abs(delta_kwh) / SLOT_HOURS * 1000)
 
 
-def read_live_solar_surplus_w(now: datetime):
-    """Live PV surplus (pv_w − house_load_w, floored at 0) from the poller's live.json,
-    or None if the file is missing, unreadable, or stale (> LIVE_MAX_AGE_S). The poller
-    rewrites it every 30 s, so stale means the poller is down and we have no trustworthy
-    picture of current solar."""
+def read_live_reading(now: datetime):
+    """Live (pv_w, house_load_w) from the poller's live.json, or None if the file is
+    missing, unreadable, or stale (> LIVE_MAX_AGE_S). The poller rewrites it every 30 s,
+    so stale means the poller is down and we have no trustworthy picture of current
+    conditions."""
     try:
         with open(LIVE_JSON_PATH, encoding="utf-8") as f:
             data = json.load(f)
         age_s = (now - datetime.fromisoformat(data["timestamp"])).total_seconds()
         if age_s > LIVE_MAX_AGE_S:
             return None
-        return max(0.0, float(data["pv_w"]) - float(data["house_load_w"]))
+        return float(data["pv_w"]), float(data["house_load_w"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def read_live_solar_surplus_w(now: datetime):
+    """Live PV surplus (pv_w − house_load_w, floored at 0), or None — see read_live_reading."""
+    live = read_live_reading(now)
+    if live is None:
+        return None
+    pv_w, house_load_w = live
+    return max(0.0, pv_w - house_load_w)
+
+
+def live_discharge_power_w(dispatch: list, idx: int, now: datetime, planned_power_w: int):
+    """Battery discharge power that holds this slot's REAL grid exchange at what the plan
+    intended (dispatch[idx].gridKwh, +import/−export), given live pv_w/house_load_w —
+    instead of blindly holding the plan's fixed forecast-based power while a load spike
+    (or a solar miss) leaks straight to/from the grid at full price. See the module
+    docstring's SAFETY section for the reasoning and the bounds this is still subject to.
+
+    Returns (power_w, detail, numbers). Falls back to planned_power_w — unchanged from
+    before this existed — when live.json is missing/stale or tracking is disabled via
+    DISPATCH_LIVE_LOAD_TRACKING; detail/numbers still report why in that case.
+    """
+    if not LIVE_LOAD_TRACKING_ENABLED:
+        return planned_power_w, "live load tracking disabled (DISPATCH_LIVE_LOAD_TRACKING=0)", {}
+
+    live = read_live_reading(now)
+    if live is None:
+        return planned_power_w, "live.json missing/stale — holding plan-only power target", {}
+
+    pv_w, house_load_w = live
+    grid_kwh = dispatch[idx].get("gridKwh")
+    planned_grid_w = (float(grid_kwh) / SLOT_HOURS * 1000) if grid_kwh is not None else 0.0
+    required_w = house_load_w - pv_w - planned_grid_w
+    power_w = clamp_power_w(round(required_w / LIVE_LOAD_ROUND_W) * LIVE_LOAD_ROUND_W)
+    detail = (
+        f"live load {house_load_w:.0f} W, pv {pv_w:.0f} W, planned grid {planned_grid_w:.0f} W "
+        f"(+import/-export) -> battery {power_w} W (plan-only would be {planned_power_w} W)"
+    )
+    numbers = {
+        "live_house_load_w": round(house_load_w),
+        "live_pv_w": round(pv_w),
+        "planned_grid_w": round(planned_grid_w),
+        "planned_power_w": planned_power_w,
+    }
+    return power_w, detail, numbers
 
 
 def check_solar_funding(inputs: list, idx: int, charge_kwh: float, surplus_w):
@@ -494,9 +589,12 @@ def check_solar_funding(inputs: list, idx: int, charge_kwh: float, surplus_w):
 def decide(con: sqlite3.Connection, now: datetime):
     """Returns (slot_time, action, power_w, expected_soc_kwh, solar_skip, detail, numbers).
 
-    expected_soc_kwh is the plan's assumed starting SoC for this slot — None for idle/
-    no-plan cases, where it's meaningless. The caller compares it against the actual live
-    SoC before committing to a forced charge/discharge; see SOC_DIVERGENCE_KWH.
+    expected_soc_kwh is the plan's expected SoC AT THIS MOMENT (time-interpolated within
+    the slot — see plan_expected_soc_now; the start-of-slot value alone would conflate
+    normal within-slot depletion with real drift once live-load tracking re-checks every
+    tick) — None for idle/no-plan cases, where it's meaningless. The caller compares it
+    against the actual live SoC before committing to a forced charge/discharge; see
+    SOC_DIVERGENCE_KWH.
 
     solar_skip is True when a planned charge should fall back to auto because live solar
     can't fund it the way the plan assumed (see check_solar_funding); detail carries the
@@ -564,6 +662,7 @@ def decide(con: sqlite3.Connection, now: datetime):
                 numbers["next_action_time"] = future["startTime"]
                 break
 
+    solar_skip, detail = False, ""
     if action == "discharge":
         # The plan's net grid exchange for this slot (+import/−export, DispatchSlot.gridKwh)
         # — lets the dashboard say whether this discharge sells to the grid or just covers
@@ -571,8 +670,24 @@ def decide(con: sqlite3.Connection, now: datetime):
         grid_kwh = dispatch[idx].get("gridKwh")
         if grid_kwh is not None:
             numbers["grid_kwh"] = round(float(grid_kwh), 3)
-
-    solar_skip, detail = False, ""
+        # A bug here must degrade to the plan-only figure (the old behaviour), not throw —
+        # same reasoning as the charge-side guard below.
+        try:
+            power_w, detail, live_numbers = live_discharge_power_w(dispatch, idx, now, power_w)
+            numbers.update(live_numbers)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("live-load discharge tracking failed (%s) — using plan-only power", exc)
+            detail = f"live-load tracking failed: {exc}"
+        if power_w == 0:
+            # Live pv/load says no battery discharge is needed right now (e.g. the sun broke
+            # through mid-slot and the surplus covers the house). force_discharge(0) would
+            # park the inverter in EMS BattCtrl holding 0 W, which BLOCKS self-consumption —
+            # MODBUS.md is explicit: idle means return to auto, never 0x303 with 50207=0.
+            # Demote this tick to idle/auto (auto charges the surplus into the battery, which
+            # is strictly better than parking); the per-tick retarget re-promotes to a real
+            # discharge the moment load returns.
+            action = "idle"
+            detail = f"live surplus covers the planned discharge — auto instead of EMS 0 W ({detail})"
     if action == "charge":
         # A bug in this advisory guard must degrade to "no check" (the old behaviour),
         # not throw — an exception here would put the outer loop into its
@@ -585,7 +700,8 @@ def decide(con: sqlite3.Connection, now: datetime):
         except Exception as exc:  # noqa: BLE001
             log.warning("solar-funding check failed (%s) — proceeding without it", exc)
             solar_skip, detail = False, f"solar-funding check failed: {exc}"
-    return slot_time, action, power_w, prev_soc, solar_skip, detail, numbers
+    expected_soc_now = plan_expected_soc_now(dispatch, idx, prev_soc, now) if action != "idle" else None
+    return slot_time, action, power_w, expected_soc_now, solar_skip, detail, numbers
 
 
 def apply_target(inv: Inverter, action: str, power_w: int) -> None:
@@ -686,7 +802,22 @@ def main() -> None:
             # inverter's own app. Still always apply on an actual target change (including
             # the very first decision after a restart, since last_target starts as None —
             # that's what self-heals a setpoint a crashed prior instance left forced).
-            needs_apply = target != last_target or (due_for_reassert and effective_action != "idle")
+            # Same-slot same-action retargets smaller than LIVE_LOAD_DEADBAND_W wait for
+            # the next reassert instead of writing every tick — live-load tracking moves
+            # the bucketed power on almost every iteration (first night: a write every
+            # ~81 s), and chasing ±100-200 W of ordinary load noise buys nothing. A real
+            # event (heat pump: thousands of W) clears the deadband immediately, and
+            # last_target deliberately keeps the APPLIED power while suppressed, so slow
+            # creep accumulates against it and still applies once it sums past the band.
+            small_power_move = (
+                last_target is not None
+                and target[:2] == last_target[:2]
+                and effective_action != "idle"
+                and abs(effective_power - last_target[2]) < LIVE_LOAD_DEADBAND_W
+            )
+            needs_apply = (target != last_target and not small_power_move) or (
+                due_for_reassert and effective_action != "idle"
+            )
 
             if needs_apply:
                 inv = None  # opened lazily — an idle→idle slot boundary needs no connection

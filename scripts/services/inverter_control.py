@@ -215,6 +215,13 @@ def force_charge(inv: Inverter, power_w: int) -> None:
     global _forced_active
     sign = _charge_sign()
     power_w = clamp_power_w(power_w)
+    if power_w == 0:
+        # Never park in EMS BattCtrl holding 0 W — that blocks self-consumption entirely
+        # (MODBUS.md: "Idle slot = return to automatic. Do NOT hold 0x303 with 50207=0").
+        # Zero requested power means there is nothing to force; auto is the correct state.
+        log.info("force_charge: 0 W requested — returning to auto instead (EMS at 0 W blocks self-use)")
+        return_to_auto(inv)
+        return
     soc = inv.soc_pct()
     if soc >= SOC_CEILING_PCT:
         log.info("force_charge: SoC %.1f%% >= ceiling %.1f%% — returning to auto instead", soc, SOC_CEILING_PCT)
@@ -235,6 +242,11 @@ def force_discharge(inv: Inverter, power_w: int) -> None:
     global _forced_active
     sign = _charge_sign()
     power_w = clamp_power_w(power_w)
+    if power_w == 0:
+        # Same guard as force_charge — see the comment there and MODBUS.md.
+        log.info("force_discharge: 0 W requested — returning to auto instead (EMS at 0 W blocks self-use)")
+        return_to_auto(inv)
+        return
     soc = inv.soc_pct()
     if soc <= SOC_FLOOR_PCT:
         log.info("force_discharge: SoC %.1f%% <= floor %.1f%% — returning to auto instead", soc, SOC_FLOOR_PCT)
