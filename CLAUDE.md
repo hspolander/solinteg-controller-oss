@@ -15,7 +15,7 @@ elprisetjustnu.se SE3  Open Meteo (minutely_15)   Open Meteo (daily temp)
        │                        │                          ▼
        │                        │                    lib/load.ts
        │                        │                    dailyLoadKwh / slotConsumptionKwh
-       │                        │                    [baseline + slope·HDD; uniform intraday]
+       │                        │                    [baseline + slope·HDD; measured hourShareByMonth]
        │                        │                          │
        └──────────┬─────────────┴──────────────────────────┘
                   ▼
@@ -112,9 +112,11 @@ different market or vendor):
   `HDD = max(0, HDD_T_BASE_C − dailyMeanTemp)`. The monthly average is the level (captures
   non-temperature seasonality); temperature only adds a within-month heating term that
   self-zeroes in summer. These are all fitted to one household's own history — see DOMAIN.md's
-  "Adapting to a new site" for how to regenerate them for yours. Intraday distribution is
-  **uniform** (the only hourly series is grid import, distorted by a night-tariff timer — not
-  genuine load shape).
+  "Adapting to a new site" for how to regenerate them for yours. Intraday distribution uses
+  **measured `hourShareByMonth`** (per-month hourly shares from the reference household's meter
+  history — see `lib/load.ts`; regenerate yours with `scripts/tools/build-intraday-profile.py`):
+  it replaced a uniform 1/96 split, which under-allocated winter load ~30-40% at exactly the
+  morning/evening price peaks.
 
 ### Where constants live
 

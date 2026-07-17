@@ -47,6 +47,7 @@ export default async function Home() {
   ]);
 
   const startSoc = socKwhOrDefault(inverterData);
+  const socIsLive = inverterData != null;
   let solarProfiles: Record<number, number[]> = {};
   let dispatchSchedule: DispatchSlot[] | null = null;
 
@@ -74,7 +75,7 @@ export default async function Home() {
       const optimizerSlots = allSlots.slice(nowSlotIdx);
 
       dispatchSchedule = optimizeDispatch(optimizerSlots, startSoc);
-      logOptimizerRun(data.today, data.hasTomorrow, startSoc, optimizerSlots, dispatchSchedule);
+      logOptimizerRun(data.today, data.hasTomorrow, startSoc, optimizerSlots, dispatchSchedule, socIsLive);
     } catch (err) {
       // non-fatal — chart renders without dispatch overlay — but logged so a failure here
       // (e.g. optimizeDispatch throwing) isn't as invisible as the price_snapshots gap was.
@@ -137,7 +138,7 @@ export default async function Home() {
             solarForecast={solarForecast}
             dispatchSchedule={dispatchSchedule}
             startSocKwh={startSoc}
-            socIsLive={inverterData != null}
+            socIsLive={socIsLive}
             actualSocByTime={actualSocByTime}
             batteryKwh={BATTERY_KWH}
             skattOverforing={SKATT_OVERFÖRING}

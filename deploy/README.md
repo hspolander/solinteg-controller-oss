@@ -78,7 +78,7 @@ curl localhost:3000/api/inverter          # should return live JSON once the inv
 ## 7. Automated telemetry capture
 
 The dashboard render logs the price curve + optimizer run to `telemetry.db`. To capture
-this without relying on someone opening the page, a timer renders it hourly:
+this without relying on someone opening the page, a timer renders it on a schedule (hourly, plus 00:03 and 13:22/13:42 Stockholm — the timer file says why):
 
 ```bash
 sudo cp deploy/solinteg-telemetry.service /etc/systemd/system/

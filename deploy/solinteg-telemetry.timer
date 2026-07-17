@@ -11,6 +11,14 @@ OnCalendar=hourly
 # but silent and unoptimized) for up to an hour into every new day — the "midnight lull"
 # visible as reduced armed_fraction in oracle_daily and priced into its regret.
 OnCalendar=*-*-* 00:03:00 Europe/Stockholm
+# Twice shortly after the ~13:00 Stockholm day-ahead release: the hourly :00 render races the
+# release, and lib/prices.ts caches a today-only fetch with ~20-min rechecks, so without these
+# the first unattended plan to see tomorrow's prices lands ~14:00 — afternoon plans decide
+# evening hold-vs-sell on a truncated horizon for up to an hour. 13:22 clears the 13:00
+# render's recheck window for a punctual release; 13:42 catches a late one. (Both become
+# redundant if replanning ever gets an invokable trigger instead of riding renders.)
+OnCalendar=*-*-* 13:22:00 Europe/Stockholm
+OnCalendar=*-*-* 13:42:00 Europe/Stockholm
 # If the NUC was powered off at a scheduled time, run once on next boot to catch up.
 Persistent=true
 RandomizedDelaySec=60

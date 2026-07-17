@@ -12,7 +12,13 @@ own within hours). Capture it via DevTools -> Network -> the consumption XHR ->
 Usage:
   python scripts/tools/fetch-ellevio-history.py --site <deliverySiteId> \
       --from 2023-09-20 --to 2026-07-10 [--resolution QuarterHourly] \
+      [--direction Consumption|Production] \
       [--chunk-days 7] [--out solar-data/ellevio] [--cookie-file ellevio-cookie.txt]
+
+Direction: Consumption = grid import (the default). Production = grid export — needed
+once for the meter reconciliation (scripts/tools/reconcile-ellevio-meter.py). Production
+files get a "Production_" filename prefix so the two series can't be confused; Consumption
+keeps the historical unprefixed names so existing files still count for resume.
 
 The site id is the long number in the consumption page's API URL (a GSRN meter id —
 personal, so it is an argument rather than a committed constant).
@@ -49,7 +55,7 @@ HEADERS = {
 }
 
 
-def fetch_chunk(site: str, cookie: str, d1: date, d2: date, resolution: str) -> dict:
+def fetch_chunk(site: str, cookie: str, d1: date, d2: date, resolution: str, direction: str) -> dict:
     params = {
         "from": d1.isoformat(),
         "to": d2.isoformat(),
@@ -59,7 +65,7 @@ def fetch_chunk(site: str, cookie: str, d1: date, d2: date, resolution: str) -> 
         "interval": "Daily",
         "isPowerTariff": "false",
         "isRolling12Months": "false",
-        "direction": "Consumption",
+        "direction": direction,
         "comparePrevious": "false",
         "comparePreviousYear": "false",
     }
@@ -89,6 +95,7 @@ def main() -> int:
     ap.add_argument("--from", dest="date_from", required=True)
     ap.add_argument("--to", dest="date_to", required=True)
     ap.add_argument("--resolution", default="QuarterHourly", choices=["QuarterHourly", "Hourly"])
+    ap.add_argument("--direction", default="Consumption", choices=["Consumption", "Production"])
     ap.add_argument("--chunk-days", type=int, default=7)
     ap.add_argument("--out", default="solar-data/ellevio")
     ap.add_argument("--cookie-file", default="ellevio-cookie.txt")
@@ -103,14 +110,15 @@ def main() -> int:
     fetched = skipped = 0
     consecutive_failures = 0
 
+    prefix = "" if args.direction == "Consumption" else f"{args.direction}_"
     while d <= end:
         d2 = min(d + timedelta(days=args.chunk_days - 1), end)
-        path = out / f"{args.resolution}_{d.isoformat()}_{d2.isoformat()}.json"
+        path = out / f"{prefix}{args.resolution}_{d.isoformat()}_{d2.isoformat()}.json"
         if existing_ok(path):
             skipped += 1
         else:
             try:
-                payload = fetch_chunk(args.site, cookie, d, d2, args.resolution)
+                payload = fetch_chunk(args.site, cookie, d, d2, args.resolution, args.direction)
                 path.write_text(json.dumps(payload), encoding="utf-8")
                 fetched += 1
                 consecutive_failures = 0

@@ -2,12 +2,13 @@
  * Decision-side telemetry — the price curves and optimizer runs the web app sees.
  *
  * Written to the same SQLite file the Python poller appends inverter readings to
- * ($TELEMETRY_DB_PATH, default /opt/solinteg/telemetry.db). This module writes two of the
- * five tables (canonical schema: deploy/schema.sql):
+ * ($TELEMETRY_DB_PATH, default /opt/solinteg/telemetry.db). This module writes three of the
+ * six tables (canonical schema: deploy/schema.sql):
  *   price_snapshots  — the daily price curve the optimizer planned against
  *   optimizer_runs   — optimizer inputs (forecast solar/load, start SoC) + dispatch output
- * The other three are written elsewhere: readings (scripts/modbus_poller.py), weather
- * (scripts/weather_poller.py), control_actions (scripts/dispatch_loop.py).
+ *   oracle_daily     — nightly hindsight-oracle day scores (upsertOracleDaily, via /api/oracle)
+ * The rest are written by the Python services under scripts/services/: readings
+ * (modbus_poller.py), weather (weather_poller.py), control_actions (dispatch_loop.py).
  *
  * Joining optimizer_runs (forecast) against readings (actual) by timestamp is the
  * forecast-vs-actual feedback loop described in DESIGN-reserve.md.
@@ -549,16 +550,31 @@ export function upsertOracleDaily(row: OracleDayRow): boolean {
   }
 }
 
-/** Record one optimizer execution: its inputs (forecast solar/load, start SoC) and output. */
+/** Record one optimizer execution: its inputs (forecast solar/load, start SoC) and output.
+ *
+ *  `socIsLive` is a publish gate: when live.json is missing/stale the page still computes and
+ *  displays a plan (anchored to socKwhOrDefault's BATTERY_KWH/2 fallback), but that plan must
+ *  never become a row — the dispatch loop takes the newest row as its authority, so publishing
+ *  a fallback-anchored plan silently replaces a better one computed from a real SoC reading
+ *  minutes earlier. Skipping keeps the last live-anchored plan in charge (its staleness is
+ *  already bounded by the loop's SoC-divergence guard), and a dead poller is separately
+ *  alerted via the healthcheck's live-data staleness rule, so the skip is never silent. */
 export function logOptimizerRun(
   priceDate: string,
   hasTomorrow: boolean,
   startSocKwh: number,
   inputs: OptimizerSlot[],
   dispatch: DispatchSlot[],
+  socIsLive: boolean,
 ): void {
   const handle = getDb();
   if (!handle) return;
+  if (!socIsLive) {
+    console.error(
+      'logOptimizerRun skipped: live.json missing/stale, plan is anchored to the fallback SoC — not published to optimizer_runs',
+    );
+    return;
+  }
   try {
     handle
       .prepare(
