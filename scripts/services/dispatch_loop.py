@@ -102,6 +102,29 @@ SAFETY:
     armed, it forces the inverter back to auto itself, since a hard crash here (OOM kill,
     power loss) skips this script's own SIGTERM/SIGINT fail-safe entirely.
 
+REPLAN TRIGGERS: beyond the timer-driven render cadence
+  (at least hourly via solinteg-telemetry.timer, plus AutoRefresh every 5 min, plus any
+  real page view), this loop can now ask the web app to compute a fresh plan the moment it
+  notices the CURRENT one looks wrong, rather than only ever consuming whichever optimizer_runs
+  row happens to be newest. maybe_request_replan() below is a small, debounced, fire-and-forget
+  POST to DISPATCH_REPLAN_URL, called from five places: preemptive SoC drift past
+  DISPATCH_REPLAN_DRIFT_KWH (deliberately tighter, and checked earlier, than
+  DISPATCH_SOC_DIVERGENCE_KWH itself — the idea is that a fresh, live-anchored plan usually
+  already exists by the time drift would otherwise cross that guard's own wider threshold), an
+  actual skipped_divergence or skipped_solar_shortfall outcome, no plan row covering "now" at
+  all, and today's plan still missing tomorrow's prices (has_tomorrow == 0) once it's past
+  13:05 Stockholm — Nord Pool's day-ahead release window (see DOMAIN.md). This is a NUDGE, never
+  a dependency: POST /api/replan runs the exact same producePlan() a normal dashboard render
+  already calls (see lib/plan.ts), so every way this can end up doing nothing — the
+  DISPATCH_REPLAN_TRIGGERS=0 kill switch, still being inside the DISPATCH_REPLAN_DEBOUNCE_S
+  window, "shadow" mode (logs the decision, never calls out), or the HTTP request itself
+  erroring or timing out — degrades to EXACTLY the behaviour from before this feature existed:
+  the loop keeps acting on the newest optimizer_runs row and simply waits for the next
+  timer-driven render to produce a fresher one. It never touches a register, a guard threshold,
+  or a fail-safe path directly — it can only ever cause the WEB APP to compute (and, SoC
+  permitting — see logOptimizerRun's publish gate — publish) a plan sooner than the timer
+  schedule would have on its own.
+
 Environment variables (beyond inverter_control.py's own SOLINTEG_* / SOLINTEG_CONTROL_ARMED):
   TELEMETRY_DB_PATH             SQLite path (default /opt/solinteg/telemetry.db)
   DISPATCH_LOOP_INTERVAL_S      how often to check for a slot change (default 60)
@@ -114,6 +137,73 @@ Environment variables (beyond inverter_control.py's own SOLINTEG_* / SOLINTEG_CO
   INVERTER_DATA_PATH            the poller's live.json (default /opt/solinteg/live.json)
   DISPATCH_HEARTBEAT_PATH       liveness file for scripts/services/watchdog.py (default
                                 /opt/solinteg/dispatch-heartbeat.json)
+  DISPATCH_REPLAN_TRIGGERS=0 kill switch, still being inside the DISPATCH_REPLAN_DEBOUNCE_S
+  window, "shadow" mode (logs the decision, never calls out), or the HTTP request itself
+  erroring or timing out — degrades to EXACTLY the behaviour from before this feature existed:
+  the loop keeps acting on the newest optimizer_runs row and simply waits for the next
+  timer-driven render to produce a fresher one. It never touches a register, a guard threshold,
+  or a fail-safe path directly — it can only ever cause the WEB APP to compute (and, SoC
+  permitting — see logOptimizerRun's publish gate — publish) a plan sooner than the timer
+  schedule would have on its own.
+
+Environment variables (beyond inverter_control.py's own SOLINTEG_* / SOLINTEG_CONTROL_ARMED):
+  TELEMETRY_DB_PATH             SQLite path (default /opt/solinteg/telemetry.db)
+  DISPATCH_LOOP_INTERVAL_S      how often to check for a slot change (default 60) — also the
+                                dominant bound on how fast live_discharge_power_w can react to
+                                a sudden load (e.g. a heat pump compressor starting): worst case
+                                is roughly this value + POLL_INTERVAL (modbus_poller.py's own
+                                sampling interval, live.json can't be fresher than that) + the
+                                apply latency (~1 s now that inverter_control.py's fast path
+                                skips redundant setup writes when already mid-discharge, ~8-9 s
+                                on the first entry into a forced setpoint). Safe to lower well
+                                below the 60 s default for this reason — the fast path means a
+                                shorter interval mostly just means more (cheap, ~1 s) on-demand
+                                Modbus connections rather than more long ones; still worth
+                                watching journalctl for connection errors after lowering it a
+                                lot, since the underlying dongle only tolerates one connection
+                                at a time (see MODBUS.md) and this doesn't change that ceiling,
+                                just how often it's approached.
+  DISPATCH_REASSERT_S           max time between re-writes of an unchanged target (default 300)
+  DISPATCH_SOC_DIVERGENCE_KWH   max |plan-assumed − actual| starting SoC (kWh) before a
+                                forced target is skipped as stale (default 3.0; logged as
+                                'skipped_divergence')
+  DISPATCH_SOLAR_SHORTFALL_KWH  extra grid kWh a forced charge may buy vs the plan before
+                                falling back to auto (default 0.5)
+  DISPATCH_LIVE_LOAD_TRACKING   "0" disables live_discharge_power_w's correction, reverting
+                                discharge slots to the plan's fixed forecast-based power
+                                (default "1" — on). Kill switch, not a tuning knob: flip to
+                                "0" and restart the service if this ever needs to be ruled
+                                out while investigating something else.
+  DISPATCH_LIVE_LOAD_ROUND_W    live-tracked discharge target is rounded to the nearest this
+                                many watts (default 100) — precision of the written setpoint,
+                                not the write-frequency control (that's the deadband below).
+  DISPATCH_LIVE_LOAD_DEADBAND_W same-slot same-action retargets smaller than this (default
+                                250) are deferred to the next REASSERT_S write instead of
+                                being applied on their own tick — stops ordinary load noise
+                                from writing the register every tick, without touching the
+                                reaction to a genuinely large change (which clears the band
+                                immediately). Must be > DISPATCH_LIVE_LOAD_ROUND_W to have
+                                any effect.
+  INVERTER_DATA_PATH            the poller's live.json (default /opt/solinteg/live.json) —
+                                POLL_INTERVAL (modbus_poller.py, default 30) governs how fresh
+                                this can ever be, independent of this loop's own interval.
+  DISPATCH_HEARTBEAT_PATH       liveness file for scripts/services/watchdog.py (default
+                                /opt/solinteg/dispatch-heartbeat.json)
+  DISPATCH_REPLAN_TRIGGERS      "1" (default) POSTs to DISPATCH_REPLAN_URL on the five trigger
+                                conditions in the REPLAN TRIGGERS section above; "0" disables
+                                the feature entirely (kill switch — reverts to the pre-feature,
+                                timer-only cadence); "shadow" computes the same decision and
+                                logs it (INFO) but never calls out, for watching trigger
+                                frequency before it's allowed to touch the web app
+  DISPATCH_REPLAN_DRIFT_KWH     preemptive SoC-drift threshold in kWh for requesting a replan
+                                (default 1.5 — HALF of DISPATCH_SOC_DIVERGENCE_KWH's own
+                                default, so this fires before that guard would ever need to
+                                skip a forced target)
+  DISPATCH_REPLAN_DEBOUNCE_S    minimum seconds between replan requests, regardless of which
+                                trigger(s) fired or how many times in that window (default 120)
+  DISPATCH_REPLAN_URL           where to POST the replan request (default
+                                http://localhost:3000/api/replan — the web app runs on the same
+                                NUC, see solinteg-web.service)
 """
 
 import json
@@ -123,6 +213,7 @@ import signal
 import sqlite3
 import sys
 import time
+import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -166,6 +257,60 @@ LIVE_MAX_AGE_S = 120  # same staleness rule as lib/inverter.ts
 BATTERY_RT_EFF = float(os.environ.get("SOLINTEG_BATTERY_RT_EFF", "0.96"))
 ONE_WAY_EFF = BATTERY_RT_EFF ** 0.5
 HEARTBEAT_PATH = os.environ.get("DISPATCH_HEARTBEAT_PATH", "/opt/solinteg/dispatch-heartbeat.json")
+
+
+# See the module docstring's REPLAN TRIGGERS section for the full design. "0"/"1"/"shadow"
+# (not a bare bool) so a rollout can watch the trigger rate in journalctl in shadow mode before
+# it's allowed to actually reach the web app.
+REPLAN_TRIGGERS = os.environ.get("DISPATCH_REPLAN_TRIGGERS", "1")
+REPLAN_DRIFT_KWH = float(os.environ.get("DISPATCH_REPLAN_DRIFT_KWH", "1.5"))
+REPLAN_DEBOUNCE_S = int(os.environ.get("DISPATCH_REPLAN_DEBOUNCE_S", "120"))
+REPLAN_URL = os.environ.get("DISPATCH_REPLAN_URL", "http://localhost:3000/api/replan")
+
+# Module-level: last time (time.monotonic(), immune to wall-clock jumps) a replan was actually
+# requested — real POST or shadow-logged, either counts as "a request" for debounce purposes, so
+# shadow mode's log line is itself rate-limited the same way the real call would be, rather than
+# firing on every tick. 0.0 ("never") means the very first qualifying trigger always goes through.
+_last_replan_request_monotonic = 0.0
+
+
+def maybe_request_replan(reason: str) -> None:
+    """Ask the web app to compute (and, live-SoC permitting, publish — see logOptimizerRun's
+    publish gate) a fresh plan right now, instead of leaving this loop to act on a plan that's
+    up to an hour stale until the next timer-driven render. See the module docstring's REPLAN
+    TRIGGERS section for the full design and why every failure mode here is safe by construction.
+
+    reason is one of "drift" / "divergence_skip" / "solar_shortfall" / "no_plan" /
+    "awaiting_tomorrow" (see the five call sites) — carried only for the log line, so journalctl
+    shows which condition is driving replan traffic.
+
+    Never raises: disabled (DISPATCH_REPLAN_TRIGGERS=0) and still-debounced both return silently
+    since neither is noteworthy; "shadow" logs at INFO and returns without calling out; a real
+    request logs its outcome at INFO (success) or WARNING (any exception) but never propagates
+    the exception — a dead/unreachable web app must degrade to the pre-feature timer cadence,
+    not take down the tick that happened to notice the problem. Never retries on its own either;
+    the debounce window is what stands in for a retry/backoff policy here. The only way this can
+    delay the calling tick is the bounded 10 s request timeout below — an accepted cost, since
+    the debounce keeps it to at most one attempt per DISPATCH_REPLAN_DEBOUNCE_S no matter how
+    many ticks' worth of trigger conditions are true in that window.
+    """
+    global _last_replan_request_monotonic
+    if REPLAN_TRIGGERS == "0":
+        return
+    if time.monotonic() - _last_replan_request_monotonic < REPLAN_DEBOUNCE_S:
+        return
+    _last_replan_request_monotonic = time.monotonic()
+
+    if REPLAN_TRIGGERS == "shadow":
+        log.info("replan trigger (shadow) reason=%s — DISPATCH_REPLAN_TRIGGERS=shadow, not calling %s", reason, REPLAN_URL)
+        return
+
+    try:
+        req = urllib.request.Request(REPLAN_URL, data=b"", method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            log.info("replan trigger reason=%s -> POST %s HTTP %s", reason, REPLAN_URL, resp.status)
+    except Exception as exc:  # noqa: BLE001 — a replan nudge must never affect the tick itself
+        log.warning("replan trigger reason=%s failed (%s) — continuing on the existing plan", reason, exc)
 
 
 def init_db(path: str) -> sqlite3.Connection:
@@ -221,18 +366,21 @@ def stockholm_date(now: datetime) -> str:
 
 def load_latest_plan(con: sqlite3.Connection, price_date: str):
     """The most recently logged optimizer run for this Stockholm date as
-    (start_soc_kwh, dispatch slots, optimizer input slots), or (None, None, None).
-    inputs_json rides along for the solar-funding check: it holds the per-slot forecast
-    solarKwh/consumptionKwh the dispatch plan was computed from."""
+    (start_soc_kwh, dispatch slots, optimizer input slots, has_tomorrow), or
+    (None, None, None, None). inputs_json rides along for the solar-funding check: it holds the
+    per-slot forecast solarKwh/consumptionKwh the dispatch plan was computed from. has_tomorrow
+    (added alongside the replan-trigger feature) is the plan's own record of whether tomorrow's
+    day-ahead prices were released yet at the time it was computed — read here so the
+    awaiting_tomorrow replan trigger in decide() doesn't need a second query."""
     row = con.execute(
-        """SELECT start_soc_kwh, dispatch_json, inputs_json FROM optimizer_runs
+        """SELECT start_soc_kwh, dispatch_json, inputs_json, has_tomorrow FROM optimizer_runs
            WHERE price_date = ? ORDER BY logged_at DESC LIMIT 1""",
         (price_date,),
     ).fetchone()
     if row is None:
-        return None, None, None
-    start_soc_kwh, dispatch_json, inputs_json = row
-    return start_soc_kwh, json.loads(dispatch_json), json.loads(inputs_json)
+        return None, None, None, None
+    start_soc_kwh, dispatch_json, inputs_json, has_tomorrow = row
+    return start_soc_kwh, json.loads(dispatch_json), json.loads(inputs_json), has_tomorrow
 
 
 def slot_index_for_instant(dispatch: list, now: datetime):
@@ -367,14 +515,32 @@ def decide(con: sqlite3.Connection, now: datetime):
     since that needs a live inverter connection decide() doesn't hold.
     """
     price_date = stockholm_date(now)
-    start_soc_kwh, dispatch, inputs = load_latest_plan(con, price_date)
+    start_soc_kwh, dispatch, inputs, has_tomorrow = load_latest_plan(con, price_date)
 
     if dispatch is None:
+        # No plan row at all for today — the loop is about to sit idle for lack of data, not
+        # because that's what the plan calls for. Ask the web app to compute one now rather
+        # than waiting for the next timer-driven render (see the module docstring's REPLAN
+        # TRIGGERS section).
+        maybe_request_replan("no_plan")
         return None, "idle", 0, None, False, f"no optimizer plan logged for {price_date}", {}
 
     idx = slot_index_for_instant(dispatch, now)
     if idx is None:
+        # A plan exists but doesn't cover THIS instant (now is before its first slot or past
+        # its last) — same "treated as idle for lack of a usable plan" situation as above.
+        maybe_request_replan("no_plan")
         return None, "idle", 0, None, False, f"now falls outside the {len(dispatch)}-slot plan logged for {price_date}", {}
+
+    # Once per tick (this is the only place in decide() reached once a valid plan+slot match is
+    # found): if today's plan predates Nord Pool's day-ahead release and it's now past that
+    # ~13:00 release window, ask for a replan so the DP can extend its horizon into tomorrow
+    # instead of waiting for the 13:22/13:42 Stockholm timer entries
+    # (see deploy/solinteg-telemetry.timer) to pick the new prices up on their own.
+    now_stockholm = now.astimezone(STOCKHOLM)
+    if has_tomorrow == 0 and (now_stockholm.hour, now_stockholm.minute) >= (13, 5):
+        maybe_request_replan("awaiting_tomorrow")
+
 
     slot_time = dispatch[idx]["startTime"]  # the plan's own label, for logging only
     action = dispatch[idx]["action"]
@@ -536,6 +702,7 @@ def main() -> None:
                                     "buying the difference", slot_time, detail)
                         applied_action, applied_power = "idle", 0
                         outcome = "skipped_solar_shortfall"
+                        maybe_request_replan("solar_shortfall")
                     elif action != "idle" and expected_soc_kwh is not None:
                         inv = Inverter()
                         actual_soc_kwh = inv.soc_pct() / 100 * BATTERY_KWH
@@ -550,6 +717,12 @@ def main() -> None:
                         detail = f"{detail}; {soc_detail}" if detail else soc_detail
                         numbers["soc_drift_kwh"] = round(drift, 3)
                         numbers["soc_drift_limit_kwh"] = SOC_DIVERGENCE_KWH
+                        if abs(drift) > REPLAN_DRIFT_KWH:
+                            # Preemptive — a tighter, earlier threshold than SOC_DIVERGENCE_KWH
+                            # below (see the module docstring's REPLAN TRIGGERS section): by the
+                            # time drift would cross THAT guard's wider threshold, a fresh
+                            # live-anchored plan is usually already in place from this nudge.
+                            maybe_request_replan("drift")
                         if drift > SOC_DIVERGENCE_KWH:
                             log.warning(
                                 "slot=%s action=%s planned from %.2f kWh but actual is %.2f kWh "
@@ -560,6 +733,7 @@ def main() -> None:
                             )
                             applied_action, applied_power = "idle", 0
                             outcome = "skipped_divergence"
+                            maybe_request_replan("divergence_skip")
                     # Never stomp an owner-set mode: when the loop's own last write already
                     # left the inverter in auto, an idle decision (planned, or a guard demotion
                     # above) needs no register write — re-poking General mode at every idle

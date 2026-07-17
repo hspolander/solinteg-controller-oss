@@ -1,12 +1,6 @@
-import { fetchPrices, currentSlotIndexInPrices } from '@/lib/prices';
 import PriceChart from '@/app/components/PriceChart';
-import { fetchSolarForecast, fetchDailyMeanTemp } from '@/lib/forecast';
-import { buildSolarProfiles, buildOptimizerSlots } from '@/lib/pipeline';
-import { optimizeDispatch } from '@/lib/optimizer';
-import { readLiveInverterData, socKwhOrDefault } from '@/lib/inverter';
+import { producePlan } from '@/lib/plan';
 import {
-  logPriceSnapshot,
-  logOptimizerRun,
   readDailyEconomics,
   readTodaySocHistory,
   readRecentControlActions,
@@ -21,67 +15,11 @@ import AppShell from '@/app/components/AppShell';
 import EarningsCard from '@/app/components/EarningsCard';
 import LiveInverterPanel from '@/app/components/LiveInverterPanel';
 import OracleCard from '@/app/components/OracleCard';
-import type { DispatchSlot } from '@/lib/optimizer';
 import type { EconSummary } from '@/lib/economics';
 
 export default async function Home() {
-  const [data, solarForecast, tempByDate, inverterData] = await Promise.all([
-    // A prices outage must not take down the whole page: live status and earnings don't
-    // need spot prices. The chart/optimizer sections degrade to a notice instead.
-    fetchPrices().catch((err) => {
-      console.error('fetchPrices failed, rendering without price chart/optimizer:', err);
-      return null;
-    }),
-    // Logged (not just silently swallowed) so we can tell from journalctl how often this
-    // actually happens — Open-Meteo outages long enough to hit this are believed to be rare,
-    // but that's currently a guess, not measured.
-    fetchSolarForecast().catch((err) => {
-      console.error('fetchSolarForecast failed, falling back to seasonal-average solar profile:', err);
-      return null;
-    }),
-    fetchDailyMeanTemp().catch((err) => {
-      console.error('fetchDailyMeanTemp failed, falling back to seasonal-average load model:', err);
-      return null;
-    }),
-    readLiveInverterData(),
-  ]);
-
-  const startSoc = socKwhOrDefault(inverterData);
-  const socIsLive = inverterData != null;
-  let solarProfiles: Record<number, number[]> = {};
-  let dispatchSchedule: DispatchSlot[] | null = null;
-
-  if (data) {
-    solarProfiles = buildSolarProfiles(data);
-    const allSlots = buildOptimizerSlots(data, solarForecast, solarProfiles, tempByDate);
-
-    // Telemetry (best-effort, no-op unless TELEMETRY_DB_PATH is set). readLiveInverterData()
-    // calls connection() above, so this runs at request time, never during `next build`.
-    logPriceSnapshot(data);
-
-    try {
-      // Slice off already-elapsed slots so the optimizer's own index 0 lines up with
-      // `startSoc` (the live SoC read above, "right now") instead of always being
-      // today's midnight. Without this, optimizeDispatch's forward pass anchors a
-      // live mid-day SoC reading to a fictitious midnight and produces a full-day
-      // trajectory that has nothing to do with reality by the time real wall-clock
-      // catches up to any slot past the first — see lib/prices.ts's
-      // currentSlotIndexInPrices docstring and dispatch_loop.py's matching fix.
-      // Clamp defensively: a negative index (stale cache/clock skew) falls back to
-      // the whole array (old behaviour, never worse); past the end (now is beyond
-      // the last loaded day) yields an empty slice, which optimizeDispatch and the
-      // dispatch loop both already treat as "no plan right now" safely.
-      const nowSlotIdx = Math.max(0, currentSlotIndexInPrices(data.today, new Date()));
-      const optimizerSlots = allSlots.slice(nowSlotIdx);
-
-      dispatchSchedule = optimizeDispatch(optimizerSlots, startSoc);
-      logOptimizerRun(data.today, data.hasTomorrow, startSoc, optimizerSlots, dispatchSchedule, socIsLive);
-    } catch (err) {
-      // non-fatal — chart renders without dispatch overlay — but logged so a failure here
-      // (e.g. optimizeDispatch throwing) isn't as invisible as the price_snapshots gap was.
-      console.error('optimizeDispatch/logOptimizerRun failed:', err);
-    }
-  }
+  const { data, solarProfiles, solarForecast, dispatchSchedule, startSoc, socIsLive, inverterData } =
+    await producePlan();
 
   // Earnings, computed from logged telemetry (best-effort; empty until the poller has data).
   // readDailyEconomics caches fully elapsed days, so this only scans today's readings.

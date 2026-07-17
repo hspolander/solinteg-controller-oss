@@ -140,6 +140,7 @@ lib/__tests__/load.test.ts        dailyLoadKwh (HDD adjust, summer self-zero, fl
 lib/__tests__/chart-utils.test.ts buildActionBands, buildChartData (price/dispatch/SoC mapping), xTicks, avg
 lib/__tests__/economics.test.ts   value-added vs no-battery, gap-capping, DST slot matching, roll-ups
 lib/__tests__/telemetry-economics.integration.test.ts  real SQLite read → price lookup → value-added
+lib/__tests__/telemetry-optimizer-run.test.ts  logOptimizerRun's socIsLive publish gate (fallback-SoC plans stay display-only)
 lib/__tests__/inverter.test.ts    isValidInverterLiveData rejects malformed/missing-field live.json
 lib/__tests__/constants-cross-language.test.ts  hardware constants stay in sync with the Python copies
 ```
