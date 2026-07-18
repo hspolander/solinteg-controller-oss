@@ -120,3 +120,13 @@ trailing 14-day measured profile (`readTrailingLoadProfile` in `lib/telemetry.ts
 `'live'`), with the fitted model above supplying only the cold-snap adjustment ratio and the
 fallback. So steps 2-3's fitted load values matter most for a fresh install's first weeks and
 for winter weather sensitivity — not for steady-state accuracy. See DESIGN-reserve.md §9.
+
+**5. Solar forecast source (`SOLAR_FORECAST_MODEL` in `lib/constants.ts`).** This install
+defaults to Open-Meteo's `metno_nordic` model, backtested (`scripts/tools/compare-metno-solar.mjs`)
+against its own station history to beat the default `best_match` blend by 14% MAE, especially on
+morning forecasts. `metno_nordic` only covers Norway/Sweden/Denmark/Finland — **if you're
+elsewhere, this default doesn't transfer.** Once you have a few months of your own measured
+irradiance (the same CSV the calibration steps above use), run the same backtest script against
+whichever regional models Open-Meteo exposes for your area (its model list is at
+open-meteo.com/en/docs) and set `SOLAR_FORECAST_MODEL` to whichever wins, or `''` to keep the
+default blend if none does.

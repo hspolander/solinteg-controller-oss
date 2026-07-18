@@ -2,11 +2,18 @@ import { cacheLife } from 'next/cache';
 import { ghiToKwh } from './solar';
 import { slotIndex } from './slot-utils';
 import { solarCalibrationByMonth } from './consumption-data';
-import { FETCH_TIMEOUT_MS, SITE_LATITUDE, SITE_LONGITUDE } from './constants';
+import { FETCH_TIMEOUT_MS, SITE_LATITUDE, SITE_LONGITUDE, SOLAR_FORECAST_MODEL } from './constants';
 
+// SOLAR_FORECAST_MODEL (see lib/constants.ts) picks a `models=` value or '' for the default
+// best_match blend. Non-default models (verified for metno_nordic, 2026-07-18) don't expose
+// a minutely_15 variant, so a model choice always fetches hourly here — see the slot-filling
+// comment below for how that's spread across each hour's four 15-min slots.
 const FORECAST_URL =
   `https://api.open-meteo.com/v1/forecast?latitude=${SITE_LATITUDE}&longitude=${SITE_LONGITUDE}` +
-  '&minutely_15=shortwave_radiation&forecast_days=2&timezone=Europe%2FStockholm';
+  (SOLAR_FORECAST_MODEL
+    ? `&hourly=shortwave_radiation&models=${SOLAR_FORECAST_MODEL}`
+    : '&minutely_15=shortwave_radiation') +
+  '&forecast_days=2&timezone=Europe%2FStockholm';
 
 const TEMP_URL =
   `https://api.open-meteo.com/v1/forecast?latitude=${SITE_LATITUDE}&longitude=${SITE_LONGITUDE}` +
@@ -28,10 +35,30 @@ export async function fetchSolarForecast(): Promise<Record<string, number[]>> {
   if (!res.ok) throw new Error(`Open Meteo fetch failed: ${res.status}`);
   const data = await res.json();
 
+  const result: Record<string, number[]> = {};
+
+  if (SOLAR_FORECAST_MODEL) {
+    // Hourly-only model: repeat each hour's value across its four 15-min slots rather than
+    // interpolating — an Open-Meteo hourly value is itself an hour-average, not an instant
+    // sample a real sub-hourly curve could be recovered from.
+    const times: string[] = data.hourly.time;
+    const ghiValues: number[] = data.hourly.shortwave_radiation;
+    for (let i = 0; i < times.length; i++) {
+      const date = times[i].slice(0, 10);
+      const month = parseInt(date.slice(5, 7), 10);
+      const hour = parseInt(times[i].slice(11, 13), 10);
+      const cal = solarCalibrationByMonth[month - 1];
+      const kwhPerSlot = Math.round((ghiToKwh(ghiValues[i]) * cal / 4) * 100) / 100;
+      if (!result[date]) result[date] = new Array(96).fill(0);
+      for (let minute = 0; minute < 60; minute += 15) {
+        result[date][slotIndex(hour, minute)] = kwhPerSlot;
+      }
+    }
+    return result;
+  }
+
   const times: string[] = data.minutely_15.time;
   const ghiValues: number[] = data.minutely_15.shortwave_radiation;
-
-  const result: Record<string, number[]> = {};
   for (let i = 0; i < times.length; i++) {
     const date = times[i].slice(0, 10);
     const month = parseInt(date.slice(5, 7), 10);

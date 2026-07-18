@@ -152,6 +152,23 @@ export const GRID_KW = numEnv('SOLINTEG_GRID_CAP_W', 11_000) / 1000; // ~11 kW c
 export const SITE_LATITUDE = numEnv('SITE_LATITUDE', 57.64);
 export const SITE_LONGITUDE = numEnv('SITE_LONGITUDE', 11.78);
 
+/**
+ * Open-Meteo `models=` value for the solar forecast (lib/forecast.ts), or '' for the
+ * default best_match blend. Reference install (57.6°N, Nordic) backtested `metno_nordic`
+ * against 4.3 months of its own measured GHI (scripts/tools/compare-metno-solar.mjs) and
+ * found it 14% better MAE than best_match, particularly fixing a systematic morning
+ * over-forecast — but this is a REGIONAL result: metno_nordic only covers
+ * Norway/Sweden/Denmark/Finland, and Open-Meteo's dedicated regional models differ by
+ * territory (e.g. its default blend already leans on ICON-D2 for Central Europe, HRRR for
+ * the US). If you're outside the Nordics, don't assume this default transfers — run the
+ * backtest script against your own station history and your region's candidate models
+ * (Open-Meteo's model list: open-meteo.com/en/docs) before trusting either choice. Also
+ * note: unlike best_match, none of the regional models expose a `minutely_15` variant, so
+ * picking one switches the forecast to hourly (see forecast.ts's slot-filling comment).
+ * Env: SOLAR_FORECAST_MODEL.
+ */
+export const SOLAR_FORECAST_MODEL = process.env.SOLAR_FORECAST_MODEL ?? 'metno_nordic';
+
 // ---- Solar installation ----
 // tiltDeg/azimuthDeg are informational only (not read by any formula — lib/solar.ts's
 // ghiToKwh() only uses kWp and performanceRatio) — they document how performanceRatio was

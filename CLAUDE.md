@@ -6,12 +6,16 @@
 ### Data flow
 
 ```
-elprisetjustnu.se SE3  Open Meteo (minutely_15)   Open Meteo (daily temp)
+elprisetjustnu.se SE3  Open Meteo (SOLAR_FORECAST_MODEL, Open Meteo (daily temp)
+                        default metno_nordic)
        │                        │                          │
  lib/prices.ts           lib/forecast.ts            lib/forecast.ts
  fetchPrices()           fetchSolarForecast()       fetchDailyMeanTemp()
- [today+tomorrow spot,   [cached 1 h / 8 h]         [cached 1 h / 8 h]
-  cached to next release]       │                          │
+ [today+tomorrow spot,   [cached 1 h / 8 h — a regional model (see           [cached 1 h / 8 h]
+  cached to next release] constants.ts) is hourly-only; its value is
+                          repeated over its 4 slots. SOLAR_FORECAST_MODEL=''
+                          reverts to the default minutely_15 blend.]
+       │                        │                          │
        │                        │                          ▼
        │                        │                    lib/load.ts
        │                        │                    dailyLoadKwh / slotConsumptionKwh
