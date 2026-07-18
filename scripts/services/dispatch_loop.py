@@ -168,10 +168,13 @@ Environment variables (beyond inverter_control.py's own SOLINTEG_* / SOLINTEG_CO
                                 a sudden load (e.g. a heat pump compressor starting): worst case
                                 is roughly this value + POLL_INTERVAL (modbus_poller.py's own
                                 sampling interval, live.json can't be fresher than that) + the
-                                apply latency (each forced setpoint entry writes the full
-                                register sequence, ~8-9 s). Lowering this trades a faster
-                                reaction for more frequent on-demand Modbus connections —
-                                watch journalctl for connection errors after lowering it a
+                                apply latency (~1 s now that inverter_control.py's fast path
+                                skips redundant setup writes when already mid-discharge, ~8-9 s
+                                on the first entry into a forced setpoint). Safe to lower well
+                                below the 60 s default for this reason — the fast path means a
+                                shorter interval mostly just means more (cheap, ~1 s) on-demand
+                                Modbus connections rather than more long ones; still worth
+                                watching journalctl for connection errors after lowering it a
                                 lot, since the underlying dongle only tolerates one connection
                                 at a time (see MODBUS.md) and this doesn't change that ceiling,
                                 just how often it's approached.

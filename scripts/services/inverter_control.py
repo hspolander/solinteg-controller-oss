@@ -13,11 +13,20 @@ SAFETY MODEL — this module refuses to act unless two gates are explicitly set:
   SOLINTEG_50207_SIGN=neg_charge  the verified sign convention for reg 50207.
                                   force_charge/force_discharge refuse to run until
                                   this is set to the value confirmed by
-                                  scripts/probe_50207_sign.py ("neg_charge" if a
+                                  scripts/tools/probe_50207_sign.py ("neg_charge" if a
                                   NEGATIVE target charges, "pos_charge" otherwise).
 
 On any unhandled error, SIGTERM/SIGINT, or interpreter exit, the inverter is
 reverted to General (self-use) mode — never left parked in a forced setpoint.
+
+RE-TARGETING LATENCY: force_charge/force_discharge write 5 registers (export/import caps,
+priority, power target, mode), each write rate-limited >=WRITE_MIN_INTERVAL_S apart — the
+full sequence takes ~8-9 s. Both now read back (unrate-limited) whether the caps/priority/
+mode are ALREADY correct for the requested direction before writing them, skipping straight
+to the power-target write when they are — the common case once anything is re-targeting an
+already-active discharge/charge (e.g. a live-load-tracking dispatch loop reacting to a
+changing house load). Cuts a routine re-target from ~8-9 s to about one write's worth (~1 s).
+Pure optimization: end state is identical, this only skips writes that would have had no effect.
 
 Hardware limits (source of truth: lib/constants.ts; defaults below kept in sync by
 lib/__tests__/constants-cross-language.test.ts, same pattern as SOLINTEG_SOC_FLOOR_PCT):
@@ -182,7 +191,7 @@ def _charge_sign() -> int:
     if SIGN == "pos_charge":
         return +1
     raise RuntimeError(
-        "50207 sign convention not confirmed. Run scripts/probe_50207_sign.py and "
+        "50207 sign convention not confirmed. Run scripts/tools/probe_50207_sign.py and "
         "set SOLINTEG_50207_SIGN=neg_charge|pos_charge before forcing charge/discharge."
     )
 
@@ -211,6 +220,27 @@ def set_soc_floor(inv: Inverter, floor_pct: float = SOC_FLOOR_PCT) -> None:
     inv.write_u16(REG_SOC_PROTECT_ENABLE, 1)
 
 
+def _already_set_for(inv: "Inverter", priority: int) -> bool:
+    """True when export/import caps, priority, and work mode already match what
+    force_charge/force_discharge would otherwise (re-)write — i.e. we're already in a
+    forced setpoint of the same direction. Reads are NOT rate-limited (only write_u16 is),
+    so this costs ~4 quick round-trips to find out whether 4 writes + a 0.3 s settle can be
+    skipped — specifically so a live-load re-target only has to write the ONE register that
+    actually changed — the power target — instead of repeating the ~8 s five-write setup
+    sequence every time, which is the dominant source of latency in reacting to a fast,
+    large load change (e.g. a heat pump compressor starting). Purely an optimization: the
+    end state is identical either way, this only skips writes that would have had no effect.
+    If the inverter is in any OTHER state (cold start, coming from idle/auto, or the
+    opposite direction), this correctly returns False and the full setup sequence below
+    runs exactly as before."""
+    return (
+        inv.read_u16(REG_MAX_EXPORT) == GRID_CAP_RAW
+        and inv.read_s16(REG_MAX_IMPORT) == -GRID_CAP_RAW
+        and inv.read_u16(REG_PRIORITY) == priority
+        and inv.read_u16(REG_WORK_MODE) == WORK_MODE_EMS_BATTCTRL
+    )
+
+
 def force_charge(inv: Inverter, power_w: int) -> None:
     global _forced_active
     sign = _charge_sign()
@@ -228,13 +258,17 @@ def force_charge(inv: Inverter, power_w: int) -> None:
         return_to_auto(inv)
         return
     raw = sign * (power_w // 10)
-    log.info("force_charge: %d W (raw %d), SoC %.1f%%", power_w, raw, soc)
-    inv.write_u16(REG_MAX_IMPORT, (-GRID_CAP_RAW) & 0xFFFF)  # allow grid import
-    inv.write_u16(REG_MAX_EXPORT, GRID_CAP_RAW)
-    inv.write_u16(REG_PRIORITY, 0)                           # PV priority
-    inv.write_u16(REG_BATT_POWER_TARGET, raw)                # power before mode
-    time.sleep(0.3)
-    inv.write_u16(REG_WORK_MODE, WORK_MODE_EMS_BATTCTRL)
+    already_set = _already_set_for(inv, priority=0)
+    log.info("force_charge: %d W (raw %d), SoC %.1f%%%s", power_w, raw, soc,
+             " (fast path — already in EMS charge mode)" if already_set else "")
+    if not already_set:
+        inv.write_u16(REG_MAX_IMPORT, (-GRID_CAP_RAW) & 0xFFFF)  # allow grid import
+        inv.write_u16(REG_MAX_EXPORT, GRID_CAP_RAW)
+        inv.write_u16(REG_PRIORITY, 0)                           # PV priority
+    inv.write_u16(REG_BATT_POWER_TARGET, raw)                    # power before mode
+    if not already_set:
+        time.sleep(0.3)
+        inv.write_u16(REG_WORK_MODE, WORK_MODE_EMS_BATTCTRL)
     _forced_active = True
 
 
@@ -253,13 +287,17 @@ def force_discharge(inv: Inverter, power_w: int) -> None:
         return_to_auto(inv)
         return
     raw = -sign * (power_w // 10)  # discharge = opposite of charge sign
-    log.info("force_discharge: %d W (raw %d), SoC %.1f%%", power_w, raw, soc)
-    inv.write_u16(REG_MAX_EXPORT, GRID_CAP_RAW)              # allow export
-    inv.write_u16(REG_MAX_IMPORT, (-GRID_CAP_RAW) & 0xFFFF)
-    inv.write_u16(REG_PRIORITY, 1)                           # battery priority
+    already_set = _already_set_for(inv, priority=1)
+    log.info("force_discharge: %d W (raw %d), SoC %.1f%%%s", power_w, raw, soc,
+             " (fast path — already in EMS discharge mode)" if already_set else "")
+    if not already_set:
+        inv.write_u16(REG_MAX_EXPORT, GRID_CAP_RAW)              # allow export
+        inv.write_u16(REG_MAX_IMPORT, (-GRID_CAP_RAW) & 0xFFFF)
+        inv.write_u16(REG_PRIORITY, 1)                           # battery priority
     inv.write_u16(REG_BATT_POWER_TARGET, raw)
-    time.sleep(0.3)
-    inv.write_u16(REG_WORK_MODE, WORK_MODE_EMS_BATTCTRL)
+    if not already_set:
+        time.sleep(0.3)
+        inv.write_u16(REG_WORK_MODE, WORK_MODE_EMS_BATTCTRL)
     _forced_active = True
 
 
