@@ -162,7 +162,18 @@ lib/__tests__/telemetry-economics.integration.test.ts  real SQLite read → pric
 lib/__tests__/telemetry-optimizer-run.test.ts  logOptimizerRun's socIsLive publish gate (fallback-SoC plans stay display-only)
 lib/__tests__/inverter.test.ts    isValidInverterLiveData rejects malformed/missing-field live.json
 lib/__tests__/constants-cross-language.test.ts  hardware constants stay in sync with the Python copies
+lib/__tests__/optimizer-property.test.ts  property-based DP checks (optimality vs random trajectories,
+                                  emission validity, endSoc mode) over seeded random scenarios
+lib/__tests__/dispatch-card.test.ts  Dispatch-card view-model (tone, labels, reason/warning building)
+lib/__tests__/oracle-card.test.ts    Facit-card view-model (ok-day selection, medians, trend rows)
+scripts/tests/                    Python service tests (stdlib unittest + a pymodbus fake — see
+                                  scripts/tests/README.md): dispatch_loop slot indexing/drift
+                                  interpolation/guards, inverter_control write ordering + fast
+                                  path + SoC gates
 ```
+
+Run `npm test` (vitest) AND `npm run test:py` (Python; on Windows use the `py` launcher in
+place of `python3`) before any change that touches lib/ or scripts/services/.
 
 ### Data-processing scripts (offline, not part of the app build)
 

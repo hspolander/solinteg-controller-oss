@@ -9,7 +9,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:py": "python3 -m unittest discover -s scripts/tests -p test_*.py"
   },
   "dependencies": {
     "next": "16.2.10",

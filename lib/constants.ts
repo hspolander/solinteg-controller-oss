@@ -178,7 +178,7 @@ export const SOLAR_FORECAST_MODEL = process.env.SOLAR_FORECAST_MODEL ?? 'metno_n
 // tilt/azimuth by any formula here — a new adopter without production history yet should
 // start around 0.7-0.8 for an unshaded south-facing array and expect to refine it later
 // against real production data (see solarCalibrationByMonth's generator script,
-// scripts/process-inverter-data.ts, for the same kind of per-installation calibration).
+// scripts/tools/process-inverter-data.ts, for the same kind of per-installation calibration).
 //
 // To adapt for a different site: replace this array with your own — kWp is nameplate power
 // per string/array (from your panel spec sheet), tiltDeg/azimuthDeg from your install's own
