@@ -29,8 +29,11 @@ export interface OptimizerSlot {
   // climatology-fallback slot when validating solarKwh/consumptionKwh against actual readings
   // later. 'typical'/'baseline' means the live forecast wasn't available for that slot, so a
   // large error there reflects climatology, not Open-Meteo's forecast skill.
+  // 'live' (added 2026-07-18) means consumptionKwh came from the trailing per-hour profile
+  // measured from the house's own readings (lib/load.ts slotConsumptionFromLive) — the best
+  // available estimator, so errors there are genuine household unpredictability.
   solarSource?: 'forecast' | 'typical';
-  loadSource?: 'modeled' | 'baseline';
+  loadSource?: 'modeled' | 'baseline' | 'live';
 }
 
 export interface DispatchSlot {
@@ -114,11 +117,20 @@ function computeFlows(soc: number, socNext: number, solarRem: number, loadRem: n
  *   real system deliberately carried overnight, which is a horizon artifact, not real regret.
  *   Throws if the target is unreachable from startSoc (cannot happen for a target taken from a
  *   real trajectory obeying the same physics, but a caller-supplied fantasy target can).
+ * @param opts.loadFactor  robust-planning margin: every slot's consumptionKwh is multiplied
+ *   by this factor BEFORE the solar-first netting, so the plan stays feasible when real load
+ *   runs hotter than forecast (see LOAD_FORECAST_MARGIN in lib/constants.ts for the full
+ *   rationale — a point-forecast optimum has zero slack by construction, and the cost of
+ *   running short is far larger than the cost of over-holding). Default 1 (no margin): the
+ *   hindsight oracle re-dispatches ACTUAL load and must never carry a robustness margin, and
+ *   existing tests pin the unmargined optimum. The emitted gridKwh/socAfter describe the
+ *   margined plan — the honest forecast is what gets logged to telemetry (lib/plan.ts), so
+ *   forecast-vs-actual validation is not polluted by the deliberate margin.
  */
 export function optimizeDispatch(
   slots: OptimizerSlot[],
   startSoc: number = BATTERY_KWH / 2,
-  opts?: { endSoc?: number },
+  opts?: { endSoc?: number; loadFactor?: number },
 ): DispatchSlot[] {
   const n = slots.length;
   if (n === 0) return [];
@@ -138,11 +150,12 @@ export function optimizeDispatch(
   // everything" the way the DP used to assume. autoChargeInputKwh is capped the same way
   // any other charge/discharge flow is (SLOT_MAX_KWH) — the battery/inverter can't absorb
   // faster than its own throughput limit regardless of how much solar is available.
+  const loadFactor = opts?.loadFactor ?? 1;
   const solarRem = new Float64Array(n);
   const loadRem = new Float64Array(n);
   const autoChargeInputKwh = new Float64Array(n);
   for (let i = 0; i < n; i++) {
-    const load = slots[i].consumptionKwh ?? 0;
+    const load = (slots[i].consumptionKwh ?? 0) * loadFactor;
     const s2l = Math.min(slots[i].solarKwh, load);
     solarRem[i] = slots[i].solarKwh - s2l;
     loadRem[i] = load - s2l;

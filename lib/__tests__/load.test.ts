@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { dailyLoadKwh, slotConsumptionKwh } from '../load';
+import { dailyLoadKwh, slotConsumptionKwh, slotConsumptionFromLive } from '../load';
+import type { TrailingLoadProfile } from '../load';
 import {
   avgDailyConsumptionByMonth,
   hddNormalByMonth,
@@ -113,5 +114,46 @@ describe('slotConsumptionKwh', () => {
   it('falls back to the baseline day total when no temp map is given', () => {
     const v = slotConsumptionKwh('2026-07-15T00:00:00', null);
     expect(v).toBeCloseTo((avgDailyConsumptionByMonth[6] * hourShareByMonth[6][0]) / 4, 4);
+  });
+});
+
+describe('slotConsumptionFromLive', () => {
+  // A flat 0.6 kWh/hour profile keeps the arithmetic legible; hour 5 gets a bump so the
+  // hour-of-day indexing is actually exercised (a wrong index would still pass on a flat one).
+  const profile: TrailingLoadProfile = {
+    hourKwh: Array.from({ length: 24 }, (_, h) => (h === 5 ? 0.8 : 0.6)),
+    trailingMeanTempC: 18,
+    days: 14,
+  };
+
+  it('returns the hour value quartered per 15-min slot', () => {
+    // July at 18 °C: HDD = 0 on both sides of the scale ratio → scale = 1 exactly.
+    expect(slotConsumptionFromLive(profile, '2026-07-18T03:00:00', { '2026-07-18': 20 })).toBeCloseTo(0.6 / 4, 10);
+    expect(slotConsumptionFromLive(profile, '2026-07-18T05:30:00', { '2026-07-18': 20 })).toBeCloseTo(0.8 / 4, 10);
+  });
+
+  it('uses the profile as-is when the forecast temp is missing (scale degrades to 1)', () => {
+    expect(slotConsumptionFromLive(profile, '2026-07-18T03:00:00', null)).toBeCloseTo(0.15, 10);
+    expect(slotConsumptionFromLive(profile, '2026-07-18T03:00:00', { '2026-07-19': 20 })).toBeCloseTo(0.15, 10);
+  });
+
+  it('uses the profile as-is when the trailing mean temp is unknown', () => {
+    const noTemp = { ...profile, trailingMeanTempC: null };
+    expect(slotConsumptionFromLive(noTemp, '2026-01-15T03:00:00', { '2026-01-15': -10 })).toBeCloseTo(0.15, 10);
+  });
+
+  it('scales the whole profile up when the forecast is colder than the trailing window', () => {
+    const winter: TrailingLoadProfile = { ...profile, trailingMeanTempC: 5 };
+    const mild = slotConsumptionFromLive(winter, '2026-01-15T03:00:00', { '2026-01-15': 5 });
+    const cold = slotConsumptionFromLive(winter, '2026-01-15T03:00:00', { '2026-01-15': -10 });
+    // Same ratio the static model's HDD slope implies between those two days.
+    expect(cold / mild).toBeCloseTo(dailyLoadKwh(1, -10) / dailyLoadKwh(1, 5), 10);
+    expect(cold).toBeGreaterThan(mild);
+  });
+
+  it('scales down when the forecast is warmer than the trailing window (winter)', () => {
+    const winter: TrailingLoadProfile = { ...profile, trailingMeanTempC: -5 };
+    const v = slotConsumptionFromLive(winter, '2026-01-15T03:00:00', { '2026-01-15': 8 });
+    expect(v).toBeLessThan(0.15);
   });
 });

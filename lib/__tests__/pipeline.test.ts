@@ -143,4 +143,45 @@ describe('buildOptimizerSlots', () => {
     const slots = buildOptimizerSlots(data, null, buildSolarProfiles(data));
     expect(slots[0].loadSource).toBe('baseline');
   });
+
+  // ── Live trailing load profile (lib/telemetry.ts readTrailingLoadProfile → lib/load.ts) ──
+
+  const liveProfile = {
+    hourKwh: Array.from({ length: 24 }, (_, h) => (h === 12 ? 1.2 : 0.6)),
+    trailingMeanTempC: 18,
+    days: 14,
+  };
+
+  it('uses the live profile for consumptionKwh when provided, tagged loadSource live', () => {
+    const data = makeData(); // slot 0 starts 12:00
+    const slots = buildOptimizerSlots(data, null, buildSolarProfiles(data), null, liveProfile);
+    expect(slots[0].consumptionKwh).toBeCloseTo(1.2 / 4, 10);
+    expect(slots[0].loadSource).toBe('live');
+    expect(slots[1].consumptionKwh).toBeCloseTo(0.6 / 4, 10); // 14:00 → base hour value
+  });
+
+  it('live profile wins over the static model even when a temp map is present (July: scale 1)', () => {
+    const data = makeData({
+      today: '2026-07-18',
+      tomorrow: '2026-07-19',
+      prices: [
+        {
+          startTime: '2026-07-18T12:00:00',
+          endTime: '2026-07-18T12:15:00',
+          price: 80,
+          priceIncludingTaxAndSurcharge: 110,
+        },
+      ],
+    });
+    const slots = buildOptimizerSlots(data, null, buildSolarProfiles(data), { '2026-07-18': 20 }, liveProfile);
+    expect(slots[0].consumptionKwh).toBeCloseTo(1.2 / 4, 10);
+    expect(slots[0].loadSource).toBe('live');
+  });
+
+  it('null/undefined live profile keeps the previous static behavior exactly', () => {
+    const data = makeData();
+    const withNull = buildOptimizerSlots(data, null, buildSolarProfiles(data), null, null);
+    const without = buildOptimizerSlots(data, null, buildSolarProfiles(data));
+    expect(withNull).toEqual(without);
+  });
 });

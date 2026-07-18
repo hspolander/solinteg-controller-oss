@@ -6,7 +6,8 @@ import { optimizeDispatch } from './optimizer';
 import type { DispatchSlot } from './optimizer';
 import { readLiveInverterData, socKwhOrDefault } from './inverter';
 import type { InverterLiveData } from './inverter';
-import { logPriceSnapshot, logOptimizerRun } from './telemetry';
+import { logPriceSnapshot, logOptimizerRun, readTrailingLoadProfile } from './telemetry';
+import { LIVE_LOAD_PROFILE_DAYS, LOAD_FORECAST_MARGIN } from './constants';
 
 export interface PlanResult {
   data: PriceData | null;
@@ -79,7 +80,10 @@ export async function producePlan(): Promise<PlanResult> {
 
   if (data) {
     solarProfiles = buildSolarProfiles(data);
-    const allSlots = buildOptimizerSlots(data, solarForecast, solarProfiles, tempByDate);
+    // Live trailing load profile (null off-NUC or on thin data → static model fallback).
+    // Read here, not inside buildOptimizerSlots, to keep that function pure/testable.
+    const liveLoad = readTrailingLoadProfile(LIVE_LOAD_PROFILE_DAYS);
+    const allSlots = buildOptimizerSlots(data, solarForecast, solarProfiles, tempByDate, liveLoad);
 
     // Telemetry (best-effort, no-op unless TELEMETRY_DB_PATH is set). readLiveInverterData()
     // calls connection() above, so this runs at request time, never during `next build`.
@@ -100,7 +104,13 @@ export async function producePlan(): Promise<PlanResult> {
       const nowSlotIdx = Math.max(0, currentSlotIndexInPrices(data.today, new Date()));
       const optimizerSlots = allSlots.slice(nowSlotIdx);
 
-      dispatchSchedule = optimizeDispatch(optimizerSlots, startSoc);
+      // loadFactor: plan against pessimistic load (LOAD_FORECAST_MARGIN) so the trajectory
+      // keeps slack for forecast error — optimizerSlots themselves stay the honest forecast,
+      // and that's what gets logged below, so forecast-vs-actual validation against readings
+      // measures the model, not the deliberate margin.
+      dispatchSchedule = optimizeDispatch(optimizerSlots, startSoc, {
+        loadFactor: LOAD_FORECAST_MARGIN,
+      });
       logOptimizerRun(data.today, data.hasTomorrow, startSoc, optimizerSlots, dispatchSchedule, socIsLive);
     } catch (err) {
       // non-fatal — chart renders without dispatch overlay — but logged so a failure here

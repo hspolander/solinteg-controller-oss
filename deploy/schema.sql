@@ -68,10 +68,14 @@ CREATE TABLE IF NOT EXISTS price_snapshots (
 -- One optimizer execution: inputs (per-slot forecast solar/load, start SoC) and dispatch output.
 -- Join inputs_json (forecast) against readings (actual) by timestamp for forecast-vs-actual.
 -- Each OptimizerSlot in inputs_json carries solarSource ('forecast'|'typical')
--- and loadSource ('modeled'|'baseline') (added 2026-07-02): filter to 'forecast'/'modeled' before
--- treating an error as a real forecast/model miss — a 'typical'/'baseline' slot means the live
--- forecast/temperature wasn't available for that slot, so its error reflects climatology's
--- limits, not the live pipeline's actual skill.
+-- and loadSource ('modeled'|'baseline'|'live') (added 2026-07-02; 'live' 2026-07-18): filter to
+-- 'forecast'/'modeled'/'live' before treating an error as a real forecast/model miss — a
+-- 'typical'/'baseline' slot means the live forecast/temperature wasn't available for that slot,
+-- so its error reflects climatology's limits, not the live pipeline's actual skill. 'live' means
+-- consumptionKwh came from the trailing measured per-hour profile (lib/load.ts). NOTE (2026-07-18):
+-- inputs_json holds the HONEST load forecast, but the DP plans against load × LOAD_FORECAST_MARGIN
+-- (default 1.15, lib/constants.ts) — dispatch_json's gridKwh/socAfter reflect that margin, so
+-- plan-vs-actual grid comparisons must not read the difference as pure forecast error.
 CREATE TABLE IF NOT EXISTS optimizer_runs (
     id            INTEGER PRIMARY KEY,
     logged_at     TEXT NOT NULL,

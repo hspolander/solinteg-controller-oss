@@ -21,6 +21,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { stockholmParts, stockholmToUtc } from './prices';
 import type { PriceData, PriceSlot } from './prices';
 import type { OptimizerSlot, DispatchSlot } from './optimizer';
+import type { TrailingLoadProfile } from './load';
 import type { OracleReadingRow, ArmedEventRow, OracleDayRow } from './oracle';
 import {
   computeDailyEconomics,
@@ -249,6 +250,77 @@ export function readTodaySocHistory(now: Date = new Date()): { timestamp: string
       .all(boundary) as unknown as { timestamp: string; soc_pct: number }[];
   } catch {
     return []; // table absent (poller never ran) or unreadable
+  }
+}
+
+// The trailing load profile scans `days` worth of readings (~120k rows at a 10 s cadence),
+// so it is cached per Stockholm day per process — the window boundary only moves daily and
+// the profile is a multi-day mean, so intra-day staleness is noise. Same pattern (and reason)
+// as readDailyEconomics' frozenDaily above.
+let loadProfileCache: TrailingLoadProfile | null = null;
+let loadProfileKey: string | null = null;
+
+/**
+ * Mean household consumption per local hour-of-day over the trailing `days` window, from the
+ * poller's own readings — the live replacement for the static fitted hour shape (see
+ * lib/load.ts slotConsumptionFromLive for why and how it's consumed). Aggregation happens in
+ * SQL over UTC-hour buckets; each bucket is then mapped to its Stockholm local hour here, so
+ * a DST transition inside the window lands every bucket in the right local bin instead of
+ * being smeared by a fixed offset. Returns null — caller falls back to the static model —
+ * when telemetry is off, or coverage is too thin to trust: fewer than `minDays` distinct
+ * days, or any local hour entirely absent (a profile with holes would silently plan zero
+ * load for that hour). trailingMeanTempC comes from the weather table over the same window
+ * and is null-tolerant: without it the caller only loses winter cold-snap scaling, not the
+ * profile itself.
+ */
+export function readTrailingLoadProfile(days = 14, minDays = 5): TrailingLoadProfile | null {
+  const handle = getDb();
+  if (!handle || days <= 0) return null;
+  try {
+    const now = new Date();
+    const key = `${stockholmDateOf(now.toISOString())}:${days}`;
+    if (loadProfileCache && key === loadProfileKey) return loadProfileCache;
+
+    const sinceIso = new Date(now.getTime() - days * 86_400_000).toISOString();
+    const buckets = handle
+      .prepare(
+        `SELECT strftime('%Y-%m-%dT%H', timestamp) AS bucket,
+                AVG(house_load_w) AS avg_w, COUNT(*) AS n
+         FROM readings
+         WHERE timestamp >= ? AND house_load_w IS NOT NULL
+         GROUP BY bucket`,
+      )
+      .all(sinceIso) as { bucket: string; avg_w: number; n: number }[];
+
+    const sumW = new Array<number>(24).fill(0);
+    const count = new Array<number>(24).fill(0);
+    const localDays = new Set<string>();
+    for (const b of buckets) {
+      const p = stockholmParts(new Date(`${b.bucket}:00:00Z`));
+      sumW[p.hour] += b.avg_w * b.n;
+      count[p.hour] += b.n;
+      localDays.add(p.dateStr);
+    }
+    if (localDays.size < minDays || count.some((n) => n === 0)) return null;
+
+    // Mean W over an hour ≈ kWh in that hour (the poller's cadence is uniform within it).
+    const hourKwh = sumW.map((s, h) => s / count[h] / 1000);
+
+    let trailingMeanTempC: number | null = null;
+    try {
+      const t = handle
+        .prepare('SELECT AVG(temp_c) AS mean_c FROM weather WHERE timestamp >= ?')
+        .get(sinceIso) as { mean_c: number | null } | undefined;
+      trailingMeanTempC = t?.mean_c ?? null;
+    } catch {
+      trailingMeanTempC = null; // weather table absent — profile still usable without scaling
+    }
+
+    loadProfileCache = { hourKwh, trailingMeanTempC, days: localDays.size };
+    loadProfileKey = key;
+    return loadProfileCache;
+  } catch {
+    return null; // readings table absent (poller never ran) or unreadable
   }
 }
 

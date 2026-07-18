@@ -478,3 +478,101 @@ describe('optimizeDispatch with endSoc (terminal constraint)', () => {
     expect(last).toBeLessThanOrEqual(MIN_SOC + 0.3); // still drains as close to the floor as allowed
   });
 });
+
+describe('optimizeDispatch loadFactor (robust-planning margin)', () => {
+  // The 2026-07-18 failure shape: an evening sell opportunity, then a long no-solar night of
+  // committed load with every buy price ABOVE the evening sell price (rebuying a shortfall is
+  // a guaranteed loss). A point-forecast optimum sells down to exactly floor + night load —
+  // zero slack; the margin must make it sell LESS by about (factor−1) × night load.
+  function eveningThenExpensiveNight(): OptimizerSlot[] {
+    return [
+      // 4 evening slots: the best sell price anywhere in the horizon
+      ...Array.from({ length: 4 }, (_, i) => makeSlot(20, i % 4, { buyPrice: 190, sellPrice: 115 })),
+      // 32 night slots (8 h): steady load, no solar, expensive buys, poor sells
+      ...Array.from({ length: 32 }, (_, i) =>
+        makeSlot(21 + Math.floor(i / 4), i % 4, {
+          buyPrice: 185,
+          sellPrice: 85,
+          consumptionKwh: 0.15,
+          solarKwh: 0,
+        }),
+      ),
+    ];
+  }
+
+  const exportedKwh = (dispatch: ReturnType<typeof optimizeDispatch>) =>
+    dispatch.reduce((sum, s) => sum + Math.max(0, -s.gridKwh), 0);
+
+  it('loadFactor 1 (and omitted) reproduce the exact unmargined plan', () => {
+    const slots = eveningThenExpensiveNight();
+    const plain = optimizeDispatch(slots, 12);
+    expect(optimizeDispatch(slots, 12, { loadFactor: 1 })).toEqual(plain);
+  });
+
+  it('keeps the night feasible when real load runs at the margin (the 2026-07-18 failure)', () => {
+    // The margin's actual claim, simulated: real load comes in 15% above forecast, the
+    // battery covers it (as the live-load tracking does) until the floor, the rest is
+    // bought from the grid. The unmargined plan sold its slack in the evening and must
+    // import ~1 kWh at night prices; the margined plan carried exactly enough. Asserting
+    // on exported-kWh magnitudes instead would be flaky: per-slot SoC-grid rounding
+    // (~0.12 kWh steps) accumulates over 32 constant-load slots and can add ~1 kWh of
+    // benign undershoot/overshoot drift on top of the ~0.73 kWh theoretical hold-back.
+    const slots = eveningThenExpensiveNight();
+    const eff = Math.sqrt(BATTERY_RT_EFF);
+    const simulateNightImports = (dispatch: ReturnType<typeof optimizeDispatch>) => {
+      let soc = dispatch[3].socAfter; // SoC after the evening sale
+      let imports = 0;
+      for (let i = 4; i < dispatch.length; i++) {
+        const realLoad = 0.15 * 1.15;
+        const fromBattery = Math.min(realLoad / eff, Math.max(0, soc - MIN_SOC));
+        soc -= fromBattery;
+        imports += realLoad - fromBattery * eff;
+      }
+      return imports;
+    };
+    const imports1 = simulateNightImports(optimizeDispatch(slots, 12));
+    const imports115 = simulateNightImports(optimizeDispatch(slots, 12, { loadFactor: 1.15 }));
+    expect(imports1).toBeGreaterThan(0.5); // unmargined: real shortfall bought at night prices
+    expect(imports115).toBeLessThan(0.2); // margined: the night stays self-covered
+    // And the margin comes out of the evening sale, not out of thin air:
+    const sold1 = exportedKwh(optimizeDispatch(slots, 12));
+    const sold115 = exportedKwh(optimizeDispatch(slots, 12, { loadFactor: 1.15 }));
+    expect(sold115).toBeLessThan(sold1);
+  });
+
+  it('margined plan still ends the night at the floor (margin is spent as planned load)', () => {
+    const slots = eveningThenExpensiveNight();
+    const result = optimizeDispatch(slots, 12, { loadFactor: 1.15 });
+    expect(result[result.length - 1].socAfter).toBeLessThanOrEqual(MIN_SOC + 0.3);
+  });
+
+  it('does not distort price-certain arbitrage: still sells the evening peak and rebuys a cheap night', () => {
+    // Sell 150 evening, buy 60 night — rebuying is profitable per kWh even after the margin,
+    // so the margin must not stop the sale, it just makes the plan rebuy a bit more.
+    const slots = [
+      ...Array.from({ length: 4 }, (_, i) => makeSlot(20, i % 4, { buyPrice: 250, sellPrice: 150 })),
+      ...Array.from({ length: 16 }, (_, i) =>
+        makeSlot(21 + Math.floor(i / 4), i % 4, {
+          buyPrice: 60,
+          sellPrice: 20,
+          consumptionKwh: 0.2,
+          solarKwh: 0,
+        }),
+      ),
+      // morning peak the rebuy serves
+      ...Array.from({ length: 8 }, (_, i) =>
+        makeSlot(25 + Math.floor(i / 4), i % 4, {
+          buyPrice: 300,
+          sellPrice: 180,
+          consumptionKwh: 0.4,
+          solarKwh: 0,
+        }),
+      ),
+    ];
+    const margined = optimizeDispatch(slots, 12, { loadFactor: 1.15 });
+    const eveningExport = margined.slice(0, 4).reduce((s, r) => s + Math.max(0, -r.gridKwh), 0);
+    const nightCharge = margined.slice(4, 20).some((r) => r.action === 'charge');
+    expect(eveningExport).toBeGreaterThan(1); // the profitable sale still happens
+    expect(nightCharge).toBe(true); // and the cheap-night rebuy covers the margined load
+  });
+});

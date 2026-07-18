@@ -16,6 +16,11 @@ elprisetjustnu.se SE3  Open Meteo (minutely_15)   Open Meteo (daily temp)
        │                        │                    lib/load.ts
        │                        │                    dailyLoadKwh / slotConsumptionKwh
        │                        │                    [baseline + slope·HDD; measured hourShareByMonth]
+       │                        │                    [superseded per render by the live trailing
+       │                        │                     per-hour profile when telemetry has ≥5 days:
+       │                        │                     telemetry.ts readTrailingLoadProfile →
+       │                        │                     slotConsumptionFromLive (HDD-ratio scaled),
+       │                        │                     loadSource 'live'; static model = fallback]
        │                        │                          │
        └──────────┬─────────────┴──────────────────────────┘
                   ▼
@@ -28,7 +33,10 @@ elprisetjustnu.se SE3  Open Meteo (minutely_15)   Open Meteo (daily temp)
            optimizeDispatch()
            [net-load aware DP over discretised SoC (193 levels, backward
             cost-to-go pass, terminal value 0); RT_EFF from lib/constants.ts (√η per leg);
-            grid cap from lib/constants.ts; wear cost on |ΔSoC|]
+            grid cap from lib/constants.ts; wear cost on |ΔSoC|; plans against
+            load × LOAD_FORECAST_MARGIN (1.15) so the trajectory keeps
+            slack for load-forecast error — logged inputs stay honest,
+            oracle calls without the factor (see constants.ts rationale)]
                   │
                   ▼
            app/page.tsx  (server component — fetches, assembles, passes props)
@@ -116,7 +124,14 @@ different market or vendor):
   **measured `hourShareByMonth`** (per-month hourly shares from the reference household's meter
   history — see `lib/load.ts`; regenerate yours with `scripts/tools/build-intraday-profile.py`):
   it replaced a uniform 1/96 split, which under-allocated winter load ~30-40% at exactly the
-  morning/evening price peaks.
+  morning/evening price peaks. Since 2026-07-18 the whole static shape is itself superseded at
+  runtime by a **live trailing per-hour profile** from the telemetry readings
+  (`readTrailingLoadProfile` in `lib/telemetry.ts`, ≥5 days of data required, HDD-ratio scaled
+  for weather; `loadSource: 'live'`) — fitted shapes go stale as the household changes (measured
+  ~25% low overnight after 4 years on the reference install), so the fitted model is now the
+  fallback and the cold-snap sensitivity term, not the steady-state forecast. The DP additionally
+  plans against load × `LOAD_FORECAST_MARGIN` (1.15) — see DESIGN-reserve.md §9 for the incident
+  that motivated both.
 
 ### Where constants live
 

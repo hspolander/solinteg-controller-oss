@@ -80,6 +80,35 @@ export const BATTERY_RT_EFF = numEnv('SOLINTEG_BATTERY_RT_EFF', 0.96); // round-
 const SOC_FLOOR_PCT = numEnv('SOLINTEG_SOC_FLOOR_PCT', 8);
 export const BATTERY_MIN_SOC_KWH = BATTERY_KWH * (SOC_FLOOR_PCT / 100); // operational floor (2.048 kWh at 8%)
 
+/**
+ * Robust-planning margin on the load forecast inside the DP (dimensionless factor ≥ 1;
+ * 1 disables). The optimizer PLANS against consumptionKwh × this factor — the logged
+ * telemetry inputs keep the honest, unmargined forecast (see lib/plan.ts).
+ *
+ * Why: the DP trusts its point forecasts completely, so its optimum routinely kisses the
+ * SoC floor at exactly the moment committed load ends (e.g. sunrise) — zero slack. A load
+ * forecast that runs even 10-20% hot then forces grid imports at exactly the hours the
+ * plan judged most expensive (that's WHY the battery was scheduled to carry the night).
+ * Measured 2026-07-18: a ~25%-low overnight load model turned a planned 0.15 kWh import
+ * into 2.18 kWh bought at 170-220 öre. Planning against pessimistic load keeps the plan
+ * feasible in the bad case; when load comes in at forecast, the unspent margin is simply
+ * re-optimized away by the next replan (hourly + triggered), costing only öre-scale spread
+ * timing and ~2 öre/kWh wear. The asymmetry that justifies it: holding 1 kWh too much
+ * costs the small evening/next-day sell-price difference, running 1 kWh short costs the
+ * full buy-sell spread at the night's worst prices. Price-certain arbitrage (sell high
+ * evening, rebuy cheap night) is NOT distorted — prices carry no margin, the DP just
+ * plans to rebuy the margin too. Env: SOLINTEG_LOAD_FORECAST_MARGIN.
+ */
+export const LOAD_FORECAST_MARGIN = numEnv('SOLINTEG_LOAD_FORECAST_MARGIN', 1.15);
+
+/**
+ * Trailing window (days) for the live per-hour load profile read from telemetry readings,
+ * which replaces the static Ellevio-fitted hour shape whenever enough data exists (see
+ * lib/telemetry.ts readTrailingLoadProfile / lib/load.ts slotConsumptionFromLive). 0 disables
+ * the live profile entirely (static model only). Env: SOLINTEG_LIVE_LOAD_DAYS.
+ */
+export const LIVE_LOAD_PROFILE_DAYS = numEnv('SOLINTEG_LIVE_LOAD_DAYS', 14);
+
 // SoC ceiling: enforced entirely inside inverter_control.py's force_charge (refuses to charge
 // past it rather than silently capping) — the DP optimizer does NOT model this today, it plans
 // as if the full BATTERY_KWH were reachable. Exported here for documentation/future use (e.g. a

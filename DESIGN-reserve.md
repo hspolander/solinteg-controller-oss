@@ -1,11 +1,13 @@
 # Design note — adaptive battery reserve & telemetry
 
-**Status:** proposed, NOT implemented. The base control path (fixed floor) is what
-`solinteg-dispatch.service` runs — every register write gated behind
-`SOLINTEG_CONTROL_ARMED` (unset = shadow mode: it computes and logs real per-slot
-decisions without touching the inverter; see README.md's "Safety model"). This document
-covers the *adaptive* confidence-weighted reserve on top of that fixed floor, which
-remains unbuilt — captured here so the roadmap isn't lost.
+**Status:** the §3 confidence-weighted carry-over target is proposed, NOT implemented.
+The base control path (fixed floor) is what `solinteg-dispatch.service` runs — every
+register write gated behind `SOLINTEG_CONTROL_ARMED` (unset = shadow mode: it computes
+and logs real per-slot decisions without touching the inverter; see README.md's "Safety
+model"). A *different, simpler* robustness mechanism SHIPPED 2026-07-18 — the
+load-forecast margin, §9 below — which addresses a failure mode this note's §2 didn't
+cover: running dry *within* a fully-known price horizon because the load forecast itself
+was wrong. §3 remains a candidate for the unknown-horizon blind spot specifically.
 
 ---
 
@@ -141,3 +143,39 @@ the policy needs tuning. Therefore:
 - Remaining open question for *this* proposal specifically: none of the confidence signals
   in §3 have real telemetry to validate against yet (§4) — that's the actual gate before
   building the adaptive layer, not the base-control probes above.
+
+## 9. SHIPPED 2026-07-18 — live load profile + robust-planning load margin
+
+**Incident (night of 2026-07-17/18, on the reference installation):** the evening plan
+sold hard at the evening peak (sell ~115 öre) and planned to trickle the remainder to the
+floor at exactly sunrise — zero slack, with tomorrow's prices fully known
+(`has_tomorrow=1`), so §2's unknown-horizon blind spot was NOT the cause. Real overnight
+load ran ~25% above the model (the years-old fitted hour shape had gone stale: ~650 W
+measured vs ~520 W modeled, every night that week), the floor arrived at 03:45 instead of
+06:00, and 2.18 kWh were bought at 170–220 öre — the exact hours the plan had judged most
+expensive. Two failures, two fixes:
+
+1. **Live trailing load profile** (`lib/telemetry.ts readTrailingLoadProfile` →
+   `lib/load.ts slotConsumptionFromLive`, wired in `lib/pipeline.ts`/`lib/plan.ts`): the
+   per-hour consumption forecast now comes from the house's own trailing 14-day readings
+   (tagged `loadSource: 'live'`), scaled by the static model's HDD ratio so winter cold
+   snaps are still anticipated. Static model remains the fallback (no DB / <5 days data).
+   Env: `SOLINTEG_LIVE_LOAD_DAYS` (0 disables).
+2. **Robust-planning margin** (`optimizeDispatch` `opts.loadFactor`, set from
+   `LOAD_FORECAST_MARGIN`, default 1.15): the DP plans against pessimistic load, so its
+   optimum carries α × remaining-committed-load of slack instead of kissing the floor.
+   Unused margin is released by the next replan; price-certain arbitrage is not distorted
+   (prices carry no margin). The oracle deliberately runs WITHOUT the factor — it
+   re-dispatches actual load, and the margin's cost should appear as (small) honest regret,
+   not be hidden. Env: `SOLINTEG_LOAD_FORECAST_MARGIN` (1 disables).
+
+**Replay evidence** (that night's real inputs + real load, dispatch-loop execution model,
+baseline plan byte-verified against the stored optimizer run): night imports 2.81 kWh
+(stale model, no margin) → 1.06 (live load only) → **0.04 (both)**; ~1.5 kr better over
+one mild July night, with the margin's insurance cost near zero when load behaves. This is
+the *measured-upgrade* path §7 demanded — bias fixed from measurement, α=0.15 sized from
+the observed error band, oracle regret keeps scoring the residual. Revisit α (and a
+solar-side haircut — the same disease in solar flavor: selling in the morning against a
+fully-trusted solar refill forecast) once forecast-vs-actual error distributions exist
+(join `optimizer_runs.inputs_json` against `readings`, see deploy/schema.sql's
+optimizer_runs notes).
