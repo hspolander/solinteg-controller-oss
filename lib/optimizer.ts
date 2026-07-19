@@ -41,6 +41,15 @@ export interface DispatchSlot {
   action: Action;
   gridKwh: number; // net grid exchange: +ve = import (load + battery charge), -ve = export
   solarExportKwh: number; // solar surplus exported to grid this slot
+  // Grid-flow attribution: which part of the slot's grid exchange the BATTERY is responsible
+  // for, vs the house. Net gridKwh alone can't distinguish "buying for the battery" from "load
+  // import during a solar-funded charge", and the chart's decision zones
+  // (lib/chart-utils.ts classifyBand) need exactly that distinction. Like gridKwh and socAfter
+  // these describe the margined plan (see opts.loadFactor below).
+  batteryToGridKwh: number; // battery energy exported to grid — a deliberate sell
+  gridToBatteryKwh: number; // grid energy charged into the battery — a deliberate buy
+  batteryToLoadKwh: number; // battery energy covering house load — default self-use behaviour
+  loadFromGridKwh: number; // house load left for the grid to cover
   socAfter: number; // battery SoC in kWh after slot completes
 }
 
@@ -48,6 +57,10 @@ interface Flows {
   gridImport: number;
   gridExport: number;
   solarExport: number; // solar (not battery) exported to grid — for the chart
+  batteryToGrid: number; // battery-attributed share of gridExport
+  gridToBattery: number; // battery-attributed share of gridImport
+  batteryToLoad: number; // battery energy delivered to house load
+  loadFromGrid: number; // load-attributed share of gridImport
   feasible: boolean;
 }
 
@@ -62,12 +75,20 @@ function computeFlows(soc: number, socNext: number, solarRem: number, loadRem: n
   let gridImport: number;
   let gridExport: number;
   let solarExport: number;
+  let batteryToGrid: number;
+  let gridToBattery: number;
+  let batteryToLoad: number;
+  let loadFromGrid: number;
 
   if (dE >= 0) {
     // charge (or idle): store dE, needs dE / η at the battery input
     const need = dE / ONE_WAY_EFF;
     const fromSolar = Math.min(solarRem, need);
-    gridImport = need - fromSolar + loadRem;
+    gridToBattery = need - fromSolar;
+    loadFromGrid = loadRem;
+    batteryToGrid = 0;
+    batteryToLoad = 0;
+    gridImport = gridToBattery + loadRem;
     solarExport = solarRem - fromSolar;
     gridExport = solarExport;
     if (gridExport > SLOT_MAX_KWH) {
@@ -79,13 +100,17 @@ function computeFlows(soc: number, socNext: number, solarRem: number, loadRem: n
     // discharge: deliver (−dE)·η out of the battery — to load first, then export
     const out = -dE * ONE_WAY_EFF;
     const toLoad = Math.min(out, loadRem);
-    gridImport = loadRem - toLoad;
+    batteryToLoad = toLoad;
+    batteryToGrid = out - toLoad;
+    gridToBattery = 0;
+    loadFromGrid = loadRem - toLoad;
+    gridImport = loadFromGrid;
     solarExport = solarRem;
-    gridExport = solarRem + (out - toLoad);
+    gridExport = solarRem + batteryToGrid;
   }
 
   const feasible = gridImport <= SLOT_MAX_KWH + 1e-9 && gridExport <= SLOT_MAX_KWH + 1e-9;
-  return { gridImport, gridExport, solarExport, feasible };
+  return { gridImport, gridExport, solarExport, batteryToGrid, gridToBattery, batteryToLoad, loadFromGrid, feasible };
 }
 
 /**
@@ -278,6 +303,10 @@ export function optimizeDispatch(
       action,
       gridKwh: f.gridImport - f.gridExport,
       solarExportKwh: f.solarExport,
+      batteryToGridKwh: f.batteryToGrid,
+      gridToBatteryKwh: f.gridToBattery,
+      batteryToLoadKwh: f.batteryToLoad,
+      loadFromGridKwh: f.loadFromGrid,
       socAfter: socNext,
     };
     s = j;

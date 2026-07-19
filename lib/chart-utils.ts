@@ -3,12 +3,34 @@ import { stockholmSlotKey } from './economics';
 import type { PriceSlot } from './prices';
 import type { DispatchSlot, Action } from './optimizer';
 
-// Only the battery's *real grid transactions* draw a band: buying from the grid, or selling
-// (export). Solar-charging and self-use draw nothing — both are obvious from the SoC line moving
-// against the solar curve without a grid exchange. |gridKwh| below the threshold is ignored.
-export type BandKind = 'buy' | 'sell';
+// A zone marks a DELIBERATE optimizer decision — something a plain self-consumption battery
+// would never do on its own. Default behaviour draws nothing: discharging to cover load at
+// night, charging from solar surplus, and exporting solar when the battery is full are all what
+// the inverter's auto mode does anyway, and are readable from the SoC line against the solar
+// curve. The three decisions:
+//   buy  — the plan grid-funds the battery (charging beyond what solar provides)
+//   sell — the plan exports battery energy to the grid (selling into a price peak)
+//   hold — the plan lets the GRID cover house load while the battery sits on usable charge,
+//          reserving it for a better hour — the least obvious decision, hence made visible
+// Classification runs on the ATTRIBUTED flows the optimizer emits (batteryToGridKwh etc.), not
+// on net gridKwh: the net number mixes house load into the picture (a solar-funded charge while
+// the house imports a little for load is not a grid-buy decision, and a discharge that mostly
+// covers load with a dribble of export is not a sell). A one-slot gap inside a sell/buy run is
+// deliberately rendered as a gap — "not this slot" (a momentary price dip) is itself a decision
+// worth seeing, so bands are never merged across sub-threshold slots.
+export type BandKind = 'buy' | 'sell' | 'hold';
 
-const GRID_BAND_THRESHOLD = 0.1; // kWh/slot — ignore negligible grid dribbles
+// kWh per 15-min slot (≈2 kW average) — below this a battery-grid flow is slot-granularity
+// slop around covering load, not a decision. Real planned buys/sells run ~2-2.7 kWh/slot.
+const DECISION_GRID_KWH = 0.5;
+// Grid-covered load before a slot reads as a "hold". Must clear the DP's SoC discretisation
+// step (~0.123 kWh for the reference 25.6 kWh battery): a discharge-to-load slot can leave up
+// to one step of load to the grid purely from snap-to-grid rounding, which is not a reserve
+// decision.
+const HOLD_LOAD_FROM_GRID_KWH = 0.15;
+// The battery must hold at least this much above the discharge floor for "reserving" to be a
+// meaningful choice — an empty battery isn't holding back, it has nothing to give.
+const HOLD_SOC_HEADROOM_KWH = 1;
 
 export interface ActionBand {
   x1: string;
@@ -16,10 +38,15 @@ export interface ActionBand {
   kind: BandKind;
 }
 
-/** Classify a slot's grid transaction; null for idle, solar-charge, self-use, or dribbles. */
-export function classifyBand(d: DispatchSlot): BandKind | null {
-  if (d.action === 'charge' && d.gridKwh > GRID_BAND_THRESHOLD) return 'buy';
-  if (d.action === 'discharge' && d.gridKwh < -GRID_BAND_THRESHOLD) return 'sell';
+/** Classify a slot's deliberate decision; null for default self-use behaviour. batteryFloorKwh
+ *  is the operational SoC floor (BATTERY_MIN_SOC_KWH) — passed in rather than imported so this
+ *  stays usable from the 'use client' chart hook (see buildChartData's own note below). */
+export function classifyBand(d: DispatchSlot, batteryFloorKwh: number): BandKind | null {
+  if (d.gridToBatteryKwh >= DECISION_GRID_KWH) return 'buy';
+  if (d.batteryToGridKwh >= DECISION_GRID_KWH) return 'sell';
+  if (d.loadFromGridKwh >= HOLD_LOAD_FROM_GRID_KWH && d.socAfter >= batteryFloorKwh + HOLD_SOC_HEADROOM_KWH) {
+    return 'hold';
+  }
   return null;
 }
 
@@ -32,6 +59,7 @@ export interface ChartPoint {
   solarKwh: number;
   solarSource: 'forecast' | 'typical';
   action: Action;
+  decision: BandKind | null; // the slot's deliberate decision (classifyBand), for the tooltip
 }
 
 /**
@@ -58,19 +86,19 @@ export function buildActualSocByTime(
 }
 
 /**
- * Collapses consecutive same-kind dispatch slots into contiguous bands for ReferenceArea
- * rendering, classified by grid interaction (buy / solar-charge / sell / self-use). Idle slots
- * (and negligible grid dribbles) are skipped.
+ * Collapses consecutive same-kind dispatch slots into contiguous decision bands (see the
+ * taxonomy above classifyBand). Slots with no deliberate decision are skipped, and a
+ * sub-threshold slot inside a run splits it — that gap is real signal, never merged over.
  */
-export function buildActionBands(schedule: DispatchSlot[]): ActionBand[] {
+export function buildActionBands(schedule: DispatchSlot[], batteryFloorKwh: number): ActionBand[] {
   const bands: ActionBand[] = [];
   let i = 0;
   while (i < schedule.length) {
-    const kind = classifyBand(schedule[i]);
+    const kind = classifyBand(schedule[i], batteryFloorKwh);
     if (kind !== null) {
       const x1 = schedule[i].startTime;
       let j = i + 1;
-      while (j < schedule.length && classifyBand(schedule[j]) === kind) j++;
+      while (j < schedule.length && classifyBand(schedule[j], batteryFloorKwh) === kind) j++;
       bands.push({ x1, x2: schedule[j - 1].startTime, kind });
       i = j;
     } else {
@@ -85,11 +113,11 @@ export function buildActionBands(schedule: DispatchSlot[]): ActionBand[] {
  *  - buy  = full consumer price (priceIncludingTaxAndSurcharge + skatt/överföring) — what the
  *           optimizer decides on and what you pay to import.
  *  - sell = the sell price (spot + EXPORT_BONUS_ORE nätnytta) — what you actually receive per exported kWh.
- * dispatchByTime is a pre-keyed lookup. batteryKwh/skattOverforing are passed in (rather than
- * imported from lib/constants) because this runs inside a 'use client' hook (useChartData) —
- * Next.js never exposes non-NEXT_PUBLIC_ env vars to the client bundle, so a direct import would
- * silently read the hardcoded fallback instead of the deployment's real env-configured value.
- * Callers must pass the values resolved server-side (see app/page.tsx).
+ * dispatchByTime is a pre-keyed lookup. batteryKwh/skattOverforing/batteryFloorKwh are passed in
+ * (rather than imported from lib/constants) because this runs inside a 'use client' hook
+ * (useChartData) — Next.js never exposes non-NEXT_PUBLIC_ env vars to the client bundle, so a
+ * direct import would silently read the hardcoded fallback instead of the deployment's real
+ * env-configured value. Callers must pass the values resolved server-side (see app/page.tsx).
  */
 export function buildChartData(
   prices: PriceSlot[],
@@ -98,6 +126,7 @@ export function buildChartData(
   dispatchByTime: Record<string, DispatchSlot>,
   batteryKwh: number,
   skattOverforing: number,
+  batteryFloorKwh: number,
   actualSocByTime: Record<string, number> = {},
 ): ChartPoint[] {
   return prices.map((slot) => {
@@ -112,6 +141,7 @@ export function buildChartData(
       solarKwh,
       solarSource,
       action: dispatch?.action ?? 'idle',
+      decision: dispatch ? classifyBand(dispatch, batteryFloorKwh) : null,
     };
   });
 }

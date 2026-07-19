@@ -126,7 +126,17 @@ function randomWalk(model: ReturnType<typeof makeModel>, startSoc: number, rand:
   for (let i = 0; i < model.n; i++) {
     const js = model.admissibleJs(s, i);
     const j = js[Math.floor(rand() * js.length)];
-    out.push({ startTime: slots[i].startTime, action: 'idle', gridKwh: 0, solarExportKwh: 0, socAfter: model.socOf(j) });
+    out.push({
+      startTime: slots[i].startTime,
+      action: 'idle',
+      gridKwh: 0,
+      solarExportKwh: 0,
+      batteryToGridKwh: 0,
+      gridToBatteryKwh: 0,
+      batteryToLoadKwh: 0,
+      loadFromGridKwh: 0,
+      socAfter: model.socOf(j),
+    });
     s = j;
   }
   return out;

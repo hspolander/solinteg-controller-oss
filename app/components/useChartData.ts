@@ -21,6 +21,7 @@ export function useChartData(
   dispatchSchedule: DispatchSlot[] | null | undefined,
   batteryKwh: number,
   skattOverforing: number,
+  batteryFloorKwh: number,
   actualSocByTime: Record<string, number> = {},
 ) {
   const dispatchByTime = useMemo(() => {
@@ -29,8 +30,8 @@ export function useChartData(
   }, [dispatchSchedule]);
 
   const actionBands = useMemo(
-    () => buildActionBands(dispatchSchedule ?? []),
-    [dispatchSchedule],
+    () => buildActionBands(dispatchSchedule ?? [], batteryFloorKwh),
+    [dispatchSchedule, batteryFloorKwh],
   );
 
   const chartData = useMemo(
@@ -42,9 +43,10 @@ export function useChartData(
         dispatchByTime,
         batteryKwh,
         skattOverforing,
+        batteryFloorKwh,
         actualSocByTime,
       ),
-    [data.prices, solarForecast, solarProfiles, dispatchByTime, batteryKwh, skattOverforing, actualSocByTime],
+    [data.prices, solarForecast, solarProfiles, dispatchByTime, batteryKwh, skattOverforing, batteryFloorKwh, actualSocByTime],
   );
 
   const xTicks = useMemo(() => buildXTicks(data.prices), [data.prices]);

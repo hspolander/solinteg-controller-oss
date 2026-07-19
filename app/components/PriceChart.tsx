@@ -30,13 +30,18 @@ interface Props {
   // hardcoded fallback instead of the deployment's real env-configured value.
   batteryKwh: number;
   skattOverforing: number;
+  batteryFloorKwh: number;
 }
 
 const BAND_COLOR: Record<BandKind, string> = {
   buy: 'var(--color-charge-band)',
   sell: 'var(--color-sell-band)',
+  hold: 'var(--color-hold-band)',
 };
-const BAND_LABEL: Record<BandKind, string> = { buy: 'Ladda', sell: 'Sälj' };
+const BAND_LABEL: Record<BandKind, string> = { buy: 'Ladda', sell: 'Sälj', hold: 'Sparar' };
+// Hold zones ("the plan is deliberately NOT using the battery") are context, not action —
+// drawn fainter and without the leading edge bar so buy/sell decisions stay dominant.
+const BAND_FILL_PCT: Record<BandKind, number> = { buy: 11, sell: 11, hold: 6 };
 
 type Point = [number, number];
 
@@ -102,6 +107,7 @@ export default function PriceChart({
   actualSocByTime,
   batteryKwh,
   skattOverforing,
+  batteryFloorKwh,
 }: Props) {
   const {
     actionBands,
@@ -123,6 +129,7 @@ export default function PriceChart({
     dispatchSchedule,
     batteryKwh,
     skattOverforing,
+    batteryFloorKwh,
     actualSocByTime,
   );
 
@@ -320,9 +327,22 @@ export default function PriceChart({
             className="chip flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
             style={layers.zones ? { border: '1px solid var(--divider)' } : { color: 'var(--text-muted)', opacity: 0.6 }}
           >
-            <span className="h-[11px] w-[9px] rounded-sm" style={{ background: 'var(--color-charge-band)' }} />
-            <span className="-ml-[3px] h-[11px] w-[9px] rounded-sm" style={{ background: 'var(--color-sell-band)' }} />
-            Åtgärdszoner
+            {/* one swatch+label per zone kind, mirroring the in-chart band pills (BAND_LABEL) */}
+            <span className="flex items-center gap-1">
+              <span className="h-[11px] w-[9px] rounded-sm" style={{ background: 'var(--color-charge-band)' }} />
+              Ladda
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-[11px] w-[9px] rounded-sm" style={{ background: 'var(--color-sell-band)' }} />
+              Sälj
+            </span>
+            <span className="flex items-center gap-1">
+              <span
+                className="h-[11px] w-[9px] rounded-sm"
+                style={{ background: 'color-mix(in srgb, var(--color-hold-band) 55%, transparent)' }}
+              />
+              Sparar
+            </span>
           </button>
         )}
       </div>
@@ -358,7 +378,7 @@ export default function PriceChart({
           </>
         )}
 
-        {/* action bands */}
+        {/* decision bands (see classifyBand in lib/chart-utils.ts for the taxonomy) */}
         {layers.zones &&
           actionBands.map((band, i) => {
             const x1 = timeToX(band.x1, chartData, geo, timeIndex);
@@ -367,13 +387,25 @@ export default function PriceChart({
             const bx = x1 - stepX / 2;
             const bw = x2 - x1 + stepX;
             const color = BAND_COLOR[band.kind];
+            const isHold = band.kind === 'hold';
+            const label = BAND_LABEL[band.kind];
+            const labelW = label.length * 6.4 + 14;
             return (
               <g key={i}>
-                <rect x={bx} y={geo.padT} width={bw} height={geo.plotH} fill={`color-mix(in srgb, ${color} 11%, transparent)`} />
-                <rect x={bx} y={geo.padT} width={2} height={geo.plotH} fill={`color-mix(in srgb, ${color} 50%, transparent)`} />
-                {bw >= 30 && (
+                <rect x={bx} y={geo.padT} width={bw} height={geo.plotH} fill={`color-mix(in srgb, ${color} ${BAND_FILL_PCT[band.kind]}%, transparent)`} />
+                {!isHold && (
+                  <rect x={bx} y={geo.padT} width={2} height={geo.plotH} fill={`color-mix(in srgb, ${color} 50%, transparent)`} />
+                )}
+                {bw >= labelW && (
                   <>
-                    <rect x={bx + bw / 2 - 20} y={geo.padT + 4} width={40} height={15} rx={5} fill={color} />
+                    <rect
+                      x={bx + bw / 2 - labelW / 2}
+                      y={geo.padT + 4}
+                      width={labelW}
+                      height={15}
+                      rx={5}
+                      fill={isHold ? `color-mix(in srgb, ${color} 70%, transparent)` : color}
+                    />
                     <text
                       x={bx + bw / 2}
                       y={geo.padT + 14.5}
@@ -383,7 +415,7 @@ export default function PriceChart({
                       fill="#fff"
                       style={{ fontFamily: 'var(--font-body)' }}
                     >
-                      {BAND_LABEL[band.kind]}
+                      {label}
                     </text>
                   </>
                 )}
@@ -583,8 +615,16 @@ export default function PriceChart({
         >
           <div className="mb-0.5 font-bold" style={{ fontFamily: 'var(--font-heading)' }}>
             {hoverPoint.time.slice(0, 10)} {hoverPoint.time.slice(11, 16)}
-            {hoverPoint.action === 'charge' && <span style={{ color: 'var(--color-charge-band)' }}> · Laddar batteri</span>}
-            {hoverPoint.action === 'discharge' && <span style={{ color: 'var(--color-sell-band)' }}> · Urladdar</span>}
+            {/* deliberate decisions (match the zones) in band colors; default self-use behaviour muted */}
+            {hoverPoint.decision === 'buy' && <span style={{ color: 'var(--color-charge-band)' }}> · Laddar från nätet</span>}
+            {hoverPoint.decision === 'sell' && <span style={{ color: 'var(--color-sell-band)' }}> · Säljer till nätet</span>}
+            {hoverPoint.decision === 'hold' && <span style={{ color: 'var(--color-hold-band)' }}> · Sparar batteriet</span>}
+            {hoverPoint.decision == null && hoverPoint.action === 'discharge' && (
+              <span style={{ color: 'var(--text-muted)' }}> · Urladdar (täcker last)</span>
+            )}
+            {hoverPoint.decision == null && hoverPoint.action === 'charge' && (
+              <span style={{ color: 'var(--text-muted)' }}> · Laddar</span>
+            )}
           </div>
           <TooltipRow color="var(--color-buy)" label="Köp" value={`${hoverPoint.buy.toFixed(1)} öre/kWh`} />
           <TooltipRow color="var(--color-sell)" label="Sälj" value={`${hoverPoint.sell.toFixed(1)} öre/kWh`} />

@@ -576,3 +576,49 @@ describe('optimizeDispatch loadFactor (robust-planning margin)', () => {
     expect(nightCharge).toBe(true); // and the cheap-night rebuy covers the margined load
   });
 });
+
+describe('grid-flow attribution (chart decision zones read these — see lib/chart-utils.ts)', () => {
+  // A varied scenario exercising all flow shapes: cheap night (grid charge + load), modest
+  // solar day (solar charge, but too little to fill the battery — so the night grid-buy stays
+  // optimal), expensive evening (discharge to load + sell peak). Solar is deliberately small:
+  // with abundant solar the DP correctly refuses to grid-charge at all (storing free solar
+  // dominates), and the buy leg would go unexercised.
+  const scenario = (): OptimizerSlot[] => [
+    ...Array.from({ length: 24 }, (_, i) =>
+      makeSlot(Math.floor(i / 4), i % 4, { buyPrice: 30, sellPrice: 10, consumptionKwh: 0.4 }),
+    ),
+    ...Array.from({ length: 40 }, (_, i) =>
+      makeSlot(6 + Math.floor(i / 4), i % 4, { buyPrice: 120, sellPrice: 50, solarKwh: 0.5, consumptionKwh: 0.3 }),
+    ),
+    ...Array.from({ length: 32 }, (_, i) =>
+      makeSlot(16 + Math.floor(i / 4), i % 4, { buyPrice: 280, sellPrice: 170, consumptionKwh: 0.5 }),
+    ),
+  ];
+
+  it('attribution fields are non-negative and mutually exclusive by direction', () => {
+    const result = optimizeDispatch(scenario(), 12);
+    for (const r of result) {
+      expect(r.batteryToGridKwh).toBeGreaterThanOrEqual(0);
+      expect(r.gridToBatteryKwh).toBeGreaterThanOrEqual(0);
+      expect(r.batteryToLoadKwh).toBeGreaterThanOrEqual(0);
+      expect(r.loadFromGridKwh).toBeGreaterThanOrEqual(0);
+      // the battery cannot charge from and discharge to the grid in the same slot
+      expect(Math.min(r.batteryToGridKwh, r.gridToBatteryKwh)).toBe(0);
+      // battery output goes to load or grid, never both while charging
+      if (r.gridToBatteryKwh > 0) expect(r.batteryToLoadKwh + r.batteryToGridKwh).toBe(0);
+    }
+  });
+
+  it('attribution decomposes net gridKwh exactly: (gridToBattery + loadFromGrid) − (batteryToGrid + solarExport)', () => {
+    const result = optimizeDispatch(scenario(), 12);
+    for (const r of result) {
+      const net = r.gridToBatteryKwh + r.loadFromGridKwh - r.batteryToGridKwh - r.solarExportKwh;
+      expect(net).toBeCloseTo(r.gridKwh, 9);
+    }
+    // and the scenario actually exercised each flow at least once
+    expect(result.some((r) => r.gridToBatteryKwh > 0.5)).toBe(true); // cheap-night grid charge
+    expect(result.some((r) => r.batteryToGridKwh > 0.5)).toBe(true); // evening sell
+    expect(result.some((r) => r.batteryToLoadKwh > 0.1)).toBe(true); // discharge to load
+    expect(result.some((r) => r.loadFromGridKwh > 0.1)).toBe(true); // grid-covered load
+  });
+});

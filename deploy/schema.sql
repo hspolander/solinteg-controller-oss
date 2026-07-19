@@ -83,7 +83,9 @@ CREATE TABLE IF NOT EXISTS optimizer_runs (
     has_tomorrow  INTEGER NOT NULL,
     start_soc_kwh REAL NOT NULL,
     inputs_json   TEXT NOT NULL,      -- OptimizerSlot[]: buy, sell, solarKwh, consumptionKwh
-    dispatch_json TEXT NOT NULL       -- DispatchSlot[]: action, gridKwh, socAfter per slot
+    dispatch_json TEXT NOT NULL       -- DispatchSlot[]: action, gridKwh, socAfter per slot; also
+                                      -- the grid-flow attribution fields (batteryToGridKwh etc.
+                                      -- — see lib/optimizer.ts DispatchSlot)
 );
 CREATE INDEX IF NOT EXISTS idx_runs_date ON optimizer_runs(price_date);
 

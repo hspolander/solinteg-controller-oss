@@ -24,6 +24,10 @@
   --color-soc: #7b5cff;
   --color-charge-band: #e5484d;
   --color-sell-band: #2e6edc;
+  /* Hold ("Sparar") zone — deliberately in the SoC purple family: the decision it marks is
+     "the battery is sitting on reserve", the same thing the SoC line shows. Kept as its own
+     variable so it can drift from --color-soc without coupling. */
+  --color-hold-band: #7b5cff;
   --color-now: #f5a623;
   --color-now-text: #231a08;
   --grid-line: #eef1f6;
@@ -78,6 +82,7 @@
     --color-soc: #a58bff;
     --color-charge-band: #ff6b63;
     --color-sell-band: #5b8cff;
+    --color-hold-band: #a58bff;
     --grid-line: rgba(255, 255, 255, 0.07);
     --axis-text: rgba(255, 255, 255, 0.42);
     --zone-today: rgba(255, 255, 255, 0.018);

@@ -30,7 +30,17 @@ const inputs: OptimizerSlot[] = [
   { startTime: '2026-07-01T13:00:00', buyPrice: 200, sellPrice: 55, solarKwh: 0.2, consumptionKwh: 0.3 },
 ];
 const dispatch: DispatchSlot[] = [
-  { startTime: '2026-07-01T13:00:00', action: 'idle', gridKwh: 0.1, solarExportKwh: 0, socAfter: 10 },
+  {
+    startTime: '2026-07-01T13:00:00',
+    action: 'idle',
+    gridKwh: 0.1,
+    solarExportKwh: 0,
+    batteryToGridKwh: 0,
+    gridToBatteryKwh: 0,
+    batteryToLoadKwh: 0,
+    loadFromGridKwh: 0.1,
+    socAfter: 10,
+  },
 ];
 
 function countRuns(): number {
