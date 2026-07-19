@@ -25,10 +25,14 @@ export function useChartData(
   actualSocByTime: Record<string, number> = {},
   pastDispatchSlots: DispatchSlot[] | null | undefined = [],
 ) {
+  // Past slots first, live schedule second: on the one key both could theoretically share (the
+  // live plan's first slot vs a past run's last, which readPastDispatchSlots' cutoff already
+  // excludes), the live plan wins — it's the more current view of that slot's decision.
   const dispatchByTime = useMemo(() => {
-    if (!dispatchSchedule) return {} as Record<string, DispatchSlot>;
-    return Object.fromEntries(dispatchSchedule.map((d) => [d.startTime, d]));
-  }, [dispatchSchedule]);
+    return Object.fromEntries(
+      [...(pastDispatchSlots ?? []), ...(dispatchSchedule ?? [])].map((d) => [d.startTime, d]),
+    );
+  }, [pastDispatchSlots, dispatchSchedule]);
 
   // Historical bands (already-elapsed slots, reconstructed from past plans — see
   // lib/telemetry readPastDispatchSlots) come strictly before dispatchSchedule's own slots, so
