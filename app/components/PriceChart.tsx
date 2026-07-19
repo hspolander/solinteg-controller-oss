@@ -21,6 +21,7 @@ interface Props {
   solarProfiles: Record<number, number[]>;
   solarForecast?: Record<string, number[]> | null;
   dispatchSchedule?: DispatchSlot[] | null;
+  pastDispatchSlots?: DispatchSlot[] | null; // reconstructed historical decision bands (see lib/telemetry readPastDispatchSlots)
   startSocKwh?: number; // SoC the optimizer planned from
   socIsLive?: boolean; // true = live inverter reading, false = 50% fallback
   actualSocByTime?: Record<string, number>; // real measured SoC %, keyed "YYYY-MM-DDTHH:MM"
@@ -102,6 +103,7 @@ export default function PriceChart({
   solarProfiles,
   solarForecast,
   dispatchSchedule,
+  pastDispatchSlots,
   startSocKwh,
   socIsLive,
   actualSocByTime,
@@ -131,6 +133,7 @@ export default function PriceChart({
     skattOverforing,
     batteryFloorKwh,
     actualSocByTime,
+    pastDispatchSlots,
   );
 
   const hasActualSoc = chartData.some((d) => d.actualSocPct != null);

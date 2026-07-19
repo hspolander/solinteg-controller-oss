@@ -3,6 +3,7 @@ import { producePlan } from '@/lib/plan';
 import {
   readDailyEconomics,
   readTodaySocHistory,
+  readPastDispatchSlots,
   readRecentControlActions,
   readRecentOracleDays,
 } from '@/lib/telemetry';
@@ -16,6 +17,7 @@ import EarningsCard from '@/app/components/EarningsCard';
 import LiveInverterPanel from '@/app/components/LiveInverterPanel';
 import OracleCard from '@/app/components/OracleCard';
 import type { EconSummary } from '@/lib/economics';
+import type { DispatchSlot } from '@/lib/optimizer';
 
 export default async function Home() {
   const { data, solarProfiles, solarForecast, dispatchSchedule, startSoc, socIsLive, inverterData } =
@@ -39,6 +41,16 @@ export default async function Home() {
     actualSocByTime = buildActualSocByTime(readTodaySocHistory());
   } catch {
     // non-fatal — chart renders without the "actual" SoC line
+  }
+
+  // Historical decision bands for today's already-elapsed slots — the live dispatchSchedule
+  // above only covers what's left of the day from right now, so without this the chart's
+  // buy/sell/hold zones vanish the moment they elapse (best-effort).
+  let pastDispatchSlots: DispatchSlot[] = [];
+  try {
+    if (data) pastDispatchSlots = readPastDispatchSlots(data.today);
+  } catch {
+    // non-fatal — chart renders with only the forward-looking plan's zones
   }
 
   // The dispatch loop's recent decisions, for the Dispatch card (best-effort; null
@@ -75,6 +87,7 @@ export default async function Home() {
             solarProfiles={solarProfiles}
             solarForecast={solarForecast}
             dispatchSchedule={dispatchSchedule}
+            pastDispatchSlots={pastDispatchSlots}
             startSocKwh={startSoc}
             socIsLive={socIsLive}
             actualSocByTime={actualSocByTime}

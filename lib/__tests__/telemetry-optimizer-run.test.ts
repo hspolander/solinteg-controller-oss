@@ -116,3 +116,44 @@ describe('logOptimizerRun row slimming (rounding + dedup — companion to the 10
     expect(countRuns()).toBe(before + 1);
   });
 });
+
+describe('readPastDispatchSlots', () => {
+  // A different price_date from the dedup tests above so this describe block's rows don't
+  // interleave with (or get deduped against) that suite's — same shared test DB, own namespace.
+  const DATE = '2026-07-05';
+  const slot = (startTime: string, gridToBatteryKwh: number): DispatchSlot => ({
+    ...dispatch[0],
+    startTime,
+    gridToBatteryKwh,
+  });
+
+  it('returns [] with fewer than two runs logged (nothing superseded yet)', () => {
+    telemetry.logOptimizerRun(DATE, false, 10, [inputs[0]], [slot('2026-07-05T13:00:00', 1)], true);
+    expect(telemetry.readPastDispatchSlots(DATE)).toEqual([]);
+  });
+
+  it('reconstructs each run’s slots up to (not including) the next run’s first slot, excluding the newest run entirely', () => {
+    // run2 supersedes run1 starting at 13:15 — run1's 13:15/13:30 entries were never "live".
+    telemetry.logOptimizerRun(
+      DATE,
+      false,
+      10,
+      [inputs[0]],
+      [slot('2026-07-05T13:15:00', 2), slot('2026-07-05T13:30:00', 2)],
+      true,
+    );
+    // run3 (newest) supersedes run2 starting at 13:30 — must be excluded from the result, since
+    // it's the same plan the chart already renders live via dispatchSchedule.
+    telemetry.logOptimizerRun(DATE, false, 10, [inputs[0]], [slot('2026-07-05T13:30:00', 3)], true);
+
+    const past = telemetry.readPastDispatchSlots(DATE);
+    expect(past.map((s) => [s.startTime, s.gridToBatteryKwh])).toEqual([
+      ['2026-07-05T13:00:00', 1], // run1, before run2's 13:15 cutoff
+      ['2026-07-05T13:15:00', 2], // run2, before run3's 13:30 cutoff
+    ]);
+  });
+
+  it('returns [] for a date with no logged runs', () => {
+    expect(telemetry.readPastDispatchSlots('2026-07-06')).toEqual([]);
+  });
+});

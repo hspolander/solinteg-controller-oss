@@ -106,6 +106,45 @@ export function readRecentControlActions(limit = 12): LatestControlAction[] {
   }
 }
 
+/**
+ * Reconstructs the decision bands that were actually in force over the already-elapsed part of
+ * `priceDate` — the live `dispatchSchedule` (lib/plan.ts) is sliced to start at "now" on every
+ * render, so PriceChart's action bands (buildActionBands in lib/chart-utils.ts) only ever see
+ * the forward-looking plan and past decisions vanish from the chart the moment they elapse.
+ *
+ * Every optimizer_runs row's dispatch_json itself starts at whatever slot was current when it
+ * was logged (plan.ts slices from nowSlotIdx), so a run's first slot IS the exact boundary
+ * where it superseded the previous one — no logged_at-vs-slot-time timezone conversion needed.
+ * Runs are read oldest-first; each contributes its own slots up to (not including) the next
+ * run's first slot. The newest row is deliberately excluded — it's the same plan already passed
+ * to the chart as the live `dispatchSchedule` prop, so including it here would duplicate those
+ * bands. Returns [] if telemetry is off, the table is empty, or there's no history yet (fewer
+ * than two runs logged for this date).
+ */
+export function readPastDispatchSlots(priceDate: string): DispatchSlot[] {
+  const handle = getDb();
+  if (!handle) return [];
+  try {
+    const rows = handle
+      .prepare('SELECT dispatch_json FROM optimizer_runs WHERE price_date = ? ORDER BY id ASC')
+      .all(priceDate) as { dispatch_json: string }[];
+    const runs = rows
+      .map((r) => JSON.parse(r.dispatch_json) as DispatchSlot[])
+      .filter((d) => d.length > 0);
+    const past: DispatchSlot[] = [];
+    for (let i = 0; i < runs.length - 1; i++) {
+      const cutoff = runs[i + 1][0].startTime;
+      for (const slot of runs[i]) {
+        if (slot.startTime >= cutoff) break;
+        past.push(slot);
+      }
+    }
+    return past;
+  } catch {
+    return [];
+  }
+}
+
 /** JSON.stringify replacer: round every finite number to 3 decimals (Wh / milli-öre — far
  *  below any consumer's precision: forecast error is tens of percent, dispatch-loop guard
  *  thresholds are 0.5-3 kWh). Unrounded rows carried digits like

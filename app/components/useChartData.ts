@@ -23,15 +23,20 @@ export function useChartData(
   skattOverforing: number,
   batteryFloorKwh: number,
   actualSocByTime: Record<string, number> = {},
+  pastDispatchSlots: DispatchSlot[] | null | undefined = [],
 ) {
   const dispatchByTime = useMemo(() => {
     if (!dispatchSchedule) return {} as Record<string, DispatchSlot>;
     return Object.fromEntries(dispatchSchedule.map((d) => [d.startTime, d]));
   }, [dispatchSchedule]);
 
+  // Historical bands (already-elapsed slots, reconstructed from past plans — see
+  // lib/telemetry readPastDispatchSlots) come strictly before dispatchSchedule's own slots, so
+  // concatenating keeps the array time-ordered and buildActionBands' run-collapsing works
+  // unchanged across the past/live boundary.
   const actionBands = useMemo(
-    () => buildActionBands(dispatchSchedule ?? [], batteryFloorKwh),
-    [dispatchSchedule, batteryFloorKwh],
+    () => buildActionBands([...(pastDispatchSlots ?? []), ...(dispatchSchedule ?? [])], batteryFloorKwh),
+    [pastDispatchSlots, dispatchSchedule, batteryFloorKwh],
   );
 
   const chartData = useMemo(
