@@ -1,10 +1,14 @@
 [Unit]
-Description=Hourly solinteg telemetry capture
+Description=Solinteg telemetry capture (10-min plan refresh)
 
 [Timer]
-# Top of every hour. Cheap (a localhost render), and captures the post-13:00
-# day-ahead price release plus how the plan shifts through the day.
-OnCalendar=hourly
+# Every 10 minutes. Cheap (a localhost render: upstream fetches are cached, the DP runs in
+# milliseconds), and caps plan staleness at ~10 min in the slow-drift band the dispatch
+# loop's SoC-drift replan trigger can't see (drift below DISPATCH_REPLAN_DRIFT_KWH would
+# otherwise ride until the next render). Telemetry growth is contained by logOptimizerRun's
+# dedup + 3-decimal rounding (lib/telemetry/dispatch.ts) — an unchanged plan is not
+# re-logged, so quiet ticks are nearly free.
+OnCalendar=*:00/10
 # Plus a few minutes past STOCKHOLM midnight (explicit timezone — the NUC's system clock
 # may not be Stockholm): the render is what produces the new day's price snapshot +
 # optimizer plan, and without this entry the dispatch loop sits planless (safely in auto,

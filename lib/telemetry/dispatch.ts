@@ -106,6 +106,21 @@ export function readRecentControlActions(limit = 12): LatestControlAction[] {
   }
 }
 
+/** JSON.stringify replacer: round every finite number to 3 decimals (Wh / milli-öre — far
+ *  below any consumer's precision: forecast error is tens of percent, dispatch-loop guard
+ *  thresholds are 0.5-3 kWh). Unrounded rows carried digits like
+ *  `"consumptionKwh":0.20746110774818402` — 19 bytes where 5 carry all the meaning. The
+ *  measured size saving is a modest ~15% (rows are mostly fixed JSON structure — timestamps,
+ *  key names, provenance tags — not float digits); the real point is making consecutive runs
+ *  byte-comparable for the dedup below (the trailing live-load profile drifts in the ~5th
+ *  decimal every render, so unrounded payloads were never identical even when nothing
+ *  meaningful changed). */
+function roundForLog(_key: string, value: unknown): unknown {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.round(value * 1000) / 1000
+    : value;
+}
+
 /** Record one optimizer execution: its inputs (forecast solar/load, start SoC) and output.
  *
  *  `socIsLive` is a publish gate: when live.json is missing/stale the page still computes and
@@ -114,7 +129,16 @@ export function readRecentControlActions(limit = 12): LatestControlAction[] {
  *  a fallback-anchored plan silently replaces a better one computed from a real SoC reading
  *  minutes earlier. Skipping keeps the last live-anchored plan in charge (its staleness is
  *  already bounded by the loop's SoC-divergence guard), and a dead poller is separately
- *  alerted via the healthcheck's live-data staleness rule, so the skip is never silent. */
+ *  alerted via the healthcheck's live-data staleness rule, so the skip is never silent.
+ *
+ *  Deduplication (added 2026-07-19, with the 10-min timer cadence): if the newest row already
+ *  carries byte-identical inputs/dispatch payloads for the same price date and horizon, skip
+ *  the insert — colliding renders (timer + replan POST + open tab) and quiet 10-min ticks
+ *  otherwise append identical rows minutes or seconds apart. start_soc_kwh is
+ *  deliberately NOT part of the comparison: the SoC reading moves a few Wh between renders,
+ *  but when the DP still snaps it to the same grid level the resulting plan — everything the
+ *  dispatch loop and the forecast-vs-actual analyses consume — is unchanged, and keeping the
+ *  previous row in charge is exactly equivalent. */
 export function logOptimizerRun(
   priceDate: string,
   hasTomorrow: boolean,
@@ -132,20 +156,32 @@ export function logOptimizerRun(
     return;
   }
   try {
+    const inputsJson = JSON.stringify(inputs, roundForLog);
+    const dispatchJson = JSON.stringify(dispatch, roundForLog);
+    const prev = handle
+      .prepare(
+        `SELECT price_date, has_tomorrow, inputs_json, dispatch_json
+         FROM optimizer_runs ORDER BY id DESC LIMIT 1`,
+      )
+      .get() as
+      | { price_date: string; has_tomorrow: number; inputs_json: string; dispatch_json: string }
+      | undefined;
+    if (
+      prev &&
+      prev.price_date === priceDate &&
+      prev.has_tomorrow === (hasTomorrow ? 1 : 0) &&
+      prev.inputs_json === inputsJson &&
+      prev.dispatch_json === dispatchJson
+    ) {
+      return; // unchanged plan — the existing newest row stays in charge
+    }
     handle
       .prepare(
         `INSERT INTO optimizer_runs
            (logged_at, price_date, has_tomorrow, start_soc_kwh, inputs_json, dispatch_json)
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(
-        new Date().toISOString(),
-        priceDate,
-        hasTomorrow ? 1 : 0,
-        startSocKwh,
-        JSON.stringify(inputs),
-        JSON.stringify(dispatch),
-      );
+      .run(new Date().toISOString(), priceDate, hasTomorrow ? 1 : 0, startSocKwh, inputsJson, dispatchJson);
   } catch (err) {
     // Best-effort (see readings.ts's logPriceSnapshot) — logged so a silent failure here
     // isn't invisible too.

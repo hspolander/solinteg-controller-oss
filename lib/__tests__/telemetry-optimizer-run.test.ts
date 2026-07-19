@@ -52,6 +52,19 @@ function countRuns(): number {
   }
 }
 
+function newestInputsJson(): string {
+  const db = new DatabaseSync(DB_PATH);
+  try {
+    return (
+      db.prepare('SELECT inputs_json FROM optimizer_runs ORDER BY id DESC LIMIT 1').get() as {
+        inputs_json: string;
+      }
+    ).inputs_json;
+  } finally {
+    db.close();
+  }
+}
+
 describe('logOptimizerRun publish gate', () => {
   it('publishes a plan anchored to a live SoC reading', () => {
     telemetry.logOptimizerRun('2026-07-01', false, 10, inputs, dispatch, true);
@@ -64,5 +77,42 @@ describe('logOptimizerRun publish gate', () => {
     // better plan computed from a real SoC reading) — display-only instead.
     telemetry.logOptimizerRun('2026-07-01', false, 12.8, inputs, dispatch, false);
     expect(countRuns()).toBe(1);
+  });
+});
+
+describe('logOptimizerRun row slimming (rounding + dedup — companion to the 10-min timer)', () => {
+  it('rounds logged floats to 3 decimals (Wh-scale, below every consumer precision)', () => {
+    const noisyInputs: OptimizerSlot[] = [
+      { ...inputs[0], startTime: '2026-07-01T13:15:00', consumptionKwh: 0.20746110774818402 },
+    ];
+    telemetry.logOptimizerRun('2026-07-01', false, 10, noisyInputs, dispatch, true);
+    expect(newestInputsJson()).toContain('"consumptionKwh":0.207');
+    expect(newestInputsJson()).not.toContain('0.20746110774818402');
+  });
+
+  it('skips the insert when the newest row already carries the identical plan', () => {
+    const before = countRuns();
+    telemetry.logOptimizerRun('2026-07-01', false, 10, [{ ...inputs[0], startTime: '2026-07-01T13:15:00', consumptionKwh: 0.20746110774818402 }], dispatch, true);
+    expect(countRuns()).toBe(before); // byte-identical after rounding → deduped
+  });
+
+  it('dedups on the plan payload, not on start_soc_kwh (a few-Wh SoC wiggle is not a new plan)', () => {
+    const before = countRuns();
+    telemetry.logOptimizerRun('2026-07-01', false, 10.037, [{ ...inputs[0], startTime: '2026-07-01T13:15:00', consumptionKwh: 0.2074999 }], dispatch, true);
+    expect(countRuns()).toBe(before); // same rounded payload, drifted SoC → still deduped
+  });
+
+  it('logs a new row the moment the plan actually differs', () => {
+    const before = countRuns();
+    const changed: DispatchSlot[] = [{ ...dispatch[0], gridKwh: 0.5, loadFromGridKwh: 0.5 }];
+    telemetry.logOptimizerRun('2026-07-01', false, 10, [{ ...inputs[0], startTime: '2026-07-01T13:15:00', consumptionKwh: 0.207 }], changed, true);
+    expect(countRuns()).toBe(before + 1);
+  });
+
+  it('a horizon change (tomorrow prices landed) is never deduped, even with equal slots', () => {
+    const before = countRuns();
+    const changed: DispatchSlot[] = [{ ...dispatch[0], gridKwh: 0.5, loadFromGridKwh: 0.5 }];
+    telemetry.logOptimizerRun('2026-07-01', true, 10, [{ ...inputs[0], startTime: '2026-07-01T13:15:00', consumptionKwh: 0.207 }], changed, true);
+    expect(countRuns()).toBe(before + 1);
   });
 });
