@@ -34,6 +34,9 @@ function makePoint(time: string, overrides: Partial<ChartPoint> = {}): ChartPoin
     solarSource: 'typical',
     action: 'idle',
     decision: null,
+    gridToBatteryKwh: null,
+    batteryToGridKwh: null,
+    batteryToLoadKwh: null,
     ...overrides,
   };
 }
@@ -85,7 +88,7 @@ describe('buildActionBands', () => {
       [makeDispatch('2026-06-28T10:00:00', 'charge', { gridToBatteryKwh: 2.0, gridKwh: 2.0 })],
       FLOOR,
     );
-    expect(buy[0]).toEqual({ x1: '2026-06-28T10:00:00', x2: '2026-06-28T10:00:00', kind: 'buy' });
+    expect(buy[0]).toEqual({ x1: '2026-06-28T10:00:00', x2: '2026-06-28T10:00:00', kind: 'buy', kwh: 2.0 });
     // solar-funded charge while the house imports a little for load is NOT a buy decision —
     // exactly the case net gridKwh misclassified before attribution existed
     expect(
@@ -124,7 +127,7 @@ describe('buildActionBands', () => {
       [makeDispatch('2026-06-28T05:00:00', 'idle', { loadFromGridKwh: 0.4, socAfter: FLOOR + 5 })],
       FLOOR,
     );
-    expect(hold[0]).toEqual({ x1: '2026-06-28T05:00:00', x2: '2026-06-28T05:00:00', kind: 'hold' });
+    expect(hold[0]).toEqual({ x1: '2026-06-28T05:00:00', x2: '2026-06-28T05:00:00', kind: 'hold', kwh: 0.4 });
   });
 
   it('hold requires usable charge — a battery at/near the floor is not holding back', () => {
@@ -167,7 +170,7 @@ describe('buildActionBands', () => {
     ];
     const bands = buildActionBands(schedule, FLOOR);
     expect(bands).toHaveLength(1);
-    expect(bands[0]).toEqual({ x1: '2026-06-28T10:00:00', x2: '2026-06-28T10:30:00', kind: 'buy' });
+    expect(bands[0]).toEqual({ x1: '2026-06-28T10:00:00', x2: '2026-06-28T10:30:00', kind: 'buy', kwh: 6.0 });
   });
 
   it('a sub-threshold slot inside a sell run splits it — the pause is signal, never merged over', () => {
@@ -178,8 +181,8 @@ describe('buildActionBands', () => {
     ];
     const bands = buildActionBands(schedule, FLOOR);
     expect(bands).toHaveLength(2);
-    expect(bands[0]).toEqual({ x1: '2026-06-28T20:30:00', x2: '2026-06-28T20:30:00', kind: 'sell' });
-    expect(bands[1]).toEqual({ x1: '2026-06-28T21:00:00', x2: '2026-06-28T21:00:00', kind: 'sell' });
+    expect(bands[0]).toEqual({ x1: '2026-06-28T20:30:00', x2: '2026-06-28T20:30:00', kind: 'sell', kwh: 2.5 });
+    expect(bands[1]).toEqual({ x1: '2026-06-28T21:00:00', x2: '2026-06-28T21:00:00', kind: 'sell', kwh: 2.4 });
   });
 
   it('creates separate bands for different kinds, skipping default slots', () => {
@@ -191,8 +194,35 @@ describe('buildActionBands', () => {
     ];
     const bands = buildActionBands(schedule, FLOOR);
     expect(bands).toHaveLength(2);
-    expect(bands[0]).toEqual({ x1: '2026-06-28T08:00:00', x2: '2026-06-28T08:00:00', kind: 'buy' });
-    expect(bands[1]).toEqual({ x1: '2026-06-28T14:00:00', x2: '2026-06-28T14:15:00', kind: 'sell' });
+    expect(bands[0]).toEqual({ x1: '2026-06-28T08:00:00', x2: '2026-06-28T08:00:00', kind: 'buy', kwh: 2.0 });
+    expect(bands[1]).toEqual({ x1: '2026-06-28T14:00:00', x2: '2026-06-28T14:15:00', kind: 'sell', kwh: 4.0 });
+  });
+
+  it('band kwh sums only the kind-relevant flow, not other grid traffic in the same slots', () => {
+    // a grid-funded charge while the house also imports for load: the buy band's total is the
+    // battery's share (gridToBatteryKwh), never the household import riding along in gridKwh
+    const bands = buildActionBands(
+      [
+        makeDispatch('2026-06-28T03:00:00', 'charge', { gridToBatteryKwh: 2.0, loadFromGridKwh: 0.5, gridKwh: 2.5 }),
+        makeDispatch('2026-06-28T03:15:00', 'charge', { gridToBatteryKwh: 2.7, loadFromGridKwh: 0.4, gridKwh: 3.1 }),
+      ],
+      FLOOR,
+    );
+    expect(bands).toHaveLength(1);
+    expect(bands[0].kind).toBe('buy');
+    expect(bands[0].kwh).toBeCloseTo(4.7);
+  });
+
+  it('band kwh is rounded to 2 decimals (no float-sum noise)', () => {
+    const bands = buildActionBands(
+      [
+        makeDispatch('2026-06-28T20:00:00', 'discharge', { batteryToGridKwh: 0.7 }),
+        makeDispatch('2026-06-28T20:15:00', 'discharge', { batteryToGridKwh: 0.7 }),
+        makeDispatch('2026-06-28T20:30:00', 'discharge', { batteryToGridKwh: 0.7 }),
+      ],
+      FLOOR,
+    );
+    expect(bands[0].kwh).toBe(2.1);
   });
 
   it('does not merge adjacent slots of different kinds (hold vs sell)', () => {
@@ -226,6 +256,25 @@ describe('buildChartData', () => {
     const [pt] = buildChartData(prices, null, profiles, dispatchByTime, BATTERY_KWH, SKATT_OVERFÖRING, BATTERY_MIN_SOC_KWH);
     expect(pt.action).toBe('charge');
     expect(pt.socPct).toBeCloseTo((12 / BATTERY_KWH) * 100, 1); // socAfter 12 kWh
+  });
+
+  it('passes the planned battery flows through for the tooltip (null without a plan)', () => {
+    const prices = [makePrice('2026-06-28T20:00:00')];
+    const dispatchByTime = {
+      '2026-06-28T20:00:00': makeDispatch('2026-06-28T20:00:00', 'discharge', {
+        batteryToGridKwh: 2.4,
+        batteryToLoadKwh: 0.3,
+        gridToBatteryKwh: 0,
+      }),
+    };
+    const [pt] = buildChartData(prices, null, profiles, dispatchByTime, BATTERY_KWH, SKATT_OVERFÖRING, BATTERY_MIN_SOC_KWH);
+    expect(pt.batteryToGridKwh).toBe(2.4);
+    expect(pt.batteryToLoadKwh).toBe(0.3);
+    expect(pt.gridToBatteryKwh).toBe(0);
+    const [noPlan] = buildChartData(prices, null, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING, BATTERY_MIN_SOC_KWH);
+    expect(noPlan.batteryToGridKwh).toBeNull();
+    expect(noPlan.batteryToLoadKwh).toBeNull();
+    expect(noPlan.gridToBatteryKwh).toBeNull();
   });
 
   it('socPct is null when the slot has no dispatch plan', () => {

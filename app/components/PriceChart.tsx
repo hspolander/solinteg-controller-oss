@@ -226,6 +226,15 @@ export default function PriceChart({
 
   const hoverPoint = hover ? chartData[hover.index] : null;
 
+  // The decision zone the hovered slot belongs to, for the tooltip's zone-total row. Bands are
+  // few (a handful per day), so a linear scan per hover render is fine.
+  const hoverBand =
+    hoverPoint && hoverPoint.decision
+      ? actionBands.find(
+          (b) => b.kind === hoverPoint.decision && b.x1 <= hoverPoint.time && hoverPoint.time <= b.x2,
+        ) ?? null
+      : null;
+
   return (
     <div
       className="card-surface box-border flex min-w-0 flex-col p-5 order-1 min-[1600px]:order-none min-[1600px]:[grid-column:1/span_2] min-[1600px]:[grid-row:1]"
@@ -636,6 +645,51 @@ export default function PriceChart({
             label={hoverPoint.solarSource === 'forecast' ? 'Sol (prognos)' : 'Sol (typisk)'}
             value={`${hoverPoint.solarKwh.toFixed(2)} kWh`}
           />
+          {/* planned dispatch quantities — only for deliberate buy/sell decisions, matching the
+              zones; the amount shown is the flow the zone is classified from (grid→battery for
+              a buy, battery→grid for a sell), plus the whole zone's total for context */}
+          {hoverPoint.decision === 'buy' && hoverPoint.gridToBatteryKwh != null && (
+            <>
+              <TooltipRow
+                color="var(--color-charge-band)"
+                label="Laddning (denna kvart)"
+                value={`${hoverPoint.gridToBatteryKwh.toFixed(1)} kWh`}
+              />
+              {hoverBand && (
+                <TooltipRow
+                  color="var(--color-charge-band)"
+                  label="Laddning (hela zonen)"
+                  value={`${hoverBand.kwh.toFixed(1)} kWh`}
+                />
+              )}
+            </>
+          )}
+          {hoverPoint.decision === 'sell' && hoverPoint.batteryToGridKwh != null && (
+            <>
+              <TooltipRow
+                color="var(--color-sell-band)"
+                label="Försäljning (denna kvart)"
+                value={`${hoverPoint.batteryToGridKwh.toFixed(1)} kWh`}
+              />
+              {hoverBand && (
+                <TooltipRow
+                  color="var(--color-sell-band)"
+                  label="Försäljning (hela zonen)"
+                  value={`${hoverBand.kwh.toFixed(1)} kWh`}
+                />
+              )}
+            </>
+          )}
+          {hoverPoint.decision == null &&
+            hoverPoint.action === 'discharge' &&
+            hoverPoint.batteryToLoadKwh != null &&
+            hoverPoint.batteryToLoadKwh > 0 && (
+              <TooltipRow
+                color="var(--color-soc)"
+                label="Batteri → hus"
+                value={`${hoverPoint.batteryToLoadKwh.toFixed(1)} kWh`}
+              />
+            )}
           {hasPlan && hoverPoint.socPct != null && (
             <TooltipRow color="var(--color-soc)" label="Batteri-SoC (planerad)" value={`${hoverPoint.socPct.toFixed(0)} %`} />
           )}

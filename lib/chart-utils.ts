@@ -36,6 +36,15 @@ export interface ActionBand {
   x1: string;
   x2: string;
   kind: BandKind;
+  kwh: number; // planned energy behind the decision, summed over the band's slots (see bandFlowKwh)
+}
+
+/** The flow a band's kind is classified from — buy: grid→battery, sell: battery→grid,
+ *  hold: load left to the grid (what the battery is deliberately not covering). */
+function bandFlowKwh(d: DispatchSlot, kind: BandKind): number {
+  if (kind === 'buy') return d.gridToBatteryKwh;
+  if (kind === 'sell') return d.batteryToGridKwh;
+  return d.loadFromGridKwh;
 }
 
 /** Classify a slot's deliberate decision; null for default self-use behaviour. batteryFloorKwh
@@ -60,6 +69,11 @@ export interface ChartPoint {
   solarSource: 'forecast' | 'typical';
   action: Action;
   decision: BandKind | null; // the slot's deliberate decision (classifyBand), for the tooltip
+  // Planned per-slot battery flows (kWh/15 min), for the tooltip's dispatch quantities —
+  // null when the slot has no dispatch plan. Same attribution semantics as DispatchSlot.
+  gridToBatteryKwh: number | null;
+  batteryToGridKwh: number | null;
+  batteryToLoadKwh: number | null;
 }
 
 /**
@@ -99,7 +113,9 @@ export function buildActionBands(schedule: DispatchSlot[], batteryFloorKwh: numb
       const x1 = schedule[i].startTime;
       let j = i + 1;
       while (j < schedule.length && classifyBand(schedule[j], batteryFloorKwh) === kind) j++;
-      bands.push({ x1, x2: schedule[j - 1].startTime, kind });
+      let kwh = 0;
+      for (let k = i; k < j; k++) kwh += bandFlowKwh(schedule[k], kind);
+      bands.push({ x1, x2: schedule[j - 1].startTime, kind, kwh: Math.round(kwh * 100) / 100 });
       i = j;
     } else {
       i++;
@@ -142,6 +158,9 @@ export function buildChartData(
       solarSource,
       action: dispatch?.action ?? 'idle',
       decision: dispatch ? classifyBand(dispatch, batteryFloorKwh) : null,
+      gridToBatteryKwh: dispatch ? dispatch.gridToBatteryKwh : null,
+      batteryToGridKwh: dispatch ? dispatch.batteryToGridKwh : null,
+      batteryToLoadKwh: dispatch ? dispatch.batteryToLoadKwh : null,
     };
   });
 }
