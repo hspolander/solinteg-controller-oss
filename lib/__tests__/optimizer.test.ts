@@ -622,3 +622,136 @@ describe('grid-flow attribution (chart decision zones read these — see lib/cha
     expect(result.some((r) => r.loadFromGridKwh > 0.1)).toBe(true); // grid-covered load
   });
 });
+
+describe('risk-aware planning (deferral bias + solar risk premium — the 2026-07-19 incident)', () => {
+  const boughtKwh = (d: ReturnType<typeof optimizeDispatch>, from: number, to: number) =>
+    d.slice(from, to).reduce((s, r) => s + r.gridToBatteryKwh, 0);
+  const soldKwh = (d: ReturnType<typeof optimizeDispatch>, from: number, to: number) =>
+    d.slice(from, to).reduce((s, r) => s + r.batteryToGridKwh, 0);
+
+  // ── Deferral bias ─────────────────────────────────────────────────────────
+  it('grid-buys land in the LATEST near-equal-price slots, not the literally cheapest early ones', () => {
+    // The 2026-07-19 shape: a 6 h near-flat cheap window (prices creep up 0.05 öre/slot, so the
+    // plain DP buys at the very start) before a sell peak. With the deferral bias (0.1 öre/slot
+    // of earliness > the 0.05 öre/slot price creep) every buy must slide to the window's end,
+    // where the next replan can still cancel it if solar over-delivers.
+    const cheap = Array.from({ length: 24 }, (_, i) =>
+      makeSlot(Math.floor(i / 4), i % 4, { buyPrice: 85 + i * 0.05, sellPrice: 10 }),
+    );
+    const peak = Array.from({ length: 4 }, (_, i) =>
+      makeSlot(6, i, { buyPrice: 310, sellPrice: 300 }),
+    );
+    const slots = [...cheap, ...peak];
+    const plain = optimizeDispatch(slots, MIN_SOC);
+    const deferred = optimizeDispatch(slots, MIN_SOC, { deferralRateOrePerKwhHour: 0.4 });
+    expect(boughtKwh(plain, 0, 6)).toBeGreaterThan(10); // plain: buys the cheapest = earliest slots
+    expect(boughtKwh(deferred, 0, 12)).toBeLessThan(0.1); // deferred: nothing early…
+    expect(boughtKwh(deferred, 18, 24)).toBeGreaterThan(10); // …everything at the window's end
+    // and the deferral gave up only the öre-scale price creep, not the trade itself
+    expect(soldKwh(deferred, 24, 28)).toBeGreaterThan(10);
+  });
+
+  it('sells defer from an evening peak to a near-equal next-morning peak (holds overnight)', () => {
+    // A sold kWh can only be re-acquired ~75-80 öre dearer (moms + skatt/överföring), so among
+    // near-equal sell prices later strictly dominates: the energy stays available overnight for
+    // a surprise load, and the morning replan still gets to re-decide. 2 öre buys 12 h of that.
+    const evening = Array.from({ length: 4 }, (_, i) =>
+      makeSlot(20, i, { buyPrice: 300, sellPrice: 105 }),
+    );
+    const night = Array.from({ length: 48 }, (_, i) =>
+      makeSlot(21 + Math.floor(i / 4), i % 4, { buyPrice: 300, sellPrice: 10 }),
+    );
+    const morning = Array.from({ length: 4 }, (_, i) =>
+      makeSlot(33, i, { buyPrice: 300, sellPrice: 103 }),
+    );
+    const trailing = Array.from({ length: 4 }, (_, i) =>
+      makeSlot(34, i, { buyPrice: 300, sellPrice: 10 }),
+    );
+    const slots = [...evening, ...night, ...morning, ...trailing];
+    const plain = optimizeDispatch(slots, 10);
+    const deferred = optimizeDispatch(slots, 10, { deferralRateOrePerKwhHour: 0.4 });
+    expect(soldKwh(plain, 0, 4)).toBeGreaterThan(6); // plain: takes the 2 öre better evening
+    expect(soldKwh(deferred, 0, 4)).toBeLessThan(0.1); // deferred: holds through the night…
+    expect(soldKwh(deferred, 52, 56)).toBeGreaterThan(6); // …and sells the morning peak instead
+  });
+
+  it('sacrifice guard: a genuinely-better early peak is never deferred past the öre cap', () => {
+    // Same shape but the morning is 10 öre WORSE and the rate is cranked high enough that the
+    // biased pass alone would still flip to morning — the two-pass guard must catch that the
+    // flip costs ~78 öre of real value (> 50 cap) and fall back to the undeferred plan.
+    const evening = Array.from({ length: 4 }, (_, i) =>
+      makeSlot(20, i, { buyPrice: 300, sellPrice: 105 }),
+    );
+    const night = Array.from({ length: 48 }, (_, i) =>
+      makeSlot(21 + Math.floor(i / 4), i % 4, { buyPrice: 300, sellPrice: 10 }),
+    );
+    const morning = Array.from({ length: 4 }, (_, i) =>
+      makeSlot(33, i, { buyPrice: 300, sellPrice: 95 }),
+    );
+    const trailing = Array.from({ length: 4 }, (_, i) =>
+      makeSlot(34, i, { buyPrice: 300, sellPrice: 10 }),
+    );
+    const slots = [...evening, ...night, ...morning, ...trailing];
+    const guarded = optimizeDispatch(slots, 10, { deferralRateOrePerKwhHour: 3 });
+    expect(soldKwh(guarded, 0, 4)).toBeGreaterThan(6); // guard rejected the flip: evening sell stands
+    // Prove the guard was the deciding mechanism: with a loosened cap the same rate flips.
+    const loosened = optimizeDispatch(slots, 10, {
+      deferralRateOrePerKwhHour: 3,
+      maxDeferralSacrificeOre: 100,
+    });
+    expect(soldKwh(loosened, 52, 56)).toBeGreaterThan(6);
+  });
+
+  // ── Solar risk premium ────────────────────────────────────────────────────
+  it('grid-buys wait out the forecast solar instead of pre-buying what it may still deliver', () => {
+    // The incident's exact shape: thin-margin arbitrage (buy 86 → sell 98 evening ≈ +3.5 öre/kWh
+    // after losses + wear) on a gloomy-forecast day whose 6 kWh of RAW forecast solar nets to
+    // ZERO surplus against the concurrent load — so a surplus-based premium would see no risk
+    // at all, yet a modest over-delivery creates real surplus from nothing (2026-07-19 delivered
+    // 3-5× forecast and filled the battery by 14:30). While meaningful raw solar is still ahead
+    // the premium (20 × suffixRawSolar/headroom) drowns the margin, so any buy may only happen
+    // in the post-solar tail, where the premium decays to zero BECAUSE nothing can
+    // surprise-refill the battery anymore — buying the true residual there is genuinely
+    // low-risk, and exactly what a replan-aware system wants.
+    const midday = Array.from({ length: 24 }, (_, i) =>
+      makeSlot(10 + Math.floor(i / 4), i % 4, {
+        buyPrice: 86,
+        sellPrice: 6,
+        solarKwh: 0.25,
+        consumptionKwh: 0.25,
+      }),
+    );
+    const evening = Array.from({ length: 12 }, (_, i) =>
+      makeSlot(18 + Math.floor(i / 4), i % 4, { buyPrice: 190, sellPrice: 98 }),
+    );
+    const slots = [...midday, ...evening];
+    const plain = optimizeDispatch(slots, 14);
+    const withPremium = optimizeDispatch(slots, 14, { solarRiskPremiumOre: 20 });
+    expect(boughtKwh(plain, 0, 24)).toBeGreaterThan(1); // the thin trade plain happily takes
+    expect(boughtKwh(withPremium, 0, 12)).toBeLessThan(0.05); // premium: never ahead of the solar
+    // the evening sell still happens — only the buy shrank/moved to the tail
+    expect(soldKwh(withPremium, 24, 36)).toBeGreaterThan(5);
+  });
+
+  it('premium leaves no-solar (winter night) arbitrage bit-identical to the plain optimum', () => {
+    // suffixSolar ≡ 0 → the premium contributes exactly 0.0 öre to every transition.
+    const night = Array.from({ length: 20 }, (_, i) =>
+      makeSlot(Math.floor(i / 4), i % 4, { buyPrice: 50, sellPrice: 40, consumptionKwh: 0.5 }),
+    );
+    const evening = Array.from({ length: 76 }, (_, i) =>
+      makeSlot(Math.floor((i + 20) / 4), (i + 20) % 4, { buyPrice: 250, sellPrice: 40, consumptionKwh: 0.5 }),
+    );
+    const slots = [...night, ...evening];
+    const plain = optimizeDispatch(slots, 2);
+    expect(optimizeDispatch(slots, 2, { solarRiskPremiumOre: 20 })).toEqual(plain);
+    expect(plain.slice(0, 20).some((s) => s.action === 'charge')).toBe(true); // arbitrage intact
+  });
+
+  it('zero-valued knobs (and omitted) reproduce the exact plain plan', () => {
+    const slots = uniformDay(100, 120);
+    const plain = optimizeDispatch(slots, 12);
+    expect(
+      optimizeDispatch(slots, 12, { deferralRateOrePerKwhHour: 0, solarRiskPremiumOre: 0 }),
+    ).toEqual(plain);
+  });
+});

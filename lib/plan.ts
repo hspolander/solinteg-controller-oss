@@ -7,7 +7,12 @@ import type { DispatchSlot } from './optimizer';
 import { readLiveInverterData, socKwhOrDefault } from './inverter';
 import type { InverterLiveData } from './inverter';
 import { logPriceSnapshot, logOptimizerRun, readTrailingLoadProfile } from './telemetry';
-import { LIVE_LOAD_PROFILE_DAYS, LOAD_FORECAST_MARGIN } from './constants';
+import {
+  LIVE_LOAD_PROFILE_DAYS,
+  LOAD_FORECAST_MARGIN,
+  DEFERRAL_RATE_ORE_PER_KWH_HOUR,
+  SOLAR_RISK_PREMIUM_ORE_PER_KWH,
+} from './constants';
 
 export interface PlanResult {
   data: PriceData | null;
@@ -108,8 +113,14 @@ export async function producePlan(): Promise<PlanResult> {
       // keeps slack for forecast error — optimizerSlots themselves stay the honest forecast,
       // and that's what gets logged below, so forecast-vs-actual validation against readings
       // measures the model, not the deliberate margin.
+      // deferral/solar-risk: risk-aware planning (added 2026-07-19 — see each constant's
+      // rationale in lib/constants.ts). Live plans only; the hindsight oracle must never
+      // carry these, same as loadFactor. Kill switches: set the corresponding env vars
+      // (SOLINTEG_DEFERRAL_RATE_ORE / SOLINTEG_SOLAR_RISK_PREMIUM_ORE) to 0.
       dispatchSchedule = optimizeDispatch(optimizerSlots, startSoc, {
         loadFactor: LOAD_FORECAST_MARGIN,
+        deferralRateOrePerKwhHour: DEFERRAL_RATE_ORE_PER_KWH_HOUR,
+        solarRiskPremiumOre: SOLAR_RISK_PREMIUM_ORE_PER_KWH,
       });
       logOptimizerRun(data.today, data.hasTomorrow, startSoc, optimizerSlots, dispatchSchedule, socIsLive);
     } catch (err) {

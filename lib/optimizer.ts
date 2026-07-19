@@ -5,6 +5,7 @@ import {
   BATTERY_MIN_SOC_KWH,
   BATTERY_WEAR_COST_ORE_PER_KWH,
   GRID_KW,
+  MAX_DEFERRAL_SACRIFICE_ORE,
 } from './constants';
 
 export { BATTERY_KWH, BATTERY_MAX_KW, GRID_KW, BATTERY_MIN_SOC_KWH }; // re-export for tests and external callers
@@ -151,11 +152,61 @@ function computeFlows(soc: number, socNext: number, solarRem: number, loadRem: n
  *   existing tests pin the unmargined optimum. The emitted gridKwh/socAfter describe the
  *   margined plan — the honest forecast is what gets logged to telemetry (lib/plan.ts), so
  *   forecast-vs-actual validation is not polluted by the deliberate margin.
+ * @param opts.deferralRateOrePerKwhHour  risk-aware planning (added 2026-07-19, see
+ *   DEFERRAL_RATE_ORE_PER_KWH_HOUR in lib/constants.ts for the incident + full rationale):
+ *   surcharge the battery's grid-facing actions (grid-funded charge, battery-to-grid sell) by
+ *   `rate × hoursUntilHorizonEnd` öre/kWh in the backward pass, so among near-equal prices the
+ *   action lands as late as possible and stays cancellable by the next replan. When set, the DP
+ *   runs twice — with and without the bias — and the deferred plan is kept only if it gives up
+ *   at most opts.maxDeferralSacrificeOre (default MAX_DEFERRAL_SACRIFICE_ORE) of TRUE-priced
+ *   value vs the undeferred optimum, so a genuinely better early price is never deferred over.
+ *   Load-covering discharges are deliberately NOT biased: their timing is dictated by when the
+ *   load occurs, and biasing them would fight the reserve logic for no option-value gain.
+ * @param opts.solarRiskPremiumOre  risk-aware planning (see SOLAR_RISK_PREMIUM_ORE_PER_KWH):
+ *   surcharge grid-funded charging by `premium × min(1, futureRawForecastSolar /
+ *   batteryHeadroom)` öre/kWh, so a buy that a plausible solar over-delivery would make
+ *   redundant must clear a real risk margin, not any thin positive edge. Zero whenever no
+ *   forecast solar remains (winter nights), so genuine arbitrage is untouched.
+ *   Both knobs are planning-only and default OFF: the oracle re-dispatches actual data in
+ *   hindsight, where deferral/uncertainty have no meaning — biasing it would poison the
+ *   regret-≥0 invariant (lib/oracle.ts). Only lib/plan.ts sets them, for live plans.
  */
 export function optimizeDispatch(
   slots: OptimizerSlot[],
   startSoc: number = BATTERY_KWH / 2,
-  opts?: { endSoc?: number; loadFactor?: number },
+  opts?: {
+    endSoc?: number;
+    loadFactor?: number;
+    deferralRateOrePerKwhHour?: number;
+    maxDeferralSacrificeOre?: number;
+    solarRiskPremiumOre?: number;
+  },
+): DispatchSlot[] {
+  if ((opts?.deferralRateOrePerKwhHour ?? 0) > 0 && slots.length > 0) {
+    // Two-pass sacrifice guard: the deferral ramp is a planning fiction, so measure what it
+    // really costs — price both trajectories with the DP's own true-price arithmetic
+    // (evaluateDispatch) and refuse the deferred plan beyond the cap. All-or-nothing on
+    // purpose (see MAX_DEFERRAL_SACRIFICE_ORE's rationale).
+    const undeferred = dpCore(slots, startSoc, { ...opts, deferralRateOrePerKwhHour: 0 });
+    const deferred = dpCore(slots, startSoc, opts);
+    const cap = opts?.maxDeferralSacrificeOre ?? MAX_DEFERRAL_SACRIFICE_ORE;
+    const sacrifice =
+      evaluateDispatch(slots, undeferred, startSoc).valueOre -
+      evaluateDispatch(slots, deferred, startSoc).valueOre;
+    return sacrifice <= cap ? deferred : undeferred;
+  }
+  return dpCore(slots, startSoc, opts);
+}
+
+function dpCore(
+  slots: OptimizerSlot[],
+  startSoc: number,
+  opts?: {
+    endSoc?: number;
+    loadFactor?: number;
+    deferralRateOrePerKwhHour?: number;
+    solarRiskPremiumOre?: number;
+  },
 ): DispatchSlot[] {
   const n = slots.length;
   if (n === 0) return [];
@@ -185,6 +236,25 @@ export function optimizeDispatch(
     solarRem[i] = slots[i].solarKwh - s2l;
     loadRem[i] = load - s2l;
     autoChargeInputKwh[i] = Math.min(solarRem[i], SLOT_MAX_KWH);
+  }
+
+  // Risk-aware planning surcharges (see optimizeDispatch's opts docs; both default 0 = off,
+  // and a 0 rate contributes exactly 0.0 öre to every transition, so the plain DP is
+  // bit-identical to before these existed). deferOre[i] is the per-kWh earliness surcharge on
+  // grid-facing battery actions at slot i; suffixSolarKwh[i] is the RAW forecast solar still
+  // to come STRICTLY AFTER slot i (own-slot solar can't surprise a slot that grid-buys — a
+  // buying slot has already consumed its surplus, need > sr). Raw, NOT load-netted surplus,
+  // deliberately: the premium prices FORECAST ERROR, and error scales with how much solar the
+  // forecast still has in play — a gloomy 6 kWh-day forecast can net to zero surplus and still
+  // deliver 3-5× and fill the battery (the 2026-07-19 incident did exactly that); netted
+  // surplus would price that day as risk-free, blind on precisely the highest-error days.
+  const deferralRate = opts?.deferralRateOrePerKwhHour ?? 0;
+  const solarRiskPremiumOre = opts?.solarRiskPremiumOre ?? 0;
+  const deferOre = new Float64Array(n);
+  const suffixSolarKwh = new Float64Array(n + 1);
+  for (let i = n - 1; i >= 0; i--) {
+    deferOre[i] = deferralRate * 0.25 * (n - 1 - i); // 0.25 h per 15-min slot of earliness
+    suffixSolarKwh[i] = suffixSolarKwh[i + 1] + slots[i].solarKwh;
   }
 
   // Backward pass: costToGo[level] = min öre cost from the next slot onward at that SoC level.
@@ -220,6 +290,18 @@ export function optimizeDispatch(
       // free solar auto-charges it to unless something actively discharges it instead
       // (handled separately, j < s below) — see autoChargeInputKwh's definition above.
       const naturalFloor = idxOf(Math.min(soc + autoInput * ONE_WAY_EFF, BATTERY_KWH));
+      // Solar-redundancy premium for grid-buying AT THIS state: scales with how much of the
+      // remaining headroom the strictly-future raw forecast solar could fill on its own (see
+      // suffixSolarKwh above for why raw, not netted). Headroom is this slot's proxy for
+      // "what the buy competes with" — planned discharges between now and the solar's arrival
+      // can open more room, so this slightly UNDER-counts the risk; acceptable for a heuristic
+      // priced in öre. Denominator floored at one grid step to keep a near-full battery from
+      // dividing by ~0 (ratio caps at 1 regardless).
+      const solarRiskOre =
+        solarRiskPremiumOre > 0
+          ? solarRiskPremiumOre *
+            Math.min(1, suffixSolarKwh[i + 1] / Math.max(BATTERY_KWH - soc, step))
+          : 0;
       let best = Infinity;
       let bestJ = s;
       for (let j = lo; j <= hi; j++) {
@@ -228,25 +310,31 @@ export function optimizeDispatch(
         const dE = socOf(j) - soc;
         let gImp: number;
         let gExp: number;
+        let riskOre: number; // deferral + redundancy surcharge on the battery's grid-facing share
         if (dE >= 0) {
           const need = dE / ONE_WAY_EFF;
           const fromSolar = need < sr ? need : sr;
-          gImp = need - fromSolar + lr;
+          const gridToBattery = need - fromSolar;
+          gImp = gridToBattery + lr;
           gExp = sr - fromSolar;
           if (gExp > SLOT_MAX_KWH) gExp = SLOT_MAX_KWH;
+          riskOre = gridToBattery * (deferOre[i] + solarRiskOre);
         } else {
           const out = -dE * ONE_WAY_EFF;
           const toLoad = out < lr ? out : lr;
           gImp = lr - toLoad;
           gExp = sr + (out - toLoad);
           if (gExp > SLOT_MAX_KWH + 1e-9) continue; // over-export infeasible
+          // Only the battery-to-grid share is deferral-biased: covering load (toLoad) happens
+          // when the load happens — there is no "later" to defer it to.
+          riskOre = (out - toLoad) * deferOre[i];
         }
         if (gImp > SLOT_MAX_KWH + 1e-9) continue; // over-import infeasible
         // Wear cost on |dE| (battery throughput this slot) discourages cycling the
         // battery for a marginal gain smaller than what it costs in degradation —
         // see BATTERY_WEAR_COST_ORE_PER_KWH. Zero when j === s (idle, dE = 0).
         const wear = BATTERY_WEAR_COST_ORE_PER_KWH * Math.abs(dE);
-        const cost = gImp * buy - gExp * sell + wear + costToGo[j];
+        const cost = gImp * buy - gExp * sell + wear + riskOre + costToGo[j];
         if (cost < best) {
           best = cost;
           bestJ = j;

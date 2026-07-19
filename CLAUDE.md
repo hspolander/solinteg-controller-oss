@@ -113,6 +113,30 @@ different market or vendor):
   overnight when solar will refill for a load-only evening").
 - **Cheapest-hours charging**: when a grid-buy is warranted it lands in the cheapest slots, not
   the earliest (test: "grid-charges in the cheapest hour, not the earliest, before a sell peak").
+- **Risk-aware planning** (added 2026-07-19 after an ~8 kWh grid-buy executed at 09:45 for an
+  evening sell on a "6 kWh solar" forecast day that delivered 3-5× that — battery full on sun
+  alone by 14:30, ≈6 kr lost for a ≤1 kr planned upside): two planning-only surcharges in the DP,
+  both opt-in via `optimizeDispatch` opts, set ONLY by `lib/plan.ts` for live plans — the
+  hindsight oracle must never carry them (deferral/uncertainty are meaningless in hindsight and
+  would poison the regret-≥0 invariant). (1) **Deferral bias**: grid-funded charges and
+  battery-to-grid sells cost `rate × hoursUntilHorizonEnd` extra öre/kWh, so among near-equal
+  prices the action lands as late as possible and the hourly/triggered replans can still cancel
+  it if reality diverges; a two-pass guard prices both plans at TRUE prices and refuses to give
+  up more than `MAX_DEFERRAL_SACRIFICE_ORE` (~0.5 kr) of real value, so a genuinely better early
+  price is never deferred over (tests: "grid-buys land in the LATEST near-equal-price slots…",
+  "sells defer from an evening peak…", "sacrifice guard…"). (2) **Solar risk premium**:
+  grid-funded charging pays `premium × min(1, futureRawForecastSolar / batteryHeadroom)`
+  öre/kWh (RAW forecast solar, not load-netted surplus — the premium prices forecast error,
+  and the incident day's forecast netted to zero surplus yet filled the battery), so a
+  thin-margin buy that a plausible solar over-delivery would make redundant
+  doesn't happen until the solar is behind it — zero with no solar ahead, leaving winter
+  arbitrage bit-identical (tests: "grid-buys wait out the forecast solar…", "premium leaves
+  no-solar (winter night) arbitrage bit-identical…"). Constants + full rationale in
+  `lib/constants.ts` (`DEFERRAL_RATE_ORE_PER_KWH_HOUR`, `MAX_DEFERRAL_SACRIFICE_ORE`,
+  `SOLAR_RISK_PREMIUM_ORE_PER_KWH`); env kill switches set each to 0. What stays deliberately
+  UNBIASED: load-covering discharges (their timing is dictated by the load), and no seasonal
+  logic anywhere — winter night-buying and "don't sell what the night load needs" remain
+  emergent from prices/solar exactly as before.
 - **Battery wear cost**: every kWh of battery throughput (charge or discharge) carries a small
   cost (`BATTERY_WEAR_COST_ORE_PER_KWH` in `lib/constants.ts`) so the DP won't cycle the battery
   for a gain smaller than its degradation cost. Deliberately gentle — sized off the *fractional*
