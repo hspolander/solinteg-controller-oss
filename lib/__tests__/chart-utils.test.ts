@@ -13,13 +13,17 @@ import {
   computePriceMin,
   computeSolarMax,
   indexToX,
+  interventionLabel,
+  isBandDivergent,
   priceYScale,
   socYScale,
   solarYScale,
+  sumActualForBand,
   timeToX,
 } from '../chart-utils';
 import { SKATT_OVERFÖRING, BATTERY_KWH, BATTERY_MIN_SOC_KWH } from '../constants';
-import type { ChartPoint } from '../chart-utils';
+import type { ActionBand, ChartPoint } from '../chart-utils';
+import type { ActualSlotFlows } from '../actual-flows';
 import type { DispatchSlot } from '../optimizer';
 import type { PriceSlot } from '../prices';
 
@@ -37,8 +41,14 @@ function makePoint(time: string, overrides: Partial<ChartPoint> = {}): ChartPoin
     gridToBatteryKwh: null,
     batteryToGridKwh: null,
     batteryToLoadKwh: null,
+    actual: null,
+    interventions: [],
     ...overrides,
   };
+}
+
+function makeActual(overrides: Partial<ActualSlotFlows> = {}): ActualSlotFlows {
+  return { gridToBatteryKwh: 0, batteryToGridKwh: 0, batteryToLoadKwh: 0, loadFromGridKwh: 0, ...overrides };
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -305,6 +315,45 @@ describe('buildChartData', () => {
     expect(
       buildChartData(prices, null, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING, BATTERY_MIN_SOC_KWH)[0].decision,
     ).toBeNull();
+  });
+
+  it('actual flows come from actualFlowsByTime (null when the slot has no reading coverage)', () => {
+    const prices = [makePrice('2026-06-28T20:00:00')];
+    const actualFlowsByTime = { '2026-06-28T20:00:00': makeActual({ batteryToGridKwh: 2.1 }) };
+    const [withActual] = buildChartData(
+      prices,
+      null,
+      profiles,
+      {},
+      BATTERY_KWH,
+      SKATT_OVERFÖRING,
+      BATTERY_MIN_SOC_KWH,
+      {},
+      actualFlowsByTime,
+    );
+    expect(withActual.actual).toEqual(makeActual({ batteryToGridKwh: 2.1 }));
+    const [noActual] = buildChartData(prices, null, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING, BATTERY_MIN_SOC_KWH, {}, {});
+    expect(noActual.actual).toBeNull();
+  });
+
+  it('interventions default to [] and come from interventionsByTime', () => {
+    const prices = [makePrice('2026-06-28T20:00:00')];
+    const interventionsByTime = { '2026-06-28T20:00:00': ['skipped_solar_shortfall'] };
+    const [withIntervention] = buildChartData(
+      prices,
+      null,
+      profiles,
+      {},
+      BATTERY_KWH,
+      SKATT_OVERFÖRING,
+      BATTERY_MIN_SOC_KWH,
+      {},
+      {},
+      interventionsByTime,
+    );
+    expect(withIntervention.interventions).toEqual(['skipped_solar_shortfall']);
+    const [noIntervention] = buildChartData(prices, null, profiles, {}, BATTERY_KWH, SKATT_OVERFÖRING, BATTERY_MIN_SOC_KWH);
+    expect(noIntervention.interventions).toEqual([]);
   });
 
   it('uses forecast kWh when available', () => {
@@ -613,5 +662,111 @@ describe('buildLinePath / buildAreaPath', () => {
 
   it('buildAreaPath returns empty string for no points', () => {
     expect(buildAreaPath([], 40)).toBe('');
+  });
+});
+
+// ─── sumActualForBand ────────────────────────────────────────────────────────
+
+describe('sumActualForBand', () => {
+  function buildBand(kind: ActionBand['kind'], x1: string, x2: string, kwh: number): ActionBand {
+    return { x1, x2, kind, kwh };
+  }
+
+  it('sums the kind-relevant actual flow across the band (buy → gridToBatteryKwh)', () => {
+    const chartData = [
+      makePoint('a', { actual: makeActual({ gridToBatteryKwh: 1.0 }) }),
+      makePoint('b', { actual: makeActual({ gridToBatteryKwh: 1.5 }) }),
+    ];
+    const timeIndex = buildTimeIndex(chartData);
+    const band = buildBand('buy', 'a', 'b', 2.0);
+    expect(sumActualForBand(band, chartData, timeIndex)).toEqual({ kwh: 2.5, complete: true });
+  });
+
+  it('sums batteryToGridKwh for a sell band', () => {
+    const chartData = [makePoint('a', { actual: makeActual({ batteryToGridKwh: 2.4 }) })];
+    const timeIndex = buildTimeIndex(chartData);
+    const band = buildBand('sell', 'a', 'a', 2.0);
+    expect(sumActualForBand(band, chartData, timeIndex)).toEqual({ kwh: 2.4, complete: true });
+  });
+
+  it('sums loadFromGridKwh for a hold band', () => {
+    const chartData = [makePoint('a', { actual: makeActual({ loadFromGridKwh: 0.4 }) })];
+    const timeIndex = buildTimeIndex(chartData);
+    const band = buildBand('hold', 'a', 'a', 0.4);
+    expect(sumActualForBand(band, chartData, timeIndex)).toEqual({ kwh: 0.4, complete: true });
+  });
+
+  it('is incomplete when any slot in the band has no actual data (future or poller gap)', () => {
+    const chartData = [
+      makePoint('a', { actual: makeActual({ gridToBatteryKwh: 1.0 }) }),
+      makePoint('b', { actual: null }), // gap
+    ];
+    const timeIndex = buildTimeIndex(chartData);
+    const band = buildBand('buy', 'a', 'b', 2.0);
+    const result = sumActualForBand(band, chartData, timeIndex);
+    expect(result.complete).toBe(false);
+    expect(result.kwh).toBeCloseTo(1.0); // still sums what IS available
+  });
+
+  it('is incomplete and zero when the band times are not in the index at all', () => {
+    const chartData = [makePoint('a', { actual: makeActual({ gridToBatteryKwh: 1.0 }) })];
+    const timeIndex = buildTimeIndex(chartData);
+    const band = buildBand('buy', 'missing1', 'missing2', 2.0);
+    expect(sumActualForBand(band, chartData, timeIndex)).toEqual({ kwh: 0, complete: false });
+  });
+
+  it('rounds to 2 decimals', () => {
+    const chartData = [
+      makePoint('a', { actual: makeActual({ gridToBatteryKwh: 0.7 }) }),
+      makePoint('b', { actual: makeActual({ gridToBatteryKwh: 0.7 }) }),
+      makePoint('c', { actual: makeActual({ gridToBatteryKwh: 0.7 }) }),
+    ];
+    const timeIndex = buildTimeIndex(chartData);
+    const band = buildBand('buy', 'a', 'c', 2.1);
+    expect(sumActualForBand(band, chartData, timeIndex).kwh).toBe(2.1);
+  });
+});
+
+// ─── isBandDivergent ─────────────────────────────────────────────────────────
+
+describe('isBandDivergent', () => {
+  it('is false for an incomplete summary regardless of the gap size', () => {
+    expect(isBandDivergent(2.0, { kwh: 10.0, complete: false })).toBe(false);
+  });
+
+  it('is false when the gap is within both the absolute and relative thresholds', () => {
+    // planned 2.0, actual 1.9: gap 0.1 — under the 0.75 kWh absolute floor
+    expect(isBandDivergent(2.0, { kwh: 1.9, complete: true })).toBe(false);
+  });
+
+  it('is true when the gap clears the absolute floor on a small planned total', () => {
+    // planned 0.6 (a small band), actual 0: gap 0.6 — under 0.75 absolute AND under 25% would
+    // be tiny, so use a gap that clears the absolute floor instead
+    expect(isBandDivergent(0.6, { kwh: 1.5, complete: true })).toBe(true); // gap 0.9 > 0.75
+  });
+
+  it('is true when the gap clears the relative floor on a large planned total', () => {
+    // planned 8.0: 25% = 2.0, which exceeds the 0.75 absolute floor — gap of 2.5 clears it
+    expect(isBandDivergent(8.0, { kwh: 5.5, complete: true })).toBe(true);
+  });
+
+  it('is false right at the boundary (gap must EXCEED the threshold, not just meet it)', () => {
+    // planned 2.0: threshold = max(0.75, 0.5) = 0.75; a gap of exactly 0.75 is not divergent
+    expect(isBandDivergent(2.0, { kwh: 2.75, complete: true })).toBe(false);
+  });
+});
+
+// ─── interventionLabel ───────────────────────────────────────────────────────
+
+describe('interventionLabel', () => {
+  it('maps known control_actions outcomes to Swedish', () => {
+    expect(interventionLabel('skipped_solar_shortfall')).toBe('Solunderskott');
+    expect(interventionLabel('skipped_divergence')).toBe('SoC-avvikelse');
+    expect(interventionLabel('error_reverted')).toBe('Fel');
+    expect(interventionLabel('error_revert_failed')).toBe('Fel');
+  });
+
+  it('falls back to the raw string for an unknown outcome', () => {
+    expect(interventionLabel('something_new')).toBe('something_new');
   });
 });

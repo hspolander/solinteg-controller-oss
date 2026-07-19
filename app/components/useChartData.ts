@@ -13,6 +13,7 @@ import {
 } from '@/lib/chart-utils';
 import type { PriceData } from '@/lib/prices';
 import type { DispatchSlot } from '@/lib/optimizer';
+import type { ActualSlotFlows } from '@/lib/actual-flows';
 
 export function useChartData(
   data: PriceData,
@@ -24,6 +25,8 @@ export function useChartData(
   batteryFloorKwh: number,
   actualSocByTime: Record<string, number> = {},
   pastDispatchSlots: DispatchSlot[] | null | undefined = [],
+  actualFlowsByTime: Record<string, ActualSlotFlows> = {},
+  interventionsByTime: Record<string, string[]> = {},
 ) {
   // Past slots first, live schedule second: on the one key both could theoretically share (the
   // live plan's first slot vs a past run's last, which readPastDispatchSlots' cutoff already
@@ -54,8 +57,21 @@ export function useChartData(
         skattOverforing,
         batteryFloorKwh,
         actualSocByTime,
+        actualFlowsByTime,
+        interventionsByTime,
       ),
-    [data.prices, solarForecast, solarProfiles, dispatchByTime, batteryKwh, skattOverforing, batteryFloorKwh, actualSocByTime],
+    [
+      data.prices,
+      solarForecast,
+      solarProfiles,
+      dispatchByTime,
+      batteryKwh,
+      skattOverforing,
+      batteryFloorKwh,
+      actualSocByTime,
+      actualFlowsByTime,
+      interventionsByTime,
+    ],
   );
 
   const xTicks = useMemo(() => buildXTicks(data.prices), [data.prices]);

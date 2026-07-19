@@ -8,12 +8,16 @@ import {
   buildLinePath,
   computeNowSlotTime,
   indexToX,
+  interventionLabel,
+  isBandDivergent,
   priceYScale,
   socYScale,
   solarYScale,
+  sumActualForBand,
   timeToX,
 } from '@/lib/chart-utils';
 import type { BandKind, ChartGeometry, ChartPoint } from '@/lib/chart-utils';
+import type { ActualSlotFlows } from '@/lib/actual-flows';
 import { useChartData } from './useChartData';
 
 interface Props {
@@ -25,6 +29,8 @@ interface Props {
   startSocKwh?: number; // SoC the optimizer planned from
   socIsLive?: boolean; // true = live inverter reading, false = 50% fallback
   actualSocByTime?: Record<string, number>; // real measured SoC %, keyed "YYYY-MM-DDTHH:MM"
+  actualFlowsByTime?: Record<string, ActualSlotFlows>; // measured battery flows, keyed by slot startTime
+  interventionsByTime?: Record<string, string[]>; // control_actions outcomes (non-'applied'), keyed by slot startTime
   // Resolved server-side (see app/page.tsx) and passed in rather than imported from
   // lib/constants directly: this component is 'use client', and Next.js never exposes
   // non-NEXT_PUBLIC_ env vars to the client bundle — a direct import would silently read the
@@ -107,6 +113,8 @@ export default function PriceChart({
   startSocKwh,
   socIsLive,
   actualSocByTime,
+  actualFlowsByTime,
+  interventionsByTime,
   batteryKwh,
   skattOverforing,
   batteryFloorKwh,
@@ -134,6 +142,8 @@ export default function PriceChart({
     batteryFloorKwh,
     actualSocByTime,
     pastDispatchSlots,
+    actualFlowsByTime,
+    interventionsByTime,
   );
 
   const hasActualSoc = chartData.some((d) => d.actualSocPct != null);
@@ -234,6 +244,11 @@ export default function PriceChart({
           (b) => b.kind === hoverPoint.decision && b.x1 <= hoverPoint.time && hoverPoint.time <= b.x2,
         ) ?? null
       : null;
+
+  // Zone-level actual total for the hovered band (buy/sell only, matching the marker above and
+  // the tooltip's "Verkligt (hela zonen)" row) — bands are few, a linear scan is fine.
+  const hoverBandActual =
+    hoverBand && hoverBand.kind !== 'hold' ? sumActualForBand(hoverBand, chartData, timeIndex) : null;
 
   return (
     <div
@@ -400,7 +415,12 @@ export default function PriceChart({
             const bw = x2 - x1 + stepX;
             const color = BAND_COLOR[band.kind];
             const isHold = band.kind === 'hold';
-            const label = BAND_LABEL[band.kind];
+            // Divergence marker: buy/sell only (hold stays de-emphasized context, not a
+            // decision to audit) and only once the WHOLE zone has elapsed with complete actual
+            // data — a poller gap or a zone still partly in the future must never flag a false ⚠.
+            const actualSummary = !isHold ? sumActualForBand(band, chartData, timeIndex) : null;
+            const divergent = actualSummary != null && isBandDivergent(band.kwh, actualSummary);
+            const label = divergent ? `${BAND_LABEL[band.kind]} ⚠` : BAND_LABEL[band.kind];
             const labelW = label.length * 6.4 + 14;
             return (
               <g key={i}>
@@ -662,6 +682,22 @@ export default function PriceChart({
                   value={`${hoverBand.kwh.toFixed(1)} kWh`}
                 />
               )}
+              {hoverPoint.actual && (
+                <TooltipRow
+                  color="var(--color-charge-band)"
+                  label="Verkligt (denna kvart)"
+                  value={`${hoverPoint.actual.gridToBatteryKwh.toFixed(1)} kWh`}
+                  bold
+                />
+              )}
+              {hoverBandActual && (
+                <TooltipRow
+                  color="var(--color-charge-band)"
+                  label="Verkligt (hela zonen)"
+                  value={`${hoverBandActual.complete ? '' : '≥ '}${hoverBandActual.kwh.toFixed(1)} kWh`}
+                  bold
+                />
+              )}
             </>
           )}
           {hoverPoint.decision === 'sell' && hoverPoint.batteryToGridKwh != null && (
@@ -678,7 +714,40 @@ export default function PriceChart({
                   value={`${hoverBand.kwh.toFixed(1)} kWh`}
                 />
               )}
+              {hoverPoint.actual && (
+                <TooltipRow
+                  color="var(--color-sell-band)"
+                  label="Verkligt (denna kvart)"
+                  value={`${hoverPoint.actual.batteryToGridKwh.toFixed(1)} kWh`}
+                  bold
+                />
+              )}
+              {hoverBandActual && (
+                <TooltipRow
+                  color="var(--color-sell-band)"
+                  label="Verkligt (hela zonen)"
+                  value={`${hoverBandActual.complete ? '' : '≥ '}${hoverBandActual.kwh.toFixed(1)} kWh`}
+                  bold
+                />
+              )}
             </>
+          )}
+          {(hoverPoint.decision === 'buy' || hoverPoint.decision === 'sell') &&
+            hoverBand &&
+            hoverBandActual &&
+            isBandDivergent(hoverBand.kwh, hoverBandActual) && (
+              <TooltipRow
+                color="var(--color-now)"
+                label="Avvikelse"
+                value={`plan ${hoverBand.kwh.toFixed(1)} / verkligt ${hoverBandActual.complete ? '' : '≥ '}${hoverBandActual.kwh.toFixed(1)} kWh`}
+              />
+            )}
+          {hoverPoint.interventions.length > 0 && (
+            <TooltipRow
+              color="var(--color-now)"
+              label="Ingrepp"
+              value={hoverPoint.interventions.map(interventionLabel).join(', ')}
+            />
           )}
           {hoverPoint.decision == null &&
             hoverPoint.action === 'discharge' &&

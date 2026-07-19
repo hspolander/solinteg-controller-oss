@@ -3,13 +3,16 @@ import { producePlan } from '@/lib/plan';
 import {
   readDailyEconomics,
   readTodaySocHistory,
+  readTodayFlowRows,
   readPastDispatchSlots,
   readRecentControlActions,
+  readControlActionsForDay,
   readRecentOracleDays,
 } from '@/lib/telemetry';
 import { buildDispatchCardData } from '@/lib/dispatch-card';
 import { buildOracleCardData } from '@/lib/oracle-card';
 import { buildActualSocByTime } from '@/lib/chart-utils';
+import { buildActualFlowsByTime } from '@/lib/actual-flows';
 import { summarize, stockholmDateOf } from '@/lib/economics';
 import { BATTERY_KWH, SKATT_OVERFÖRING, BATTERY_MIN_SOC_KWH } from '@/lib/constants';
 import AppShell from '@/app/components/AppShell';
@@ -18,6 +21,7 @@ import LiveInverterPanel from '@/app/components/LiveInverterPanel';
 import OracleCard from '@/app/components/OracleCard';
 import type { EconSummary } from '@/lib/economics';
 import type { DispatchSlot } from '@/lib/optimizer';
+import type { ActualSlotFlows } from '@/lib/actual-flows';
 
 export default async function Home() {
   const { data, solarProfiles, solarForecast, dispatchSchedule, startSoc, socIsLive, inverterData } =
@@ -51,6 +55,22 @@ export default async function Home() {
     if (data) pastDispatchSlots = readPastDispatchSlots(data.today);
   } catch {
     // non-fatal — chart renders with only the forward-looking plan's zones
+  }
+
+  // Measured battery flows, for the chart hover's plan-vs-actual reconciliation (best-effort).
+  let actualFlowsByTime: Record<string, ActualSlotFlows> = {};
+  try {
+    if (data) actualFlowsByTime = buildActualFlowsByTime(data.prices, data.today, readTodayFlowRows(), Date.now());
+  } catch {
+    // non-fatal — hover renders with planned quantities only, no "Verkligt" reconciliation
+  }
+
+  // control_actions guard interventions per slot, for the hover's "Ingrepp" line (best-effort).
+  let interventionsByTime: Record<string, string[]> = {};
+  try {
+    if (data) interventionsByTime = readControlActionsForDay(data.today);
+  } catch {
+    // non-fatal — hover renders without intervention notes
   }
 
   // The dispatch loop's recent decisions, for the Dispatch card (best-effort; null
@@ -91,6 +111,8 @@ export default async function Home() {
             startSocKwh={startSoc}
             socIsLive={socIsLive}
             actualSocByTime={actualSocByTime}
+            actualFlowsByTime={actualFlowsByTime}
+            interventionsByTime={interventionsByTime}
             batteryKwh={BATTERY_KWH}
             skattOverforing={SKATT_OVERFÖRING}
             batteryFloorKwh={BATTERY_MIN_SOC_KWH}

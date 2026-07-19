@@ -52,6 +52,16 @@ elprisetjustnu.se SE3  Open Meteo (SOLAR_FORECAST_MODEL, Open Meteo (daily temp)
      lib/chart-utils.ts              (pure: buildActionBands, buildChartData, …)
 ```
 
+Plan-vs-actual hover reconciliation (added 2026-07-19): `lib/actual-flows.ts` attributes the
+poller's raw `readings` (pv_w/house_load_w/battery_w) into the same flow shape as the
+optimizer's planned `DispatchSlot` (mirroring `computeFlows`'s solar-then-battery-then-grid
+priority, no efficiency conversion needed since battery_w is already-real power). `buildChartData`
+merges this alongside the plan so `ChartPoint.actual` and a hovered zone's measured total
+(`sumActualForBand`) sit next to the planned one, plus a `control_actions` intervention note —
+zones themselves stay planned and are never redrawn from actuals; a zone pill only gains a ⚠
+once it has FULLY elapsed with complete reading coverage and diverges past both an absolute and
+a relative threshold (`isBandDivergent`).
+
 ### Fixed dependencies — not pluggable, by design
 
 This is not a generic battery-dispatch framework. It's built for one electricity market and one
@@ -180,9 +190,16 @@ lib/__tests__/optimizer.test.ts   dispatch logic, SoC bounds, round-trip cost gu
 lib/__tests__/oracle.test.ts      hindsight-oracle scoring: elapsed-time bucketing (incl. 92-slot DST
                                   day), armed coverage, no-battery baseline, regret ≥ 0 invariants
 lib/__tests__/load.test.ts        dailyLoadKwh (HDD adjust, summer self-zero, floor), slotConsumptionKwh
-lib/__tests__/chart-utils.test.ts buildActionBands, buildChartData (price/dispatch/SoC mapping), xTicks, avg
+lib/__tests__/chart-utils.test.ts buildActionBands, buildChartData (price/dispatch/SoC mapping), xTicks, avg,
+                                  sumActualForBand/isBandDivergent (plan-vs-actual reconciliation)
+lib/__tests__/actual-flows.test.ts  attributeReadingFlows (solar/grid/mixed funding, discharge
+                                  to load/export, clamps), bucketActualFlows (elapsed-time
+                                  indexing, absent-slot null), actualFlowsByTime (in-progress
+                                  slot exclusion, boundary inclusivity)
 lib/__tests__/economics.test.ts   value-added vs no-battery, gap-capping, DST slot matching, roll-ups
 lib/__tests__/telemetry-economics.integration.test.ts  real SQLite read → price lookup → value-added
+lib/__tests__/telemetry-actual-flows.integration.test.ts  readTodayFlowRows day-boundary
+                                  filtering, readControlActionsForDay dedup/date-scoping
 lib/__tests__/telemetry-optimizer-run.test.ts  logOptimizerRun's socIsLive publish gate (fallback-SoC plans stay display-only)
 lib/__tests__/inverter.test.ts    isValidInverterLiveData rejects malformed/missing-field live.json
 lib/__tests__/constants-cross-language.test.ts  hardware constants stay in sync with the Python copies

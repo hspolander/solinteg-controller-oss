@@ -145,6 +145,33 @@ export function readPastDispatchSlots(priceDate: string): DispatchSlot[] {
   }
 }
 
+/**
+ * Non-'applied' control_actions outcomes for `priceDate`, keyed by slot_time (naive Stockholm,
+ * matches DispatchSlot.startTime — no conversion needed, see the outcome taxonomy comment on
+ * the control_actions table in deploy/schema.sql). A slot logs many ticks over its 15 minutes;
+ * only DISTINCT intervening outcomes matter for the chart hover's "Ingrepp" line, so this
+ * dedupes per slot (preserving first-seen order) rather than returning every row. Returns {} if
+ * telemetry is off or the table is empty/absent.
+ */
+export function readControlActionsForDay(priceDate: string): Record<string, string[]> {
+  const handle = getDb();
+  if (!handle) return {};
+  try {
+    const rows = handle
+      .prepare('SELECT slot_time, outcome FROM control_actions WHERE slot_time LIKE ? ORDER BY id ASC')
+      .all(`${priceDate}T%`) as { slot_time: string | null; outcome: string }[];
+    const out: Record<string, string[]> = {};
+    for (const r of rows) {
+      if (!r.slot_time || r.outcome === 'applied') continue;
+      const list = out[r.slot_time] ?? (out[r.slot_time] = []);
+      if (!list.includes(r.outcome)) list.push(r.outcome);
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 /** JSON.stringify replacer: round every finite number to 3 decimals (Wh / milli-öre — far
  *  below any consumer's precision: forecast error is tens of percent, dispatch-loop guard
  *  thresholds are 0.5-3 kWh). Unrounded rows carried digits like

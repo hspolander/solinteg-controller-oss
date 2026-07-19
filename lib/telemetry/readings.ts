@@ -8,6 +8,7 @@ import { getDb } from './core';
 import { stockholmParts, stockholmToUtc } from '../prices';
 import type { PriceData } from '../prices';
 import type { TrailingLoadProfile } from '../load';
+import type { FlowReading } from '../actual-flows';
 import {
   computeDailyEconomics,
   mergeDailyEconomics,
@@ -167,6 +168,27 @@ export function readTodaySocHistory(now: Date = new Date()): { timestamp: string
     return handle
       .prepare('SELECT timestamp, soc_pct FROM readings WHERE timestamp >= ? ORDER BY timestamp')
       .all(boundary) as unknown as { timestamp: string; soc_pct: number }[];
+  } catch {
+    return []; // table absent (poller never ran) or unreadable
+  }
+}
+
+/**
+ * Today's poller readings (Stockholm calendar day), the three fields the chart's plan-vs-actual
+ * flow attribution needs (lib/actual-flows.ts) — timestamp, pv_w, house_load_w, battery_w. Same
+ * day-boundary pattern as readTodaySocHistory above.
+ */
+export function readTodayFlowRows(now: Date = new Date()): FlowReading[] {
+  const handle = getDb();
+  if (!handle) return [];
+  try {
+    const p = stockholmParts(now);
+    const boundary = stockholmToUtc(p.year, p.month0, p.day, p.utcOffset, 0, 0).toISOString();
+    return handle
+      .prepare(
+        'SELECT timestamp, pv_w, house_load_w, battery_w FROM readings WHERE timestamp >= ? ORDER BY timestamp',
+      )
+      .all(boundary) as unknown as FlowReading[];
   } catch {
     return []; // table absent (poller never ran) or unreadable
   }

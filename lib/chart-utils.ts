@@ -2,6 +2,7 @@ import { slotSolarKwh } from './slot-utils';
 import { stockholmSlotKey } from './economics';
 import type { PriceSlot } from './prices';
 import type { DispatchSlot, Action } from './optimizer';
+import type { ActualSlotFlows } from './actual-flows';
 
 // A zone marks a DELIBERATE optimizer decision — something a plain self-consumption battery
 // would never do on its own. Default behaviour draws nothing: discharging to cover load at
@@ -31,6 +32,33 @@ const HOLD_LOAD_FROM_GRID_KWH = 0.15;
 // The battery must hold at least this much above the discharge floor for "reserving" to be a
 // meaningful choice — an empty battery isn't holding back, it has nothing to give.
 const HOLD_SOC_HEADROOM_KWH = 1;
+
+// Divergence marker thresholds (buy/sell zones only — see isBandDivergent): a fully-elapsed
+// zone's measured total must clear BOTH an absolute and a relative floor before it's flagged.
+// The absolute floor keeps small zones from flagging on poller-noise-level wiggle; the relative
+// floor keeps large zones from flagging on a proportionally tiny miss. A guard skipping even
+// one 15-min slot of a multi-slot zone (≈2+ kWh) clears both comfortably.
+const DIVERGENCE_MIN_KWH = 0.75;
+const DIVERGENCE_FRACTION = 0.25;
+
+// Swedish labels for control_actions outcomes surfaced in the hover's "Ingrepp" line — the
+// dispatch loop's own guard vocabulary (see deploy/schema.sql's control_actions taxonomy and
+// lib/dispatch-card.ts's fuller reason-building, which this deliberately doesn't reuse: that
+// module needs both plannedAction and outcome together, whereas here we only have a bare list
+// of outcomes per slot).
+const INTERVENTION_LABEL: Record<string, string> = {
+  skipped_solar_shortfall: 'Solunderskott',
+  skipped_divergence: 'SoC-avvikelse',
+  error_reverted: 'Fel',
+  error_revert_failed: 'Fel',
+};
+
+/** Swedish label for a raw control_actions outcome, for the hover's intervention line. Falls
+ *  back to the raw string for any outcome not in the map (defensive — 'applied' never reaches
+ *  here, see readControlActionsForDay's own filter). */
+export function interventionLabel(outcome: string): string {
+  return INTERVENTION_LABEL[outcome] ?? outcome;
+}
 
 export interface ActionBand {
   x1: string;
@@ -74,6 +102,12 @@ export interface ChartPoint {
   gridToBatteryKwh: number | null;
   batteryToGridKwh: number | null;
   batteryToLoadKwh: number | null;
+  // Measured (actual) per-slot battery flows, for the tooltip's plan-vs-actual reconciliation —
+  // null when the slot has no reading coverage (future, or a poller gap). See lib/actual-flows.ts.
+  actual: ActualSlotFlows | null;
+  // Raw control_actions outcomes (excluding 'applied') logged for this slot, oldest first,
+  // deduped — see readControlActionsForDay. Empty when nothing intervened / no data.
+  interventions: string[];
 }
 
 /**
@@ -124,6 +158,61 @@ export function buildActionBands(schedule: DispatchSlot[], batteryFloorKwh: numb
   return bands;
 }
 
+/** The ACTUAL flow a band's kind is reconciled against — mirrors bandFlowKwh's kind selection
+ *  exactly, just reading ChartPoint.actual instead of a DispatchSlot. */
+function actualFlowKwh(a: ActualSlotFlows, kind: BandKind): number {
+  if (kind === 'buy') return a.gridToBatteryKwh;
+  if (kind === 'sell') return a.batteryToGridKwh;
+  return a.loadFromGridKwh;
+}
+
+export interface BandActualSummary {
+  kwh: number;
+  /** False the moment ANY slot in the band lacks actual data (still in the future, or a poller
+   *  gap) — callers must never present an incomplete sum as the band's real total. */
+  complete: boolean;
+}
+
+/**
+ * Sums a band's kind-relevant ACTUAL flow across its slots, for the hover's plan-vs-actual
+ * reconciliation row and the divergence marker. `band.x1`/`x2` are startTime strings already
+ * present in `timeIndex` (they came from the same chartData) — a miss only happens for a
+ * malformed caller input, in which case this returns a `complete: false` zero rather than
+ * throwing.
+ */
+export function sumActualForBand(
+  band: ActionBand,
+  chartData: ChartPoint[],
+  timeIndex: Map<string, number>,
+): BandActualSummary {
+  const i1 = timeIndex.get(band.x1);
+  const i2 = timeIndex.get(band.x2);
+  if (i1 == null || i2 == null) return { kwh: 0, complete: false };
+  let kwh = 0;
+  let complete = true;
+  for (let i = i1; i <= i2; i++) {
+    const a = chartData[i]?.actual;
+    if (!a) {
+      complete = false;
+      continue;
+    }
+    kwh += actualFlowKwh(a, band.kind);
+  }
+  return { kwh: Math.round(kwh * 100) / 100, complete };
+}
+
+/**
+ * True when a fully-elapsed band's measured total diverges from its planned total by more than
+ * both the absolute and relative thresholds (DIVERGENCE_MIN_KWH / DIVERGENCE_FRACTION) — the
+ * chart's ⚠ marker. Always false for an incomplete summary: a band still partly in the future,
+ * or with a poller gap inside it, must never be flagged as having gone wrong.
+ */
+export function isBandDivergent(plannedKwh: number, actual: BandActualSummary): boolean {
+  if (!actual.complete) return false;
+  const threshold = Math.max(DIVERGENCE_MIN_KWH, DIVERGENCE_FRACTION * plannedKwh);
+  return Math.abs(actual.kwh - plannedKwh) > threshold;
+}
+
 /**
  * Maps each price slot to a chart-ready data point with BOTH prices shown at once:
  *  - buy  = full consumer price (priceIncludingTaxAndSurcharge + skatt/överföring) — what the
@@ -144,6 +233,8 @@ export function buildChartData(
   skattOverforing: number,
   batteryFloorKwh: number,
   actualSocByTime: Record<string, number> = {},
+  actualFlowsByTime: Record<string, ActualSlotFlows> = {},
+  interventionsByTime: Record<string, string[]> = {},
 ): ChartPoint[] {
   return prices.map((slot) => {
     const { kwh: solarKwh, source: solarSource } = slotSolarKwh(slot.startTime, forecast, profiles);
@@ -161,6 +252,8 @@ export function buildChartData(
       gridToBatteryKwh: dispatch ? dispatch.gridToBatteryKwh : null,
       batteryToGridKwh: dispatch ? dispatch.batteryToGridKwh : null,
       batteryToLoadKwh: dispatch ? dispatch.batteryToLoadKwh : null,
+      actual: actualFlowsByTime[slot.startTime] ?? null,
+      interventions: interventionsByTime[slot.startTime] ?? [],
     };
   });
 }
