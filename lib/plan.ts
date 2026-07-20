@@ -1,6 +1,7 @@
 import { fetchPrices, currentSlotIndexInPrices } from './prices';
 import type { PriceData } from './prices';
 import { fetchSolarForecast, fetchDailyMeanTemp } from './forecast';
+import { fetchSolarForecastDirect, fetchDailyMeanTempDirect } from './metno-thredds';
 import { buildSolarProfiles, buildOptimizerSlots } from './pipeline';
 import { optimizeDispatch } from './optimizer';
 import type { DispatchSlot } from './optimizer';
@@ -12,6 +13,7 @@ import {
   LOAD_FORECAST_MARGIN,
   DEFERRAL_RATE_ORE_PER_KWH_HOUR,
   SOLAR_RISK_PREMIUM_ORE_PER_KWH,
+  SOLAR_FORECAST_MODEL,
 } from './constants';
 
 export interface PlanResult {
@@ -66,15 +68,32 @@ export async function producePlan(): Promise<PlanResult> {
     }),
     // Logged (not just silently swallowed) so we can tell from journalctl how often this
     // actually happens — Open-Meteo outages long enough to hit this are believed to be rare,
-    // but that's currently a guess, not measured.
-    fetchSolarForecast().catch((err) => {
-      console.error('fetchSolarForecast failed, falling back to seasonal-average solar profile:', err);
-      return null;
-    }),
-    fetchDailyMeanTemp().catch((err) => {
-      console.error('fetchDailyMeanTemp failed, falling back to seasonal-average load model:', err);
-      return null;
-    }),
+    // but that's currently a guess, not measured. When SOLAR_FORECAST_MODEL is 'metno_nordic'
+    // (the default), a failure here tries MET Norway's own Thredds server directly
+    // (lib/metno-thredds.ts) before giving up to seasonal-average climatology — that fallback
+    // only mirrors metno_nordic specifically, so it's skipped for any other model choice.
+    fetchSolarForecast()
+      .catch((err) => {
+        console.error('fetchSolarForecast failed:', err);
+        if (SOLAR_FORECAST_MODEL !== 'metno_nordic') throw err;
+        console.error('trying direct MET Norway fallback');
+        return fetchSolarForecastDirect();
+      })
+      .catch((err) => {
+        console.error('falling back to seasonal-average solar profile:', err);
+        return null;
+      }),
+    fetchDailyMeanTemp()
+      .catch((err) => {
+        console.error('fetchDailyMeanTemp failed:', err);
+        if (SOLAR_FORECAST_MODEL !== 'metno_nordic') throw err;
+        console.error('trying direct MET Norway fallback');
+        return fetchDailyMeanTempDirect();
+      })
+      .catch((err) => {
+        console.error('falling back to seasonal-average load model:', err);
+        return null;
+      }),
     readLiveInverterData(),
   ]);
 

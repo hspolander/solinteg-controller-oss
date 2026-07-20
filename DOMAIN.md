@@ -130,3 +130,10 @@ irradiance (the same CSV the calibration steps above use), run the same backtest
 whichever regional models Open-Meteo exposes for your area (its model list is at
 open-meteo.com/en/docs) and set `SOLAR_FORECAST_MODEL` to whichever wins, or `''` to keep the
 default blend if none does.
+
+If `SOLAR_FORECAST_MODEL` is `metno_nordic` and Open-Meteo itself errors (not just a bad
+forecast — an actual fetch failure), `lib/metno-thredds.ts` fetches the same model straight from
+MET Norway's own Thredds server as a second-tier fallback before giving up to seasonal-average
+climatology. This only ever mirrors `metno_nordic` by a different transport, so it's skipped for
+any other model choice, and it no-ops (fails fast, one attempt, not a hung retry loop) if
+`SITE_LATITUDE`/`SITE_LONGITUDE` fall outside the Nordic grid.
