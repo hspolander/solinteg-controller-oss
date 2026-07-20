@@ -13,8 +13,14 @@ elprisetjustnu.se SE3  Open Meteo (SOLAR_FORECAST_MODEL, Open Meteo (daily temp)
  fetchPrices()           fetchSolarForecast()       fetchDailyMeanTemp()
  [today+tomorrow spot,   [cached 1 h / 8 h — a regional model (see           [cached 1 h / 8 h]
   cached to next release] constants.ts) is hourly-only; its value is
-                          repeated over its 4 slots. SOLAR_FORECAST_MODEL=''
-                          reverts to the default minutely_15 blend.]
+                          repeated over its 4 slots (label shifted back 1h
+                          first — Open-Meteo's label is the average of the
+                          PRECEDING interval, fixed 2026-07-20).
+                          SOLAR_FORECAST_MODEL='' reverts to the default
+                          minutely_15 blend (same shift, at 15-min
+                          granularity). On an Open-Meteo error with the
+                          metno_nordic model, falls to lib/metno-thredds.ts
+                          (direct MET Norway fetch) before climatology.]
        │                        │                          │
        │                        │                          ▼
        │                        │                    lib/load.ts
