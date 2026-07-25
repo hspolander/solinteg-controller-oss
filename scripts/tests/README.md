@@ -1,8 +1,9 @@
 # Python service tests
 
 Unit tests for the pure decision logic in `scripts/services/` — slot indexing and SoC-drift
-interpolation (`dispatch_loop.py`), and Modbus write ordering plus the fast-path optimization
-(`inverter_control.py`).
+interpolation (`dispatch_loop.py`), Modbus write ordering plus the fast-path optimization
+(`inverter_control.py`), and the independent watchdog fail-safe that forces the inverter back
+to auto if the dispatch loop's heartbeat goes stale (`watchdog.py`).
 
 Deliberately stdlib-only (`unittest`), matching this project's own "no extra dependencies"
 convention for the services themselves — no pytest, no test-only pip installs needed on a
@@ -10,8 +11,8 @@ fresh dev machine or the deployment box.
 
 `fakes.py` stubs `pymodbus` (a deployment-only runtime dependency, not expected to be
 installed in a plain dev environment — `inverter_control.py` hard-exits at import if it's
-missing) so `inverter_control.py`/`dispatch_loop.py` can be imported and exercised against an
-in-memory fake Modbus client instead.
+missing) so `inverter_control.py`/`dispatch_loop.py`/`watchdog.py` can be imported and
+exercised against an in-memory fake Modbus client instead.
 
 **What's NOT covered here, deliberately:** `decide()`/`main()` in dispatch_loop.py (they need
 a real telemetry.db + real time, or a much larger fixture harness) — verify that side against
