@@ -6,7 +6,7 @@
  */
 import { getDb } from './core';
 import type { PriceSlot } from '../prices';
-import type { OracleReadingRow, ArmedEventRow, OracleDayRow } from '../oracle';
+import type { OracleReadingRow, ArmedEventRow, OracleDayRow, ShadowScore } from '../oracle';
 
 /**
  * One scored day from oracle_daily, as the dashboard's Facit card consumes it
@@ -23,6 +23,17 @@ export interface OracleDaySummaryRow {
   achievedTotalOre: number | null;
   oracleTotalOre: number | null;
   baselineNetOre: number | null;
+  // Shadow scores of the Solinteg optimizer's own plan (persisted inside diagnostics_json by
+  // the nightly shadow sweep — see app/api/oracle/route.ts). shadowScored is the backfill
+  // sentinel: false/absent means this row predates the shadow sweep and should be recomputed
+  // once. Optional so existing plain-row constructors (tests, fixtures) stay valid — every
+  // row readRecentOracleDays returns has them set.
+  shadowScored?: boolean;
+  shadowDayAheadRegretOre?: number | null;
+  shadowDayAheadTotalOre?: number | null;
+  shadowReplannedRegretOre?: number | null;
+  shadowReplannedTotalOre?: number | null;
+  shadowReplannedCoverage?: number | null;
 }
 
 /**
@@ -38,7 +49,8 @@ export function readRecentOracleDays(limit = 14): OracleDaySummaryRow[] {
     const rows = handle
       .prepare(
         `SELECT date, status, armed_fraction, regret_ore, regret_intraday_ore,
-                regret_carry_ore, achieved_total_ore, oracle_total_ore, baseline_net_ore
+                regret_carry_ore, achieved_total_ore, oracle_total_ore, baseline_net_ore,
+                diagnostics_json
          FROM oracle_daily ORDER BY date DESC LIMIT ?`,
       )
       .all(limit) as {
@@ -51,19 +63,38 @@ export function readRecentOracleDays(limit = 14): OracleDaySummaryRow[] {
       achieved_total_ore: number | null;
       oracle_total_ore: number | null;
       baseline_net_ore: number | null;
+      diagnostics_json: string | null;
     }[];
     return rows
-      .map((r) => ({
-        date: r.date,
-        status: r.status,
-        armedFraction: r.armed_fraction,
-        regretOre: r.regret_ore,
-        regretIntradayOre: r.regret_intraday_ore,
-        regretCarryOre: r.regret_carry_ore,
-        achievedTotalOre: r.achieved_total_ore,
-        oracleTotalOre: r.oracle_total_ore,
-        baselineNetOre: r.baseline_net_ore,
-      }))
+      .map((r) => {
+        // The shadow scores live under diagnostics_json.shadow (folded in by the nightly
+        // shadow sweep). Absent key = row predates the sweep → shadowScored:false triggers a
+        // one-time recompute. A malformed blob degrades to "not scored", never throws.
+        let shadow: { dayAhead?: ShadowScore | null; replanned?: ShadowScore | null } | null = null;
+        try {
+          const diag = JSON.parse(r.diagnostics_json ?? 'null');
+          if (diag && typeof diag === 'object' && 'shadow' in diag) shadow = diag.shadow ?? {};
+        } catch {
+          /* leave shadow null */
+        }
+        return {
+          date: r.date,
+          status: r.status,
+          armedFraction: r.armed_fraction,
+          regretOre: r.regret_ore,
+          regretIntradayOre: r.regret_intraday_ore,
+          regretCarryOre: r.regret_carry_ore,
+          achievedTotalOre: r.achieved_total_ore,
+          oracleTotalOre: r.oracle_total_ore,
+          baselineNetOre: r.baseline_net_ore,
+          shadowScored: shadow !== null,
+          shadowDayAheadRegretOre: shadow?.dayAhead?.regretOre ?? null,
+          shadowDayAheadTotalOre: shadow?.dayAhead?.totalOre ?? null,
+          shadowReplannedRegretOre: shadow?.replanned?.regretOre ?? null,
+          shadowReplannedTotalOre: shadow?.replanned?.totalOre ?? null,
+          shadowReplannedCoverage: shadow?.replanned?.coverageD ?? null,
+        };
+      })
       .reverse();
   } catch {
     return [];

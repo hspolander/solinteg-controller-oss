@@ -95,6 +95,16 @@ export interface ArmedEventRow {
 
 export type OracleDayStatus = 'ok' | 'shadow' | 'degraded' | 'skipped_no_readings';
 
+/** Counterfactual score of a would-be dispatch plan against day D's actuals — same arithmetic
+ *  as the achieved/oracle totals, so regret is directly comparable. See computeOracleDay. */
+export interface ShadowScore {
+  totalOre: number; // day-D value (cash − wear) + continuation value of the plan's end SoC
+  regretOre: number; // oracleTotalOre − totalOre (money left on the table vs perfect info)
+  endSocKwh: number; // where the plan would have left the battery at day's end
+  coverageD: number; // fraction of day-D slots the plan actually specified (1 = full day)
+  approximate: boolean; // true when reconstructed from power targets (idle slots follow actuals)
+}
+
 export interface OracleDayRow {
   date: string;
   status: OracleDayStatus;
@@ -116,6 +126,9 @@ export interface OracleDayRow {
   regretCarryOre: number | null;
   params: Record<string, number | string>;
   oracleDispatchD: DispatchSlot[] | null; // day-D slice of the 48 h oracle trajectory
+  /** Shadow scores (only present when the corresponding plan was supplied in the inputs). */
+  shadowDayAhead?: ShadowScore | null; // the day-ahead committed plan (clean socAfter)
+  shadowReplanned?: ShadowScore | null; // continuously-replanned decisions (approximate)
   diagnostics: Record<string, unknown>;
 }
 
@@ -346,6 +359,16 @@ export interface OracleDayInputs {
   readings: OracleReadingRow[]; // [D 00:00, end of continuation) UTC, ordered by timestamp
   armedEvents: ArmedEventRow[]; // [D 00:00, D+1 00:00) UTC, ordered by timestamp
   achievedCashOre: number | null; // day-D meter cash from computeDailyEconomics (netKr × 100)
+  /** Optional would-be plans to score against day D (see /api/oracle?shadow=1). */
+  planDayAheadD?: DispatchSlot[] | null; // day-D slice of the day-ahead committed plan's dispatch
+  controlActionsD?: PlannedDecision[] | null; // continuously-replanned per-slot decisions
+}
+
+/** A dispatch-loop decision as logged in control_actions, for replanned shadow reconstruction. */
+export interface PlannedDecision {
+  slotTime: string | null; // naive Stockholm slot start, matches DispatchSlot.startTime
+  action: string; // 'charge' | 'discharge' | 'idle'
+  powerW: number | null;
 }
 
 export function computeOracleDay(inputs: OracleDayInputs): OracleDayRow {
@@ -466,6 +489,62 @@ export function computeOracleDay(inputs: OracleDayInputs): OracleDayRow {
     constrainedValueOre !== null ? constrainedValueOre - achievedDayValueOre : null;
   const regretCarryOre = regretIntradayOre !== null ? regretOre - regretIntradayOre : null;
 
+  // ── Shadow scoring: what a would-be plan (never executed) would have earned ──────────────
+  // Same arithmetic as achievedTotal (day-D value + continuation value of its end SoC), scored
+  // on the SAME actual slotsD from the SAME real startSoc, so shadowRegret is directly
+  // comparable to the achieved regret above. evaluateDispatch only reads socAfter.
+  const clampSoc = (x: number) => Math.max(BATTERY_MIN_SOC_KWH, Math.min(BATTERY_KWH, x));
+  const scoreShadow = (planD: DispatchSlot[], coverageD: number, approximate: boolean): ShadowScore => {
+    const dayVal = evaluateDispatch(slotsD, planD, startSoc.soc);
+    const planEnd = planD[planD.length - 1].socAfter;
+    const contValueOre = evaluateDispatch(slotsCont, optimizeDispatch(slotsCont, planEnd), planEnd).valueOre;
+    const totalOre = dayVal.valueOre + contValueOre;
+    return {
+      totalOre: round1(totalOre),
+      regretOre: round1(oracleTotalOre - totalOre),
+      endSocKwh: round3(planEnd),
+      coverageD: round3(coverageD),
+      approximate,
+    };
+  };
+
+  // Day-ahead committed plan: the run's own socAfter path, must span the whole day.
+  let shadowDayAhead: ShadowScore | null = null;
+  const planDA = inputs.planDayAheadD;
+  if (planDA && planDA.length === nD) {
+    shadowDayAhead = scoreShadow(planDA, 1, false);
+  } else if (planDA && planDA.length > 0) {
+    diagnostics.shadowDayAheadSkip = `plan covered ${planDA.length}/${nD} day-D slots`;
+  }
+
+  // Continuously-replanned: reconstruct socAfter per slot from control_actions. charge/discharge
+  // apply the commanded power over the slot; idle/missing follow the ACTUAL SoC (the plan defers
+  // to the inverter's own logic there — hence approximate).
+  let shadowReplanned: ShadowScore | null = null;
+  const decisions = inputs.controlActionsD;
+  if (decisions && decisions.length > 0) {
+    const bySlot = new Map<string, PlannedDecision>();
+    for (const d of decisions) if (d.slotTime) bySlot.set(d.slotTime.slice(0, 19), d);
+    const kwhPerW = SLOT_MS / 3_600_000 / 1000; // W → kWh over one slot
+    let prev = startSoc.soc;
+    let forcedSlots = 0;
+    const replanned: DispatchSlot[] = priceSlotsD.map((p, i) => {
+      const d = bySlot.get(p.startTime.slice(0, 19));
+      let socAfter: number;
+      if (d && d.powerW && (d.action === 'charge' || d.action === 'discharge')) {
+        const delta = d.powerW * kwhPerW * (d.action === 'charge' ? 1 : -1);
+        socAfter = clampSoc(prev + delta);
+        forcedSlots++;
+      } else {
+        const b = socAtInstant(soc, dayStartMs + (i + 1) * SLOT_MS);
+        socAfter = b ? b.soc : prev;
+      }
+      prev = socAfter;
+      return { startTime: p.startTime, action: 'idle', gridKwh: 0, solarExportKwh: 0, socAfter } as DispatchSlot;
+    });
+    shadowReplanned = scoreShadow(replanned, forcedSlots / nD, true);
+  }
+
   // Day-D energy-balance residual: pv + import − load − export − ΔSoC. Systematically nonzero
   // ⇒ the model's physics (DC-side pv_w, RT_EFF, derived load) drift from the real meter —
   // exactly the case where small negative regrets stop being noise. In kWh and as a fraction
@@ -513,6 +592,8 @@ export function computeOracleDay(inputs: OracleDayInputs): OracleDayRow {
     regretIntradayOre: regretIntradayOre !== null ? round1(regretIntradayOre) : null,
     regretCarryOre: regretCarryOre !== null ? round1(regretCarryOre) : null,
     oracleDispatchD: dispatch48.slice(0, nD),
+    shadowDayAhead,
+    shadowReplanned,
   };
 }
 
