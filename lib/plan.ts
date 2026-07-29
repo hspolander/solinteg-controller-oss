@@ -136,10 +136,16 @@ export async function producePlan(): Promise<PlanResult> {
       // rationale in lib/constants.ts). Live plans only; the hindsight oracle must never
       // carry these, same as loadFactor. Kill switches: set the corresponding env vars
       // (SOLINTEG_DEFERRAL_RATE_ORE / SOLINTEG_SOLAR_RISK_PREMIUM_ORE) to 0.
+      // holdEnabled: gated hold mode (freeze SoC + export the solar surplus when prices are
+      // falling, gross PV > 3 kW, and the next 12 h of forecast can refill the battery to
+      // full +10%). OPT-IN and OFF by default — only active when the user explicitly sets
+      // SOLINTEG_HOLD_ENABLED=1, so existing installs are unchanged. Live plans only; the
+      // hindsight oracle never sets it, so the facit stays hold-free and can judge the plan.
       dispatchSchedule = optimizeDispatch(optimizerSlots, startSoc, {
         loadFactor: LOAD_FORECAST_MARGIN,
         deferralRateOrePerKwhHour: DEFERRAL_RATE_ORE_PER_KWH_HOUR,
         solarRiskPremiumOre: SOLAR_RISK_PREMIUM_ORE_PER_KWH,
+        holdEnabled: process.env.SOLINTEG_HOLD_ENABLED === '1',
       });
       logOptimizerRun(data.today, data.hasTomorrow, startSoc, optimizerSlots, dispatchSchedule, socIsLive);
     } catch (err) {
