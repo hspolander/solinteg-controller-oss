@@ -88,12 +88,25 @@ through regenerating all four, in order.
 
 ## Practical
 
+**What you need to run the tests:** Node 24+ and Python 3.10+. Both are hard floors, not
+preferences — the app reads SQLite via the built-in `node:sqlite`, and the Python services use
+PEP 604 (`X | None`) annotations evaluated at import time. `package.json` declares the Node
+requirement, so npm will warn you. README.md's Prerequisites section is the full list.
+
+**You do not need the hardware, a Linux box, or an inverter to contribute.** The suites make no
+network calls and talk to no inverter — the Python tests run against a pymodbus fake, and the few
+TypeScript integration tests create their own throwaway SQLite database in a temp directory. They
+run on Windows, macOS or Linux. `npm run dev` serves the dashboard against seasonal-average
+fallbacks with no telemetry database present at all. Only *deployment* is Linux-and-systemd
+specific (see `deploy/README.md`); development isn't.
+
 ```bash
-npm install
+npm ci            # `ci` not `install` — respects the lockfile
 npm test          # vitest
-npm run test:py   # Python; use the `py` launcher on Windows
+npm run test:py   # Python; use the `py` launcher on Windows in place of python3
 npm run lint
 npm run build     # catches type/CSS errors the tests won't
+npx tsc --noEmit  # typechecks the tests too, which `build` does not
 ```
 
 Small PRs get reviewed faster than large ones, and a PR that changes behaviour plus adds tests

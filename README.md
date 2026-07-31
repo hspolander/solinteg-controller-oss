@@ -60,7 +60,10 @@ specific reasons.
 - A small, always-on Linux box on the same network as the inverter (the reference deployment
   uses an Intel NUC) — this needs a persistent process talking to the inverter, so it isn't
   deployable to Vercel/serverless.
-- Node.js 24+, Python 3 with `pymodbus` (`>=3.13,<4`).
+- **Node.js 24+** — the app reads SQLite through the built-in `node:sqlite`
+  (`DatabaseSync`), which is why there is no SQLite dependency to compile.
+- **Python 3.10+** with `pymodbus` (`>=3.13,<4`). 3.10 is a hard floor: the services use
+  PEP 604 (`X | None`) annotations that are evaluated at import time.
 - A Swedish electricity contract with a day-ahead (spot price) tariff.
 
 ## Quick start
