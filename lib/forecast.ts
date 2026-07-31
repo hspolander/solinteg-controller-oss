@@ -105,3 +105,73 @@ export async function fetchDailyMeanTemp(): Promise<Record<string, number>> {
   });
   return result;
 }
+
+/**
+ * The forecast GHI (W/m²) for the CURRENT Stockholm hour — for the Väder card, which shows it
+ * next to the live station reading so forecast error is visible at a glance. Display-only:
+ * planning uses fetchSolarForecast() above, never this.
+ *
+ * Handles both response shapes FORECAST_URL can produce. With SOLAR_FORECAST_MODEL set (the
+ * default) Open-Meteo returns `hourly`; with it cleared it returns `minutely_15`, and reading
+ * only `hourly` would leave this silently null for anyone on the default blend. Both label
+ * intervals by their END, so the same shift-back-one-interval alignment as fetchSolarForecast
+ * applies; the 15-min variant averages the four intervals inside the hour.
+ *
+ * Returns null on any failure — the card renders the live reading alone.
+ */
+export async function fetchCurrentHourGhiForecast(): Promise<number | null> {
+  'use cache';
+  cacheLife({ revalidate: 3600, expire: 8 * 3600 });
+
+  try {
+    const res = await fetch(FORECAST_URL, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (!res.ok) return null;
+    const data = await res.json();
+
+    const parts = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'Europe/Stockholm',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date());
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+    const currentDate = `${get('year')}-${get('month')}-${get('day')}`;
+    const currentHour = get('hour') === '24' ? 0 : parseInt(get('hour'), 10);
+
+    if (data.hourly?.time) {
+      const times: string[] = data.hourly.time;
+      const values: number[] = data.hourly.shortwave_radiation;
+      for (let i = 0; i < times.length; i++) {
+        const labelHour = parseInt(times[i].slice(11, 13), 10);
+        if (labelHour === 0) continue; // belongs to the previous day's 23:00
+        if (times[i].slice(0, 10) === currentDate && labelHour - 1 === currentHour) {
+          return values[i] ?? null;
+        }
+      }
+      return null;
+    }
+
+    if (data.minutely_15?.time) {
+      const times: string[] = data.minutely_15.time;
+      const values: number[] = data.minutely_15.shortwave_radiation;
+      const inHour: number[] = [];
+      for (let i = 0; i < times.length; i++) {
+        // Shift back one 15-min interval so the label refers to the interval it covers.
+        const t = new Date(`${times[i]}:00`).getTime() - 15 * 60_000;
+        const d = new Date(t);
+        const label = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        if (label === currentDate && d.getHours() === currentHour && typeof values[i] === 'number') {
+          inHour.push(values[i]);
+        }
+      }
+      if (inHour.length === 0) return null;
+      return inHour.reduce((a, b) => a + b, 0) / inHour.length;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}

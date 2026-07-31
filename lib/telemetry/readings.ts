@@ -1,5 +1,6 @@
 /**
- * Price curves + poller-reading telemetry: the `price_snapshots` and `readings` tables.
+ * Price curves + poller-reading telemetry: the `price_snapshots`, `readings`, and `weather`
+ * tables.
  *
  * Joining optimizer_runs (forecast, see ./dispatch.ts) against `readings` (actual) by
  * timestamp is the forecast-vs-actual feedback loop described in DESIGN-reserve.md.
@@ -262,5 +263,37 @@ export function readTrailingLoadProfile(days = 14, minDays = 5): TrailingLoadPro
     return loadProfileCache;
   } catch {
     return null; // readings table absent (poller never ran) or unreadable
+  }
+}
+
+export interface LatestWeather {
+  timestamp: string;
+  temp_c: number | null;
+  solar_wm2: number | null;
+  humidity_pct: number | null;
+  wind_ms: number | null;
+  rain_day_mm: number | null;
+}
+
+/**
+ * Most recent weather-station reading (display-only — see app/components/WeatherCard.tsx).
+ * The station's irradiance is NOT wired into the optimizer; the solar forecast comes from
+ * Open-Meteo (lib/forecast.ts). This only reads the station for the dashboard, so a missing or
+ * miscalibrated station degrades the display and nothing else. Returns null when telemetry is
+ * off, the weather table doesn't exist yet (the weather poller never polled successfully), or
+ * it is empty.
+ */
+export function readLatestWeather(): LatestWeather | null {
+  const handle = getDb();
+  if (!handle) return null;
+  try {
+    const row = handle
+      .prepare(
+        'SELECT timestamp, temp_c, solar_wm2, humidity_pct, wind_ms, rain_day_mm FROM weather ORDER BY timestamp DESC LIMIT 1',
+      )
+      .get() as LatestWeather | undefined;
+    return row ?? null;
+  } catch {
+    return null; // table absent (weather poller never ran) or unreadable
   }
 }

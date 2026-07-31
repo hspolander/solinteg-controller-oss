@@ -114,8 +114,13 @@ beforeEach(() => {
   vi.mocked(currentSlotIndexInPrices).mockReset().mockReturnValue(0);
   vi.mocked(fetchSolarForecast).mockReset().mockResolvedValue(FORECAST);
   vi.mocked(fetchDailyMeanTemp).mockReset().mockResolvedValue(TEMP_BY_DATE);
-  vi.mocked(fetchSolarForecastDirect).mockReset().mockResolvedValue(null);
-  vi.mocked(fetchDailyMeanTempDirect).mockReset().mockResolvedValue(null);
+  // Baseline only — the happy path never reaches the direct MET Norway fallback (Open-Meteo
+  // resolves first), and the tests that do exercise it override with a real value or a
+  // rejection below. `{}` not `null`: both functions return a non-nullable Record, so a mock
+  // resolving to null describes something the real code cannot do. plan.ts only ever sees null
+  // from its own .catch() around these calls.
+  vi.mocked(fetchSolarForecastDirect).mockReset().mockResolvedValue({});
+  vi.mocked(fetchDailyMeanTempDirect).mockReset().mockResolvedValue({});
   vi.mocked(buildSolarProfiles).mockReset().mockReturnValue(PROFILES);
   vi.mocked(buildOptimizerSlots).mockReset().mockReturnValue(ALL_SLOTS);
   vi.mocked(optimizeDispatch).mockReset().mockReturnValue(DISPATCH_FIXTURE);

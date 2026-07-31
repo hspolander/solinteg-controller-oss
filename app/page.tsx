@@ -8,9 +8,12 @@ import {
   readRecentControlActions,
   readControlActionsForDay,
   readRecentOracleDays,
+  readLatestWeather,
 } from '@/lib/telemetry';
 import { buildDispatchCardData } from '@/lib/dispatch-card';
 import { buildOracleCardData } from '@/lib/oracle-card';
+import { buildWeatherCardData } from '@/lib/weather-card';
+import { fetchCurrentHourGhiForecast, fetchDailyMeanTemp } from '@/lib/forecast';
 import { buildActualSocByTime } from '@/lib/chart-utils';
 import { buildActualFlowsByTime } from '@/lib/actual-flows';
 import { summarize, stockholmDateOf } from '@/lib/economics';
@@ -19,9 +22,11 @@ import AppShell from '@/app/components/AppShell';
 import EarningsCard from '@/app/components/EarningsCard';
 import LiveInverterPanel from '@/app/components/LiveInverterPanel';
 import OracleCard from '@/app/components/OracleCard';
+import WeatherCard from '@/app/components/WeatherCard';
 import type { EconSummary } from '@/lib/economics';
 import type { DispatchSlot } from '@/lib/optimizer';
 import type { ActualSlotFlows } from '@/lib/actual-flows';
+import type { WeatherCardData } from '@/lib/weather-card';
 
 export default async function Home() {
   const { data, solarProfiles, solarForecast, dispatchSchedule, startSoc, socIsLive, inverterData } =
@@ -86,6 +91,22 @@ export default async function Home() {
     console.error('buildOracleCardData failed, rendering without the Facit card data:', err);
   }
 
+  // Live weather-station reading vs. today's Open-Meteo forecast, for the Väder card
+  // (best-effort; purely informational — see lib/weather-card.ts's header for why this never
+  // touches the optimizer). Renders its empty state with no station; a forecast fetch failure
+  // degrades to showing the live reading alone.
+  let weatherData: WeatherCardData | null = null;
+  try {
+    const today = stockholmDateOf(new Date().toISOString());
+    const [ghiForecast, meanTemps] = await Promise.all([
+      fetchCurrentHourGhiForecast().catch(() => null),
+      fetchDailyMeanTemp().catch(() => ({}) as Record<string, number>),
+    ]);
+    weatherData = buildWeatherCardData(readLatestWeather(), ghiForecast, meanTemps[today] ?? null, new Date());
+  } catch (err) {
+    console.error('buildWeatherCardData failed, rendering without the Väder card:', err);
+  }
+
   return (
     <AppShell>
       {/* 2026-07-03 v5 layout: same 2 rows × 3 columns as v4. Batterihälsa no longer exists as
@@ -100,7 +121,7 @@ export default async function Home() {
           Systemstatus sit between them there instead. */}
       {/* Row 3 (added 2026-07-11): Facit spans all three columns under everything — column 3's
           LiveInverterPanel still spans only rows 1-2, so the full width is free there. */}
-      <div className="grid grid-cols-1 gap-x-5 gap-y-5 min-[1600px]:grid-cols-[minmax(640px,1fr)_380px_minmax(640px,1fr)] min-[1600px]:grid-rows-[auto_auto_auto] min-[1600px]:items-start min-[1600px]:gap-y-2">
+      <div className="grid grid-cols-1 gap-x-5 gap-y-5 min-[1600px]:grid-cols-[minmax(640px,1fr)_380px_minmax(640px,1fr)] min-[1600px]:grid-rows-[auto_auto_auto_auto] min-[1600px]:items-start min-[1600px]:gap-y-2">
         {data ? (
           <PriceChart
             data={data}
@@ -131,6 +152,8 @@ export default async function Home() {
         <LiveInverterPanel initialData={inverterData} initialDispatchData={dispatchData} />
         <EarningsCard summary={earnings} />
         <OracleCard data={oracleData} />
+        {/* Row 4: Väder, full width, display-only — see WeatherCard.tsx. */}
+        <WeatherCard data={weatherData} />
       </div>
     </AppShell>
   );
