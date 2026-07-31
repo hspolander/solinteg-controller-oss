@@ -60,6 +60,13 @@ files/
 # Claude Code local skill-cache lockfile — machine-specific, regenerated automatically
 skills-lock.json
 
+# Claude Code local agent config. Deliberately LOCAL-ONLY, not part of the published project:
+# it exists so a session opened directly in this export still gets the pre-push privacy
+# guardrail (that skill otherwise lives only in the private upstream repo, which means it
+# does not load here). Keeping it untracked also means the guardrail's own text never has to
+# satisfy the privacy rules it enforces. Do not `git add -f` this.
+.claude/
+
 # Ellevio meter-history downloads (personal consumption data + the session cookie used to
 # fetch it — regenerate with scripts/fetch-ellevio-history.py, see its docstring)
 solar-data/ellevio/
