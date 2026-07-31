@@ -208,5 +208,56 @@ class LiveDischargePowerWTests(unittest.TestCase):
         self.assertEqual(numbers["live_pv_w"], 500)
 
 
+class ApplyTargetRouting(unittest.TestCase):
+    """apply_target() is the whole executor half of the ACTION CONTRACT (see dispatch_loop.py's
+    note beside FORCED_ACTIONS, and lib/__tests__/action-contract.test.ts for the TS half).
+    It previously had no coverage at all, which is how an unknown action silently resolving to
+    auto stayed invisible."""
+
+    def setUp(self):
+        self.calls = []
+        self._orig = (dl.force_charge, dl.force_discharge, dl.return_to_auto)
+        dl.force_charge = lambda inv, w: self.calls.append(("charge", w))
+        dl.force_discharge = lambda inv, w: self.calls.append(("discharge", w))
+        dl.return_to_auto = lambda inv: self.calls.append(("auto", None))
+
+    def tearDown(self):
+        dl.force_charge, dl.force_discharge, dl.return_to_auto = self._orig
+
+    def test_charge_forces_a_charge_setpoint(self):
+        dl.apply_target(object(), "charge", 1500)
+        self.assertEqual(self.calls, [("charge", 1500)])
+
+    def test_discharge_forces_a_discharge_setpoint(self):
+        dl.apply_target(object(), "discharge", 2000)
+        self.assertEqual(self.calls, [("discharge", 2000)])
+
+    def test_idle_returns_to_auto_without_warning(self):
+        # 'idle' is a declared AUTO_ACTION, so auto is intended and must stay quiet — otherwise
+        # the warning below would fire on every idle slot and become noise nobody reads.
+        with self.assertLogs("solinteg.dispatch", level="WARNING") as caught:
+            dl.log.warning("sentinel")  # assertLogs requires at least one record
+            dl.apply_target(object(), "idle", 0)
+        self.assertEqual(self.calls, [("auto", None)])
+        self.assertEqual([r for r in caught.output if "sentinel" not in r], [])
+
+    def test_unknown_action_still_fails_safe_but_warns_loudly(self):
+        # The scenario this exists for: the optimizer emits an action this executor does not
+        # implement.
+        # Auto is still the right fail-safe, but it must not be silent — auto CHARGES from
+        # surplus, which for a hold-style action is the opposite of what was planned.
+        with self.assertLogs("solinteg.dispatch", level="WARNING") as caught:
+            dl.apply_target(object(), "hold", 0)
+        self.assertEqual(self.calls, [("auto", None)])
+        joined = "\n".join(caught.output)
+        self.assertIn("unrecognised dispatch action", joined)
+        self.assertIn("hold", joined)
+
+    def test_declared_vocabularies_are_disjoint(self):
+        # An action in both tuples would make the contract test's union check pass while
+        # apply_target's actual routing stayed ambiguous.
+        self.assertEqual(set(dl.FORCED_ACTIONS) & set(dl.AUTO_ACTIONS), set())
+
+
 if __name__ == "__main__":
     unittest.main()

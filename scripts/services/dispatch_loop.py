@@ -250,6 +250,22 @@ REASSERT_S = int(os.environ.get("DISPATCH_REASSERT_S", "300"))
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
 UTC = ZoneInfo("UTC")
 SLOT_HOURS = 0.25
+
+# ACTION CONTRACT with the TypeScript optimizer's `Action` union (lib/optimizer.ts).
+#
+# apply_target() below forces a setpoint for FORCED_ACTIONS and returns to auto for everything
+# else. That "everything else" is the hazard: an action type added on the TS side but unknown
+# here does not fail - it silently takes the auto path, and auto CHARGES from solar surplus.
+# For a hold-style action ("don't charge, export the surplus") that is the exact opposite of
+# what was planned, and nothing in the plan-vs-actual telemetry would name the cause.
+#
+# So the vocabulary is declared here rather than left implicit, and
+# lib/__tests__/action-contract.test.ts asserts these two tuples together cover every member of
+# the TS union. Adding an action there fails that test until it is either given a branch below
+# or listed in AUTO_ACTIONS as a deliberate auto mapping. See CONTRIBUTING.md.
+FORCED_ACTIONS = ("charge", "discharge")
+AUTO_ACTIONS = ("idle",)
+
 # One real source of truth: same env var name lib/constants.ts reads, matching hardcoded
 # fallback default (kept in sync by lib/__tests__/constants-cross-language.test.ts).
 BATTERY_KWH = float(os.environ.get("SOLINTEG_BATTERY_KWH", "25.6"))  # usable capacity
@@ -708,11 +724,26 @@ def decide(con: sqlite3.Connection, now: datetime):
 
 
 def apply_target(inv: Inverter, action: str, power_w: int) -> None:
+    """Apply one dispatch decision. See the ACTION CONTRACT note beside FORCED_ACTIONS.
+
+    Auto stays the fall-through for anything unrecognised - it is the fail-safe, and guessing
+    at an unknown action against a live inverter would be worse. But an unrecognised action is
+    still a bug (the plan wanted something this executor cannot do), so it is logged loudly
+    instead of passing silently.
+    """
     if action == "charge":
         force_charge(inv, power_w)
     elif action == "discharge":
         force_discharge(inv, power_w)
     else:
+        if action not in AUTO_ACTIONS:
+            log.warning(
+                "unrecognised dispatch action %r - falling back to auto. The plan expected "
+                "behaviour this executor does not implement; auto CHARGES from solar surplus, "
+                "which may be the opposite of what was planned. See the ACTION CONTRACT note "
+                "in this module.",
+                action,
+            )
         return_to_auto(inv)
 
 
