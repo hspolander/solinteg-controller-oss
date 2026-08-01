@@ -52,10 +52,21 @@ def hour_key(dt_sthlm: datetime) -> str:
     return dt_sthlm.strftime("%Y-%m-%dT%H")
 
 
-def load_ellevio(ellevio_dir: Path) -> tuple[dict, dict]:
-    """-> ({hour_key: kWh} import, {hour_key: kWh} export), deduped by slot start."""
+def slot_key(dt_sthlm: datetime) -> str:
+    """Quarter-hour bucket — the meter's own register granularity, which the flip-split needs."""
+    return dt_sthlm.strftime("%Y-%m-%dT%H:") + f"{dt_sthlm.minute // 15 * 15:02d}"
+
+
+def load_ellevio(ellevio_dir: Path) -> dict:
+    """-> {'hour': {'imp': {key: kWh}, 'exp': ...}, 'slot': {...}}, deduped by slot start.
+
+    Both granularities come out of one pass: hours drive the headline comparison, quarter-hours
+    the flip-split.
+    """
     imp: dict[str, float] = defaultdict(float)
     exp: dict[str, float] = defaultdict(float)
+    imp_s: dict[str, float] = defaultdict(float)
+    exp_s: dict[str, float] = defaultdict(float)
     seen: set[tuple[str, str]] = set()
     for path in sorted(ellevio_dir.glob("*.json")):
         direction = "Production" if path.name.startswith("Production_") else "Consumption"
@@ -74,14 +85,15 @@ def load_ellevio(ellevio_dir: Path) -> tuple[dict, dict]:
             seen.add(key)
             dt = datetime.fromisoformat(c["start"])
             dt = dt.astimezone(STHLM) if dt.tzinfo else dt.replace(tzinfo=STHLM)
-            bucket = imp if direction == "Consumption" else exp
-            bucket[hour_key(dt)] += float(c["total"])
-    return imp, exp
+            is_import = direction == "Consumption"
+            (imp if is_import else exp)[hour_key(dt)] += float(c["total"])
+            (imp_s if is_import else exp_s)[slot_key(dt)] += float(c["total"])
+    return {"hour": {"imp": imp, "exp": exp}, "slot": {"imp": imp_s, "exp": exp_s}}
 
 
 def load_readings(db: str, date_from: str | None, date_to: str | None,
-                  max_gap_s: int) -> tuple[dict, dict, dict]:
-    """-> per-Stockholm-hour {key: kWh} import, {key: kWh} export, {key: covered_seconds}."""
+                  max_gap_s: int) -> dict:
+    """-> {'hour': {'imp','exp','cov'}, 'slot': {'imp','exp','cov'}}; kWh, and covered seconds."""
     where, params = [], []
     if date_from:  # widen by a day each side; Stockholm-hour bucketing re-trims
         where.append("timestamp >= ?")
@@ -100,18 +112,27 @@ def load_readings(db: str, date_from: str | None, date_to: str | None,
     imp: dict[str, float] = defaultdict(float)
     exp: dict[str, float] = defaultdict(float)
     cov: dict[str, float] = defaultdict(float)
+    imp_s: dict[str, float] = defaultdict(float)
+    exp_s: dict[str, float] = defaultdict(float)
+    cov_s: dict[str, float] = defaultdict(float)
     for (t1, gw1), (t2, _gw2) in zip(rows, rows[1:]):
         dt_s = (t2 - t1).total_seconds()
         if gw1 is None or dt_s <= 0 or dt_s > max_gap_s:
             continue
-        key = hour_key(t1.astimezone(STHLM))  # left-Riemann: whole interval booked to t1's hour
+        sthlm = t1.astimezone(STHLM)
+        key = hour_key(sthlm)  # left-Riemann: whole interval booked to t1's hour
+        skey = slot_key(sthlm)
         cov[key] += dt_s
+        cov_s[skey] += dt_s
         kwh = abs(gw1) * dt_s / 3_600_000.0
         if gw1 < 0:
             imp[key] += kwh
+            imp_s[skey] += kwh
         elif gw1 > 0:
             exp[key] += kwh
-    return imp, exp, cov
+            exp_s[skey] += kwh
+    return {"hour": {"imp": imp, "exp": exp, "cov": cov},
+            "slot": {"imp": imp_s, "exp": exp_s, "cov": cov_s}}
 
 
 def compare(name: str, ours: dict, meter: dict, cov: dict, args) -> None:
@@ -149,6 +170,72 @@ def compare(name: str, ours: dict, meter: dict, cov: dict, args) -> None:
             print(f"  {d}  readings {r:.2f} vs ellevio {e:.2f} kWh ({pct:+.1f}%)")
 
 
+def flip_split(ours: dict, meter: dict, args) -> None:
+    """Split the comparison by whether the grid position flips sign inside the quarter-hour.
+
+    Why this is computed for you rather than left to the reader: our side integrates ~10-second
+    samples and books each interval by its own instantaneous sign, while the meter accumulates
+    its import and export registers continuously. A slot that crosses zero therefore books
+    energy in BOTH directions on our side, where the meter books much less of each — inflating
+    both sides by nearly the same ABSOLUTE amount. Against a large export total that is
+    invisible; against a small summer import total it reads as a double-digit percentage and
+    trips the flag above, which is exactly when someone goes looking for a broken CT.
+
+    Single-direction slots carry no such artifact, so they are the honest measurement check: if
+    those agree, the inverter CT and the billing meter agree, whatever the headline says. On the
+    reference install's first run (July, solar-saturated) the headline import delta was +19%
+    while pure-import slots came in at −0.3% and pure-export at +0.0% — all of it inside the
+    56% of slots that flipped. Expect this check's import side to be far more informative in
+    winter, when import dominates and the grid position rarely changes direction within a slot.
+    """
+    o_imp, o_exp, cov = ours["slot"]["imp"], ours["slot"]["exp"], ours["slot"]["cov"]
+    m_imp, m_exp = meter["slot"]["imp"], meter["slot"]["exp"]
+
+    keys = sorted((set(m_imp) | set(m_exp)) & set(cov))
+    if args.date_from:
+        keys = [k for k in keys if k[:10] >= args.date_from]
+    if args.date_to:
+        keys = [k for k in keys if k[:10] <= args.date_to]
+    usable = [k for k in keys if cov[k] >= args.min_coverage * 900.0]
+    if not usable:
+        return
+
+    eps = 0.0005  # kWh — below 0.5 Wh a slot counts as single-direction, not a flip
+    buckets = {"pure import": [0.0, 0.0, 0.0, 0.0],
+               "pure export": [0.0, 0.0, 0.0, 0.0],
+               "flipping": [0.0, 0.0, 0.0, 0.0]}
+    counts: dict[str, int] = defaultdict(int)
+    for k in usable:
+        oi, oe = o_imp.get(k, 0.0), o_exp.get(k, 0.0)
+        if oi <= eps and oe <= eps:
+            continue  # nothing measured either way
+        name = ("flipping" if oi > eps and oe > eps
+                else "pure import" if oi > eps else "pure export")
+        counts[name] += 1
+        b = buckets[name]
+        b[0] += oi
+        b[1] += m_imp.get(k, 0.0)
+        b[2] += oe
+        b[3] += m_exp.get(k, 0.0)
+
+    print("\n== by whether the grid position flips sign inside the quarter-hour ==")
+    print(f"{'bucket':<13}{'slots':>7}{'ourIMP':>9}{'mtrIMP':>9}{'delta%':>9}"
+          f"{'ourEXP':>10}{'mtrEXP':>10}{'delta%':>9}")
+    for name, (oi, mi, oe, me) in buckets.items():
+        di = f"{100.0 * (oi - mi) / mi:+.1f}" if mi > 0.05 else "--"
+        de = f"{100.0 * (oe - me) / me:+.1f}" if me > 0.05 else "--"
+        print(f"{name:<13}{counts[name]:>7}{oi:>9.2f}{mi:>9.2f}{di:>9}"
+              f"{oe:>10.2f}{me:>10.2f}{de:>9}")
+
+    total = sum(counts.values())
+    if total:
+        flips = counts["flipping"]
+        print(f"{flips} of {total} slots ({100.0 * flips / total:.0f}%) flip sign. The two "
+              f"single-direction rows are the real measurement check:")
+        print("a headline delta that lives only in the flipping row is a sampling artifact, "
+              "not a CT or topology error.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="/opt/solinteg/telemetry.db")
@@ -162,18 +249,22 @@ def main() -> int:
                          "trusting economics/oracle SEK at face value")
     args = ap.parse_args()
 
-    meter_imp, meter_exp = load_ellevio(Path(args.ellevio_dir))
-    if not meter_imp and not meter_exp:
+    meter = load_ellevio(Path(args.ellevio_dir))
+    if not meter["hour"]["imp"] and not meter["hour"]["exp"]:
         print(f"no Ellevio data found under {args.ellevio_dir}", file=sys.stderr)
         return 1
-    ours_imp, ours_exp, cov = load_readings(args.db, args.date_from, args.date_to, args.max_gap_s)
+    ours = load_readings(args.db, args.date_from, args.date_to, args.max_gap_s)
+    cov = ours["hour"]["cov"]
 
-    compare("IMPORT (koep)", ours_imp, meter_imp, cov, args)
-    if meter_exp:
-        compare("EXPORT (saelj)", ours_exp, meter_exp, cov, args)
+    compare("IMPORT (koep)", ours["hour"]["imp"], meter["hour"]["imp"], cov, args)
+    if meter["hour"]["exp"]:
+        compare("EXPORT (saelj)", ours["hour"]["exp"], meter["hour"]["exp"], cov, args)
     else:
         print("\n(no Production_*.json files — fetch export once with "
-              "fetch-ellevio-history.py --direction Production to reconcile the sell side)")
+              "fetch-ellevio-history.py --direction Production, and note that export is a "
+              "SEPARATE delivery site: pass its --site too, not just the direction)")
+    # Always: a flagged headline is usually this, and the split is what tells them apart.
+    flip_split(ours, meter, args)
     return 0
 
 

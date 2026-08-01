@@ -20,8 +20,23 @@ once for the meter reconciliation (scripts/tools/reconcile-ellevio-meter.py). Pr
 files get a "Production_" filename prefix so the two series can't be confused; Consumption
 keeps the historical unprefixed names so existing files still count for resume.
 
+**--direction alone does NOT get you export data — you also need the production --site.**
+If you have solar, import and export are two separate delivery sites (anläggningar) with
+different GSRN ids, and the API SILENTLY IGNORES direction=Production when handed the
+consumption site id: it returns the consumption series again, HTTP 200, no error, with
+only `data.summary.isConsumptionSite: true` to give it away. The failure is invisible
+unless you compare the totals, and it lands in correctly-named Production_*.json files,
+so the reconciliation then compares import against import and reports a suspiciously
+perfect export match. Sanity-check that the two directions differ before trusting a run.
+
 The site id is the long number in the consumption page's API URL (a GSRN meter id —
-personal, so it is an argument rather than a committed constant).
+personal, so it is an argument rather than a committed constant). List all of yours with
+the delivery-site endpoint, which needs the same session cookie and nothing else:
+
+  GET https://www.ellevio.se/api/mypages/deliverysites
+  -> data[]: {id, idFormated, type, isConsumptionSite, customerStatus, customName}
+     type is "Konsumtionsanläggning" / "Produktionsanläggning"; pass the production one's
+     id as --site together with --direction Production.
 
 Behavior:
 - Requests [from, to] in --chunk-days chunks (the API accepts multi-day ranges even
@@ -43,6 +58,15 @@ from datetime import date, timedelta
 from pathlib import Path
 
 API = "https://www.ellevio.se/api/mypages/energy/consumption/{site}"
+
+
+class SiteDirectionMismatch(RuntimeError):
+    """--site and --direction disagree about which meter is being read.
+
+    Its own exception type because it must NOT be retried like a transport error: the request
+    succeeded (HTTP 200, well-formed JSON, a full slot count), it just described the other
+    meter. Retrying would burn the 3-failure budget and report an expired session.
+    """
 
 HEADERS = {
     "accept": "*/*",
@@ -74,9 +98,24 @@ def fetch_chunk(site: str, cookie: str, d1: date, d2: date, resolution: str, dir
     with urllib.request.urlopen(req, timeout=30) as resp:
         body = resp.read().decode("utf-8")
     payload = json.loads(body)  # HTML login page here -> JSONDecodeError -> counted as failure
-    consumptions = (payload.get("data") or {}).get("consumptions")
+    data = payload.get("data") or {}
+    consumptions = data.get("consumptions")
     if not consumptions:
         raise ValueError(f"no consumptions in response for {d1}..{d2}")
+    # The API ignores `direction` and answers for whatever meter --site names, with no error
+    # (see the header). This is the only field that gives it away, so check it rather than
+    # trust the request: silently writing import data into Production_*.json files makes the
+    # meter reconciliation compare import against itself and report a perfect export match.
+    # Absent on older API versions -> skip the check rather than block a working fetch.
+    is_consumption_site = (data.get("summary") or {}).get("isConsumptionSite")
+    if is_consumption_site is not None and bool(is_consumption_site) != (direction == "Consumption"):
+        answered = "consumption (Konsumtionsanläggning)" if is_consumption_site else "production (Produktionsanläggning)"
+        raise SiteDirectionMismatch(
+            f"--direction {direction} but site {site} is the {answered} meter, and the API "
+            f"answered for that meter instead of erroring. Import and export are separate "
+            f"delivery sites: list yours with a cookie-authenticated GET of "
+            f"https://www.ellevio.se/api/mypages/deliverysites and pass the matching id."
+        )
     return payload
 
 
@@ -124,6 +163,11 @@ def main() -> int:
                 consecutive_failures = 0
                 n = len(payload["data"]["consumptions"])
                 print(f"ok  {d} .. {d2}  ({n} slots)", flush=True)
+            except SiteDirectionMismatch as exc:
+                # Wrong meter, not a flaky request — every retry would return the same wrong
+                # data, so stop on the first one rather than saving 31 days of it.
+                print(f"ABORT {d} .. {d2}: {exc}", file=sys.stderr)
+                return 1
             except Exception as exc:  # noqa: BLE001
                 consecutive_failures += 1
                 print(f"FAIL {d} .. {d2}: {exc}", flush=True)

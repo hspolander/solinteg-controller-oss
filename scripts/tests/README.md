@@ -18,6 +18,19 @@ exercised against an in-memory fake Modbus client instead.
 a real telemetry.db + real time, or a much larger fixture harness) — verify that side against
 your deployment's own `control_actions` rows instead.
 
+## The one `scripts/tools/` test
+
+`test_fetch_ellevio_history.py` is the exception to "services only". Offline tools are
+otherwise left untested on purpose — they're run by hand, and a wrong answer shows up in the
+output you're already reading. This one doesn't: it covers the guard that catches Ellevio
+answering for the *other* meter when `--site` and `--direction` disagree, which the API does
+with HTTP 200 and a full slot count. Nothing about that failure is visible downstream — the
+files are named correctly and full of plausible numbers — so the guard is the only thing
+standing between it and a `reconcile-ellevio-meter.py` run that compares import against itself
+and declares the export side perfect. A guard against a silent failure has to be tested, or
+it's just a second silent failure. The dashed filename means it's loaded via `importlib.util`,
+not a plain import.
+
 ## Running
 
 ```
