@@ -136,26 +136,79 @@ def check_todays_plan(con: sqlite3.Connection, today: str, now: datetime):
     return None
 
 
+def wrote_nothing(detail: str | None) -> bool:
+    """True when an error_revert_failed row provably left the inverter untouched.
+
+    `detail` is built as f"{apply_exc} | revert also failed: {revert_exc}" (dispatch_loop.py).
+    Only the FIRST half decides whether anything reached the inverter: force_charge/
+    force_discharge open the Modbus connection on their first read (soc_pct()), and
+    return_to_auto on its first write — so if the apply failed to CONNECT, no register was
+    written and there was never a half-applied state to revert. "revert also failed" is then
+    technically true and materially misleading.
+
+    Anything else (notably "No response received after 3 retries") can have died mid-sequence
+    with a write already in flight, which is the case that genuinely warrants waking someone.
+
+    Deliberately classifies on the apply half alone: a write that timed out and whose REVERT
+    then hit a connect failure is still unconfirmed, and matching "connect failed" anywhere in
+    the string would wrongly downgrade exactly that case.
+
+    On the reference install this split mattered a lot — over one 60-day window, 13 of 15
+    error_revert_failed rows were connect failures and 12 of 15 self-healed within one loop
+    tick, so every one of them had been raising an urgent alert for a transient that fixed
+    itself. Check your own distribution before assuming the same ratio.
+    """
+    marker = "| revert also failed:"
+    if not detail or marker not in detail:
+        # dispatch_loop always writes both halves for this outcome. A row that isn't that
+        # shape is one we cannot reason about, so it does NOT get the downgrade — without
+        # this guard a detail containing "connect failed" anywhere would silently qualify.
+        return False
+    return "connect failed" in detail.split(marker, 1)[0]
+
+
 def check_control_errors(con: sqlite3.Connection, now: datetime):
     since = (now - timedelta(seconds=CONTROL_ERROR_WINDOW_S)).isoformat()
     try:
         rows = con.execute(
-            "SELECT outcome, COUNT(*) FROM control_actions "
-            "WHERE timestamp >= ? AND outcome IN ('error_reverted', 'error_revert_failed') "
-            "GROUP BY outcome",
+            "SELECT outcome, detail FROM control_actions "
+            "WHERE timestamp >= ? AND outcome IN ('error_reverted', 'error_revert_failed')",
             (since,),
         ).fetchall()
     except sqlite3.Error:
         return None
     if not rows:
         return None
-    counts = ", ".join(f"{outcome} x{n}" for outcome, n in rows)
-    severity = notify.PRIORITY_URGENT if any(o == "error_revert_failed" for o, _ in rows) \
-        else notify.PRIORITY_HIGH
+
+    reverted = sum(1 for o, _ in rows if o == "error_reverted")
+    failed = [d for o, d in rows if o == "error_revert_failed"]
+    unconfirmed = [d for d in failed if not wrote_nothing(d)]
+    benign = len(failed) - len(unconfirmed)
+
+    parts = []
+    if reverted:
+        parts.append(f"error_reverted x{reverted}")
+    if benign:
+        parts.append(f"error_revert_failed x{benign} (connect failed — nothing written)")
+    if unconfirmed:
+        parts.append(f"error_revert_failed x{len(unconfirmed)} (state UNCONFIRMED)")
+
+    # URGENT is reserved for a revert that failed after something may already have been
+    # written. A failed connect cannot leave a half-applied setpoint, and those self-heal on
+    # the next tick — alerting URGENT on them is what makes the one real case get ignored.
+    # They still alert, just at the same level as error_reverted.
+    if unconfirmed:
+        severity = notify.PRIORITY_URGENT
+        tail = ("The UNCONFIRMED rows mean a write may have landed and the revert did not — "
+                "check the inverter's actual working mode directly.")
+    else:
+        severity = notify.PRIORITY_HIGH
+        tail = ("No write reached the inverter, so there is no half-applied setpoint; these "
+                "normally clear on the next tick. Persistent or lengthening runs point at the "
+                "Modbus link/dongle, not at dispatch.")
     return ("control_errors", severity, "Solinteg: dispatch loop hit errors",
-            f"In the last {CONTROL_ERROR_WINDOW_S // 60} min: {counts}. "
-            f"error_revert_failed means the inverter's actual state isn't confirmed — check "
-            f"it directly. See control_actions.detail on the NUC.")
+            f"In the last {CONTROL_ERROR_WINDOW_S // 60} min: {', '.join(parts)}. {tail} "
+            f"See control_actions.detail.")
 
 
 def check_disk_space(path: str = "/"):
