@@ -28,8 +28,8 @@ def make_inverter(soc_pct: float = 50.0) -> ic.Inverter:
 def set_already_in_ems_mode(inv: ic.Inverter, priority: int) -> None:
     """Pre-populate registers so _already_set_for(priority) reads True — simulates the
     inverter already being mid-charge/discharge from a prior tick (the fast-path case)."""
-    inv.client.regs[ic.REG_MAX_EXPORT] = ic.GRID_CAP_RAW
-    inv.client.regs[ic.REG_MAX_IMPORT] = (-ic.GRID_CAP_RAW) & 0xFFFF
+    inv.client.regs[ic.REG_MAX_AC_OUTPUT] = ic.GRID_CAP_RAW
+    inv.client.regs[ic.REG_MAX_AC_INPUT] = (-ic.GRID_CAP_RAW) & 0xFFFF
     inv.client.regs[ic.REG_PRIORITY] = priority
     inv.client.regs[ic.REG_WORK_MODE] = ic.WORK_MODE_EMS_BATTCTRL
 
@@ -57,8 +57,8 @@ class ForceChargeTests(InverterControlTestCase):
         writes = inv.client.write_calls()
         written_addrs = [addr for addr, _ in writes]
         # caps + priority must land before the power target; power before the mode switch
-        self.assertLess(written_addrs.index(ic.REG_MAX_IMPORT), written_addrs.index(ic.REG_BATT_POWER_TARGET))
-        self.assertLess(written_addrs.index(ic.REG_MAX_EXPORT), written_addrs.index(ic.REG_BATT_POWER_TARGET))
+        self.assertLess(written_addrs.index(ic.REG_MAX_AC_INPUT), written_addrs.index(ic.REG_BATT_POWER_TARGET))
+        self.assertLess(written_addrs.index(ic.REG_MAX_AC_OUTPUT), written_addrs.index(ic.REG_BATT_POWER_TARGET))
         self.assertLess(written_addrs.index(ic.REG_PRIORITY), written_addrs.index(ic.REG_BATT_POWER_TARGET))
         self.assertLess(written_addrs.index(ic.REG_BATT_POWER_TARGET), written_addrs.index(ic.REG_WORK_MODE))
 
@@ -137,6 +137,58 @@ class ForceDischargeTests(InverterControlTestCase):
         self.assertEqual(writes.get(ic.REG_WORK_MODE), ic.WORK_MODE_GENERAL)
         self.assertNotIn(ic.REG_PRIORITY, writes)
         self.assertFalse(ic._forced_active)
+
+
+class ReturnToAutoCapRestoreTests(InverterControlTestCase):
+    """Pins restore_ac_limits' contract. It is a no-op against today's behaviour (nothing
+    ever writes a restrictive 50208/50209), so these tests are what stop a future PV-only
+    charge (REG_MAX_AC_INPUT=0) or battery-freeze (both 0) from leaking a restrictive cap
+    into the following run of idle slots. See restore_ac_limits' docstring."""
+
+    def test_leaving_a_forced_state_restores_unrestricted_caps_before_the_mode_write(self):
+        inv = make_inverter(soc_pct=50.0)
+        ic.force_charge(inv, 3000)          # establishes the forced state
+        self.assertTrue(ic._forced_active)
+        inv.client.calls.clear()            # isolate return_to_auto's own writes
+
+        ic.return_to_auto(inv)
+
+        writes = inv.client.write_calls()
+        addrs = [addr for addr, _ in writes]
+        self.assertIn(ic.REG_MAX_AC_OUTPUT, addrs)
+        self.assertIn(ic.REG_MAX_AC_INPUT, addrs)
+        self.assertEqual(dict(writes)[ic.REG_MAX_AC_OUTPUT], ic.GRID_CAP_RAW)
+        self.assertEqual(dict(writes)[ic.REG_MAX_AC_INPUT], (-ic.GRID_CAP_RAW) & 0xFFFF)
+        # Both caps must land while 50000 is still EMS BattCtrl — the doc's write-order claim
+        # is that EMS limit writes outside EMS BattCtrl can be ignored.
+        self.assertLess(addrs.index(ic.REG_MAX_AC_OUTPUT), addrs.index(ic.REG_WORK_MODE))
+        self.assertLess(addrs.index(ic.REG_MAX_AC_INPUT), addrs.index(ic.REG_WORK_MODE))
+        self.assertFalse(ic._forced_active)
+
+    def test_idle_to_idle_does_not_write_caps(self):
+        """The common path: no forced state was ever established, so return_to_auto must keep
+        its exact previous cost — mode + target only, no cap writes."""
+        inv = make_inverter(soc_pct=50.0)
+        self.assertFalse(ic._forced_active)
+
+        ic.return_to_auto(inv)
+
+        addrs = [addr for addr, _ in inv.client.write_calls()]
+        self.assertNotIn(ic.REG_MAX_AC_OUTPUT, addrs)
+        self.assertNotIn(ic.REG_MAX_AC_INPUT, addrs)
+        self.assertEqual(addrs, [ic.REG_WORK_MODE, ic.REG_BATT_POWER_TARGET])
+
+    def test_disarmed_leaving_a_forced_state_writes_nothing(self):
+        """Preserves dispatch_loop's "never even open a connection when disarmed" — the cap
+        restore must go through write_u16's disarmed short-circuit like every other write."""
+        inv = make_inverter(soc_pct=50.0)
+        ic._forced_active = True
+        ic.ARMED = False
+        try:
+            ic.return_to_auto(inv)
+            self.assertEqual(inv.client.write_calls(), [])
+        finally:
+            ic.ARMED = True
 
 
 class MiscTests(InverterControlTestCase):

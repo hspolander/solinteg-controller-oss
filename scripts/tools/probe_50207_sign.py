@@ -35,8 +35,8 @@ from inverter_control import (
     ARMED,
     Inverter,
     REG_BATT_POWER_TARGET,
-    REG_MAX_EXPORT,
-    REG_MAX_IMPORT,
+    REG_MAX_AC_OUTPUT,
+    REG_MAX_AC_INPUT,
     REG_PRIORITY,
     REG_WORK_MODE,
     WORK_MODE_EMS_BATTCTRL,
@@ -80,8 +80,8 @@ def main(argv: list[str]) -> int:
         log.info("SoC %.1f%%, original mode 0x%X. Probing at %d W (raw %d).", soc, original_mode, probe_w, raw)
 
         # Allow power to flow either way, modest caps, enter EMS BattCtrl.
-        inv.write_u16(REG_MAX_EXPORT, GRID_CAP_RAW)
-        inv.write_u16(REG_MAX_IMPORT, (-GRID_CAP_RAW) & 0xFFFF)
+        inv.write_u16(REG_MAX_AC_OUTPUT, GRID_CAP_RAW)
+        inv.write_u16(REG_MAX_AC_INPUT, (-GRID_CAP_RAW) & 0xFFFF)
         inv.write_u16(REG_PRIORITY, 0)
         inv.write_u16(REG_WORK_MODE, WORK_MODE_EMS_BATTCTRL)
 

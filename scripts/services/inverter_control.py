@@ -71,8 +71,13 @@ SOC_CEILING_PCT = float(os.environ.get("SOLINTEG_SOC_CEILING_PCT", "98"))
 # ── Registers (verified — see MODBUS.md) ──
 REG_WORK_MODE = 50000          # U16 enum
 REG_BATT_POWER_TARGET = 50207  # S16, 0.01 kW (raw = W/10)
-REG_MAX_EXPORT = 50208         # S16, 0.01 kW (>= 0)
-REG_MAX_IMPORT = 50209         # S16, 0.01 kW (<= 0)
+# 50208/50209 cap the INVERTER's own AC exchange, NOT the site's utility-meter flow —
+# house load sits downstream, so the meter can show more import than 50209 allows
+# (inverter input for charging + house load). Renamed from REG_MAX_EXPORT/REG_MAX_IMPORT
+# 2026-08-05 because those names implied a meter-level/fuse guard they do not provide;
+# the real site-level cap registers are 50007/50009, which we do not write. See MODBUS.md.
+REG_MAX_AC_OUTPUT = 50208        # S16, 0.01 kW (>= 0); 0 = real zero, 200 kW = unrestricted
+REG_MAX_AC_INPUT = 50209         # S16, 0.01 kW (<= 0); 0 blocks inverter AC input outright
 REG_PRIORITY = 50210           # U16 enum: 0=PV, 1=Battery
 REG_BATTERY_POWER = 30258      # S32 W (read; -ve = charging)
 REG_SOC = 33000                # U16 x0.01 %
@@ -196,10 +201,58 @@ def _charge_sign() -> int:
     )
 
 
+def restore_ac_limits(inv: Inverter) -> None:
+    """Reassert unrestricted (±GRID_CAP) inverter AC limits on 50208/50209.
+
+    A NO-OP IN TODAY'S BEHAVIOUR, ON PURPOSE. force_charge/force_discharge only ever write
+    these two registers to the same symmetric ±GRID_CAP values, so nothing can currently
+    leave a restrictive cap behind and this rewrites what is already there.
+
+    It exists because the moment anything writes a RESTRICTIVE value — `REG_MAX_AC_INPUT=0`
+    for a hardware-enforced PV-only charge, or both at 0 for a battery freeze/hold — leaving
+    that state would otherwise leave the restriction in force. `return_to_auto` did not touch
+    these registers, and an auto slot never calls force_*, so nothing would reassert them:
+    a stale 0 would silently cripple self-consumption for the whole run of idle slots that
+    follows. It self-heals on the next charge/discharge slot (a stale 0 fails
+    `_already_set_for`, forcing the full setup sequence), so the damage is bounded — but an
+    overnight run of idle slots is easily 8+ hours of the battery not serving the house.
+
+    If you extend this controller with any mode that restricts 50208/50209 — a PV-only charge,
+    a battery hold/freeze, an export cap — this is the function that keeps it from leaking.
+
+    Prior art that this is a real failure mode and not a hypothetical: the HA-based YOUEMS
+    package for the same inverter family carries a whole automation (`ems_common_controls`)
+    whose only job is reasserting unrestricted EMS limits on every working-mode transition,
+    explicitly "so a previous qEMS limit cannot remain effective after leaving EMS BattCtrl".
+
+    CAVEAT — order matters and is not fully confirmed. A third-party reverse-engineering doc
+    for this inverter family reports that EMS limit writes are ignored unless the inverter is
+    already IN EMS BattCtrl (MODBUS.md's write-order review item). If that holds symmetrically,
+    these writes only land while 50000 is still 0x303 — hence the call site below is BEFORE the
+    mode write, not after. Unconfirmed on the reference unit; verify on yours before relying on
+    a restrictive cap.
+    """
+    # Logged because this is otherwise an invisible write path: it only ever MATTERS in a
+    # failure mode that does not exist yet, so without a line here there is no way to confirm
+    # from the journal that it ran at all (write_u16 logs nothing on success).
+    log.info("restore_ac_limits: 50208 -> +%d, 50209 -> -%d (unrestricted)", GRID_CAP_RAW, GRID_CAP_RAW)
+    inv.write_u16(REG_MAX_AC_OUTPUT, GRID_CAP_RAW, verify=False)
+    inv.write_u16(REG_MAX_AC_INPUT, (-GRID_CAP_RAW) & 0xFFFF, verify=False)
+
+
 def return_to_auto(inv: Inverter) -> None:
     """Hand dispatch back to the inverter's self-use logic. The fail-safe state."""
     global _forced_active
     log.info("return_to_auto: working mode -> General (0x101)")
+    # Gated on _forced_active for the same reason the exit/signal fail-safe below is: only a
+    # forced EMS BattCtrl state this process established can have restricted caps, so the
+    # common idle→idle path keeps its exact current cost and behaviour (no extra writes, and
+    # writes still short-circuit when disarmed, preserving dispatch_loop's "never even open a
+    # connection when disarmed"). Runs BEFORE the mode write — see restore_ac_limits' caveat.
+    # Costs ~2×WRITE_MIN_INTERVAL_S on a leave-forced transition; acceptable because the
+    # inverter is in a known commanded state throughout, not a runaway one.
+    if _forced_active:
+        restore_ac_limits(inv)
     inv.write_u16(REG_WORK_MODE, WORK_MODE_GENERAL)
     inv.write_u16(REG_BATT_POWER_TARGET, 0, verify=False)
     _forced_active = False
@@ -234,8 +287,8 @@ def _already_set_for(inv: "Inverter", priority: int) -> bool:
     opposite direction), this correctly returns False and the full setup sequence below
     runs exactly as before."""
     return (
-        inv.read_u16(REG_MAX_EXPORT) == GRID_CAP_RAW
-        and inv.read_s16(REG_MAX_IMPORT) == -GRID_CAP_RAW
+        inv.read_u16(REG_MAX_AC_OUTPUT) == GRID_CAP_RAW
+        and inv.read_s16(REG_MAX_AC_INPUT) == -GRID_CAP_RAW
         and inv.read_u16(REG_PRIORITY) == priority
         and inv.read_u16(REG_WORK_MODE) == WORK_MODE_EMS_BATTCTRL
     )
@@ -262,8 +315,8 @@ def force_charge(inv: Inverter, power_w: int) -> None:
     log.info("force_charge: %d W (raw %d), SoC %.1f%%%s", power_w, raw, soc,
              " (fast path — already in EMS charge mode)" if already_set else "")
     if not already_set:
-        inv.write_u16(REG_MAX_IMPORT, (-GRID_CAP_RAW) & 0xFFFF)  # allow grid import
-        inv.write_u16(REG_MAX_EXPORT, GRID_CAP_RAW)
+        inv.write_u16(REG_MAX_AC_INPUT, (-GRID_CAP_RAW) & 0xFFFF)  # allow grid import
+        inv.write_u16(REG_MAX_AC_OUTPUT, GRID_CAP_RAW)
         inv.write_u16(REG_PRIORITY, 0)                           # PV priority
     inv.write_u16(REG_BATT_POWER_TARGET, raw)                    # power before mode
     if not already_set:
@@ -291,8 +344,8 @@ def force_discharge(inv: Inverter, power_w: int) -> None:
     log.info("force_discharge: %d W (raw %d), SoC %.1f%%%s", power_w, raw, soc,
              " (fast path — already in EMS discharge mode)" if already_set else "")
     if not already_set:
-        inv.write_u16(REG_MAX_EXPORT, GRID_CAP_RAW)              # allow export
-        inv.write_u16(REG_MAX_IMPORT, (-GRID_CAP_RAW) & 0xFFFF)
+        inv.write_u16(REG_MAX_AC_OUTPUT, GRID_CAP_RAW)              # allow export
+        inv.write_u16(REG_MAX_AC_INPUT, (-GRID_CAP_RAW) & 0xFFFF)
         inv.write_u16(REG_PRIORITY, 1)                           # battery priority
     inv.write_u16(REG_BATT_POWER_TARGET, raw)
     if not already_set:
