@@ -147,6 +147,14 @@ summer and grows in winter. If you add a `hold` action, add the executor half to
 TS-only change — and make sure `restore_ac_limits` (scripts/services/inverter_control.py) runs
 when leaving the state, or the zeroed caps leak into the following idle slots.
 
+**OPEN, and worth answering before shipping any restrictive-cap mode: can the inverter's own SoC
+floor still act with AC input blocked?** 52502/52503 hold an on-grid floor and the inverter actively
+grid-charges back up to it when below. With `50209 = 0` (PV-only charge) or `0/0` (freeze), inverter
+AC input is blocked — so the floor may be unable to do that, and a freeze near the floor could
+silently defeat the one protection that does not depend on this software. Note a daylight probe
+almost certainly cannot answer it: it needs the battery near the floor, which will not coincide with
+a sunny afternoon.
+
 ## ⚠️ DO NOT enable live control until confirmed on-device
 
 | Item | Why | Probe |

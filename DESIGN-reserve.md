@@ -179,3 +179,15 @@ solar-side haircut — the same disease in solar flavor: selling in the morning 
 fully-trusted solar refill forecast) once forecast-vs-actual error distributions exist
 (join `optimizer_runs.inputs_json` against `readings`, see deploy/schema.sql's
 optimizer_runs notes).
+
+**Design template for the deferred solar-side half (added 2026-08-06).** The HA-based YOUEMS
+package for the same inverter family ships exactly this, and settles the question this note leaves
+open — *which decisions* get the pessimistic input. Its planner uses a conservative P10/P50 solar
+blend for **sell and refill-safety decisions only**, while the raw P50 keeps driving the graph and
+the general plan. That cut is the important part: a pessimistic solar figure applied everywhere
+would quietly distort the economics, whereas restricting it to "can I refill this afterwards" is
+the same shape as `LOAD_FORECAST_MARGIN` on the load side (pessimistic input, planning-only, oracle
+excluded). The mechanism doesn't transfer if your forecast source has no quantiles (Solcast gives
+P10/P50/P90; Open-Meteo `metno_nordic` does not) — but it doesn't need to, since α was sized from
+measured error rather than from a published quantile, and a solar haircut can be sized the same way
+once you have per-morning forecast-vs-actual ratios.
