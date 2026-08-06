@@ -80,6 +80,15 @@ class ControlErrorSeverityTests(unittest.TestCase):
         self.assertEqual(severity, hc.notify.PRIORITY_HIGH)
         self.assertIn("error_reverted x1", message)
 
+    def test_error_reverted_message_does_not_claim_nothing_was_written(self):
+        """Regression from a real alert: for error_reverted the apply failed and the revert
+        SUCCEEDED, so a write may well have landed and then been undone. Only a failed *connect*
+        guarantees nothing was written, and the shared HIGH tail must not assert that for both."""
+        con = self.make_db([("error_reverted", "Modbus Error: whatever")])
+        _key, _severity, _title, message = hc.check_control_errors(con, NOW)
+        self.assertNotIn("No write reached the inverter", message)
+        self.assertIn("unconfirmed state", message)
+
     def test_no_rows_means_no_alert(self):
         con = self.make_db([])
         self.assertIsNone(hc.check_control_errors(con, NOW))

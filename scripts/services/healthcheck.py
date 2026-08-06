@@ -202,10 +202,15 @@ def check_control_errors(con: sqlite3.Connection, now: datetime):
         tail = ("The UNCONFIRMED rows mean a write may have landed and the revert did not — "
                 "check the inverter's actual working mode directly.")
     else:
+        # Must stay true for connect-failed rows, error_reverted rows, and a mix of both.
+        # An earlier version said "no write reached the inverter", which is right for a failed
+        # connect but FALSE for error_reverted — there the apply failed and the revert
+        # succeeded, so a write may well have landed and then been cleanly undone.
         severity = notify.PRIORITY_HIGH
-        tail = ("No write reached the inverter, so there is no half-applied setpoint; these "
-                "normally clear on the next tick. Persistent or lengthening runs point at the "
-                "Modbus link/dongle, not at dispatch.")
+        tail = ("None of these left the inverter in an unconfirmed state — a failed connect "
+                "writes nothing, and a successful revert restores auto. They normally clear on "
+                "the next tick; persistent or lengthening runs point at the Modbus link/dongle, "
+                "not at dispatch.")
     return ("control_errors", severity, "Solinteg: dispatch loop hit errors",
             f"In the last {CONTROL_ERROR_WINDOW_S // 60} min: {', '.join(parts)}. {tail} "
             f"See control_actions.detail.")
