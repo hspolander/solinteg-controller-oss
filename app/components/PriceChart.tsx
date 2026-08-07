@@ -1,24 +1,47 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PriceData } from '@/lib/prices';
 import type { DispatchSlot } from '@/lib/optimizer';
 import {
   buildAreaPath,
   buildLinePath,
   computeNowSlotTime,
-  indexToX,
-  interventionLabel,
-  isBandDivergent,
   priceYScale,
   socYScale,
   solarYScale,
   sumActualForBand,
-  timeToX,
 } from '@/lib/chart-utils';
-import type { BandKind, ChartGeometry } from '@/lib/chart-utils';
 import type { ActualSlotFlows } from '@/lib/actual-flows';
 import { useChartData } from './useChartData';
+import { buildFrame } from './price-chart/frame';
+import { DayZones, DecisionBands } from './price-chart/ChartBands';
+import { PriceAxis, SocAxis, TimeAxis } from './price-chart/ChartAxes';
+import ChartLegend from './price-chart/ChartLegend';
+import type { ChartLayers } from './price-chart/ChartLegend';
+import ChartTooltip from './price-chart/ChartTooltip';
+
+/**
+ * The Elpriser card: today's (and tomorrow's) prices with the optimizer's plan drawn over them.
+ *
+ * Hand-rolled SVG rather than a charting library (Recharts was removed early on — the chart
+ * needs enough bespoke drawing that the library was mostly being fought).
+ * This file owns the DATA WIRING and COMPOSITION only; each visual layer lives in
+ * ./price-chart/ and is drawn here in z-order, back to front:
+ *
+ *   DayZones     today/tomorrow tint          ChartBands.tsx
+ *   DecisionBands  optimizer decision zones     "
+ *   PriceAxis    gridlines + öre/kWh labels   ChartAxes.tsx
+ *   SocAxis      right-hand 0-100% scale        "
+ *   (solar area, SoC lines, price lines)      below — short enough to read inline
+ *   (now marker, hover guide)                 below
+ *   TimeAxis     hour labels                  ChartAxes.tsx
+ *   ChartTooltip hover detail (HTML, not SVG) ChartTooltip.tsx
+ *
+ * Split out of one ~600-line function on 2026-08-07. The series and overlay stay inline
+ * deliberately: they are a handful of <path> elements each, and pushing them out too would
+ * leave this file a list of imports that says nothing about what the chart looks like.
+ */
 
 interface Props {
   data: PriceData;
@@ -40,27 +63,6 @@ interface Props {
   batteryFloorKwh: number;
 }
 
-const BAND_COLOR: Record<BandKind, string> = {
-  buy: 'var(--color-charge-band)',
-  sell: 'var(--color-sell-band)',
-  hold: 'var(--color-hold-band)',
-};
-const BAND_LABEL: Record<BandKind, string> = { buy: 'Ladda', sell: 'Sälj', hold: 'Sparar' };
-// Hold zones ("the plan is deliberately NOT using the battery") are context, not action —
-// drawn fainter and without the leading edge bar so buy/sell decisions stay dominant.
-const BAND_FILL_PCT: Record<BandKind, number> = { buy: 11, sell: 11, hold: 6 };
-
-// The hover tooltip renders an identical four-row block for a buy and for a sell — planned
-// this slot, planned this zone, actual this slot, actual this zone — differing only in which
-// ChartPoint flow field carries the quantity, which CSS colour marks it, and the Swedish noun.
-// Kept as data rather than two parallel JSX branches so the two can't drift (they had already
-// diverged once in wording). 'hold' has no quantity of its own: it is the absence of a battery
-// flow, so it is deliberately absent here.
-const DECISION_ROWS = {
-  buy: { color: 'var(--color-charge-band)', noun: 'Laddning', field: 'gridToBatteryKwh' },
-  sell: { color: 'var(--color-sell-band)', noun: 'Försäljning', field: 'batteryToGridKwh' },
-} as const satisfies Record<'buy' | 'sell', { color: string; noun: string; field: 'gridToBatteryKwh' | 'batteryToGridKwh' }>;
-
 type Point = [number, number];
 
 // Groups a series with nulls into contiguous non-null runs — each run becomes its own path
@@ -81,30 +83,24 @@ function contiguousRuns(points: (Point | null)[]): Point[][] {
   return runs;
 }
 
-function priceTicks(min: number, max: number): number[] {
-  const span = max - min;
-  return [min, min + span * 0.25, min + span * 0.5, min + span * 0.75, max];
-}
-
+/** Rounded pill label for the now-marker's current buy/sell price. */
 function tag(key: string, x: number, y: number, text: string, color: string) {
   const w = text.length * 6.4 + 14;
   return (
     <g key={key}>
       <rect x={x + 7} y={y - 9} width={w} height={18} rx={6} fill={color} />
-      <text x={x + 7 + w / 2} y={y + 3.5} textAnchor="middle" fontSize={11} fontWeight={700} fill="#fff" style={{ fontFamily: 'var(--font-heading)' }}>
+      <text
+        x={x + 7 + w / 2}
+        y={y + 3.5}
+        textAnchor="middle"
+        fontSize={11}
+        fontWeight={700}
+        fill="#fff"
+        style={{ fontFamily: 'var(--font-heading)' }}
+      >
         {text}
       </text>
     </g>
-  );
-}
-
-function TooltipRow({ color, label, value, bold }: { color: string; label: string; value: string; bold?: boolean }) {
-  return (
-    <div className="flex items-center gap-1.5 whitespace-nowrap">
-      <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />
-      <span style={{ color: 'var(--text-muted)' }}>{label}</span>
-      <span className={`ml-auto pl-3 ${bold ? 'font-bold' : 'font-semibold'}`}>{value}</span>
-    </div>
   );
 }
 
@@ -160,7 +156,7 @@ export default function PriceChart({
   const hasActualSoc = chartData.some((d) => d.actualSocPct != null);
   const hasPlan = !!dispatchSchedule;
 
-  const [layers, setLayers] = useState({ solar: true, soc: true, zones: true });
+  const [layers, setLayers] = useState<ChartLayers>({ solar: true, soc: true, zones: true });
 
   // "Now" marker: recomputed every minute so a dashboard left open stays accurate.
   const [nowTime, setNowTime] = useState<string | null>(null);
@@ -174,14 +170,14 @@ export default function PriceChart({
 
   const nowPoint = nowTime ? chartData.find((d) => d.time === nowTime) : undefined;
 
-  const geo: ChartGeometry = geometry;
+  // Everything the layers draw against: data, box, scales (see price-chart/frame.ts).
+  const frame = useMemo(
+    () => buildFrame(chartData, geometry, timeIndex, priceMin, priceMax, solarMax),
+    [chartData, geometry, timeIndex, priceMin, priceMax, solarMax],
+  );
+  const geo = geometry;
+  const { xAt, tx } = frame;
   const count = chartData.length;
-  const stepX = count > 1 ? geo.plotW / (count - 1) : 0;
-
-  // Memoised so the five useMemos below can list it as a dependency honestly. An inline arrow
-  // is a new identity every render, so react-hooks/exhaustive-deps could not be satisfied
-  // without either defeating every memo or silencing the rule.
-  const xAt = useCallback((i: number) => indexToX(i, count, geo), [count, geo]);
 
   const buyPath = useMemo(
     () => buildLinePath(chartData.map((d, i): Point => [xAt(i), priceYScale(d.buy, priceMax, geo, priceMin)])),
@@ -259,23 +255,10 @@ export default function PriceChart({
         ) ?? null
       : null;
 
-  // Zone-level actual total for the hovered band (buy/sell only, matching the marker above and
-  // the tooltip's "Verkligt (hela zonen)" row) — bands are few, a linear scan is fine.
+  // Zone-level actual total for the hovered band (buy/sell only, matching the in-chart ⚠ marker
+  // and the tooltip's "Verkligt (hela zonen)" row) — bands are few, a linear scan is fine.
   const hoverBandActual =
     hoverBand && hoverBand.kind !== 'hold' ? sumActualForBand(hoverBand, chartData, timeIndex) : null;
-
-  // Resolves the hovered slot's decision to the one quantity block the tooltip should show
-  // (see DECISION_ROWS). Null for a hold, for a slot with no deliberate decision, and for the
-  // case the old two-branch version guarded explicitly: a buy/sell zone whose own flow field
-  // is missing, which would otherwise render "undefined kWh".
-  const decisionRows = (() => {
-    if (!hoverPoint) return null;
-    const kind = hoverPoint.decision;
-    if (kind !== 'buy' && kind !== 'sell') return null;
-    const spec = DECISION_ROWS[kind];
-    const plannedSlotKwh = hoverPoint[spec.field];
-    return plannedSlotKwh == null ? null : { ...spec, plannedSlotKwh };
-  })();
 
   return (
     <div
@@ -314,10 +297,7 @@ export default function PriceChart({
           </div>
         </div>
         {nowPoint && (
-          <div
-            className="flex items-center gap-2 rounded-xl px-3 py-1.5"
-            style={{ background: 'var(--badge-bg)' }}
-          >
+          <div className="flex items-center gap-2 rounded-xl px-3 py-1.5" style={{ background: 'var(--badge-bg)' }}>
             <span className="h-2 w-2 rounded-full" style={{ background: 'var(--color-now)' }} />
             <span className="text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
               Nu
@@ -338,68 +318,7 @@ export default function PriceChart({
         )}
       </div>
 
-      <div className="mb-1.5 flex flex-wrap items-center gap-3">
-        <span className="text-[10px] font-bold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
-          Pris
-        </span>
-        <span className="flex items-center gap-1.5 text-xs font-semibold">
-          <span className="inline-block h-[3px] w-[18px] rounded" style={{ background: 'var(--color-buy)' }} />
-          Köp
-        </span>
-        <span className="flex items-center gap-1.5 text-xs font-semibold">
-          <span className="inline-block h-[3px] w-[18px] rounded" style={{ background: 'var(--color-sell)' }} />
-          Sälj
-        </span>
-        <span className="mx-0.5 h-4 w-px" style={{ background: 'var(--divider)' }} />
-        <span className="text-[10px] font-bold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
-          Lager
-        </span>
-        <button
-          type="button"
-          onClick={() => setLayers((s) => ({ ...s, solar: !s.solar }))}
-          className="chip flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
-          style={layers.solar ? { border: '1px solid var(--divider)' } : { color: 'var(--text-muted)', opacity: 0.6 }}
-        >
-          <span className="h-[11px] w-[13px] rounded-sm" style={{ background: 'color-mix(in srgb, var(--color-solar) 60%, transparent)' }} />
-          Sol
-        </button>
-        {hasPlan && (
-          <button
-            type="button"
-            onClick={() => setLayers((s) => ({ ...s, soc: !s.soc }))}
-            className="chip flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
-            style={layers.soc ? { border: '1px solid var(--divider)' } : { color: 'var(--text-muted)', opacity: 0.6 }}
-          >
-            <span className="w-[18px] border-t-2" style={{ borderColor: 'var(--color-soc)', borderStyle: 'dashed' }} />
-            Batteri-SoC
-          </button>
-        )}
-        {hasPlan && (
-          <button
-            type="button"
-            onClick={() => setLayers((s) => ({ ...s, zones: !s.zones }))}
-            className="chip flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
-            style={layers.zones ? { border: '1px solid var(--divider)' } : { color: 'var(--text-muted)', opacity: 0.6 }}
-          >
-            {/* one swatch+label per zone kind, mirroring the in-chart band pills (BAND_LABEL) */}
-            <span className="flex items-center gap-1">
-              <span className="h-[11px] w-[9px] rounded-sm" style={{ background: 'var(--color-charge-band)' }} />
-              Ladda
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="h-[11px] w-[9px] rounded-sm" style={{ background: 'var(--color-sell-band)' }} />
-              Sälj
-            </span>
-            <span className="flex items-center gap-1">
-              <span
-                className="h-[11px] w-[9px] rounded-sm"
-                style={{ background: 'color-mix(in srgb, var(--color-hold-band) 55%, transparent)' }}
-              />
-              Sparar
-            </span>
-          </button>
-        )}
-      </div>
+      <ChartLegend layers={layers} setLayers={setLayers} hasPlan={hasPlan} />
 
       <div
         ref={containerRef}
@@ -412,356 +331,153 @@ export default function PriceChart({
         onTouchEnd={clearHover}
       >
         <svg viewBox={`0 0 ${geo.width} ${geo.height}`} width="100%" style={{ display: 'block', height: 'auto', overflow: 'visible' }}>
-          {/* today / tomorrow zones */}
-        {tomorrowTime && beforeTomorrowTime && firstTime && lastTime && (
-          <>
-            <rect
-              x={timeToX(firstTime, chartData, geo, timeIndex) ?? 0}
-              y={geo.padT}
-              width={(timeToX(beforeTomorrowTime, chartData, geo, timeIndex) ?? 0) - (timeToX(firstTime, chartData, geo, timeIndex) ?? 0)}
-              height={geo.plotH}
-              fill="var(--zone-today)"
-            />
-            <rect
-              x={timeToX(tomorrowTime, chartData, geo, timeIndex) ?? 0}
-              y={geo.padT}
-              width={(timeToX(lastTime, chartData, geo, timeIndex) ?? 0) - (timeToX(tomorrowTime, chartData, geo, timeIndex) ?? 0)}
-              height={geo.plotH}
-              fill="var(--zone-tomorrow)"
-            />
-          </>
-        )}
-
-        {/* decision bands (see classifyBand in lib/chart-utils.ts for the taxonomy) */}
-        {layers.zones &&
-          actionBands.map((band, i) => {
-            const x1 = timeToX(band.x1, chartData, geo, timeIndex);
-            const x2 = timeToX(band.x2, chartData, geo, timeIndex);
-            if (x1 == null || x2 == null) return null;
-            const bx = x1 - stepX / 2;
-            const bw = x2 - x1 + stepX;
-            const color = BAND_COLOR[band.kind];
-            const isHold = band.kind === 'hold';
-            // Divergence marker: buy/sell only (hold stays de-emphasized context, not a
-            // decision to audit) and only once the WHOLE zone has elapsed with complete actual
-            // data — a poller gap or a zone still partly in the future must never flag a false ⚠.
-            const actualSummary = !isHold ? sumActualForBand(band, chartData, timeIndex) : null;
-            const divergent = actualSummary != null && isBandDivergent(band.kwh, actualSummary);
-            const label = divergent ? `${BAND_LABEL[band.kind]} ⚠` : BAND_LABEL[band.kind];
-            const labelW = label.length * 6.4 + 14;
-            return (
-              <g key={i}>
-                <rect x={bx} y={geo.padT} width={bw} height={geo.plotH} fill={`color-mix(in srgb, ${color} ${BAND_FILL_PCT[band.kind]}%, transparent)`} />
-                {!isHold && (
-                  <rect x={bx} y={geo.padT} width={2} height={geo.plotH} fill={`color-mix(in srgb, ${color} 50%, transparent)`} />
-                )}
-                {bw >= labelW && (
-                  <>
-                    <rect
-                      x={bx + bw / 2 - labelW / 2}
-                      y={geo.padT + 4}
-                      width={labelW}
-                      height={15}
-                      rx={5}
-                      fill={isHold ? `color-mix(in srgb, ${color} 70%, transparent)` : color}
-                    />
-                    <text
-                      x={bx + bw / 2}
-                      y={geo.padT + 14.5}
-                      textAnchor="middle"
-                      fontSize={9}
-                      fontWeight={700}
-                      fill="#fff"
-                      style={{ fontFamily: 'var(--font-body)' }}
-                    >
-                      {label}
-                    </text>
-                  </>
-                )}
-              </g>
-            );
-          })}
-
-        {/* gridlines + left price axis */}
-        {priceTicks(priceMin, priceMax).map((v, i) => (
-          <g key={i}>
-            <line x1={geo.padL} y1={priceYScale(v, priceMax, geo, priceMin)} x2={geo.padL + geo.plotW} y2={priceYScale(v, priceMax, geo, priceMin)} stroke="var(--grid-line)" strokeWidth={1} />
-            <text x={geo.padL - 6} y={priceYScale(v, priceMax, geo, priceMin) + 3.5} textAnchor="end" fontSize={10} fill="var(--axis-text)" style={{ fontFamily: 'var(--font-body)' }}>
-              {Math.round(v)}
-            </text>
-          </g>
-        ))}
-        {/* zero line, emphasized only when the axis extends below it (negative-price day) */}
-        {priceMin < 0 && (
-          <line
-            x1={geo.padL}
-            y1={priceYScale(0, priceMax, geo, priceMin)}
-            x2={geo.padL + geo.plotW}
-            y2={priceYScale(0, priceMax, geo, priceMin)}
-            stroke="var(--axis-text)"
-            strokeWidth={1}
-            strokeDasharray="2 3"
-            opacity={0.7}
+          <DayZones
+            frame={frame}
+            firstTime={firstTime}
+            lastTime={lastTime}
+            tomorrowTime={tomorrowTime}
+            beforeTomorrowTime={beforeTomorrowTime}
           />
-        )}
-        <text x={geo.padL - 6} y={geo.padT - 8} textAnchor="end" fontSize={9} fontWeight={700} fill="var(--axis-text)" style={{ fontFamily: 'var(--font-body)' }}>
-          öre/kWh
-        </text>
 
-        {/* right SoC axis */}
-        {hasPlan && layers.soc && (
-          <>
-            {[0, 25, 50, 75, 100].map((v, i) => (
-              <text
-                key={i}
-                x={geo.padL + geo.plotW + 7}
-                y={socYScale(v, geo) + 3.5}
-                textAnchor="start"
-                fontSize={10}
-                fill="color-mix(in srgb, var(--color-soc) 80%, transparent)"
-                style={{ fontFamily: 'var(--font-body)' }}
-              >
-                {v}%
-              </text>
-            ))}
-            <text
-              x={geo.padL + geo.plotW + 7}
-              y={geo.padT - 8}
-              textAnchor="start"
-              fontSize={9}
-              fontWeight={700}
-              fill="color-mix(in srgb, var(--color-soc) 80%, transparent)"
-              style={{ fontFamily: 'var(--font-body)' }}
-            >
-              SoC
-            </text>
-          </>
-        )}
+          {layers.zones && <DecisionBands frame={frame} bands={actionBands} />}
 
-        {/* solar area */}
-        {layers.solar && (
-          <>
-            <path d={solarAreaPath} fill="color-mix(in srgb, var(--color-solar) 15%, transparent)" stroke="none" />
-            <path d={solarLinePath} fill="none" stroke="color-mix(in srgb, var(--color-solar) 55%, transparent)" strokeWidth={1.2} />
-            {peakSolarIdx >= 0 && (
-              <text
-                x={xAt(peakSolarIdx)}
-                y={solarTopPoints[peakSolarIdx][1] - 6}
-                textAnchor="middle"
-                fontSize={9}
-                fontWeight={700}
-                fill="color-mix(in srgb, var(--color-solar) 80%, transparent)"
-                style={{ fontFamily: 'var(--font-body)' }}
-              >
-                Sol
-              </text>
-            )}
-          </>
-        )}
+          <PriceAxis frame={frame} />
+          {hasPlan && layers.soc && <SocAxis frame={frame} />}
 
-        {/* SoC lines */}
-        {hasPlan &&
-          layers.soc &&
-          socPlannedRuns.map((run, i) => (
-            <path
-              key={`planned-${i}`}
-              d={buildLinePath(run)}
-              fill="none"
-              stroke="color-mix(in srgb, var(--color-soc) 75%, transparent)"
-              strokeWidth={1.8}
-              strokeDasharray="6 5"
-              strokeLinecap="round"
-            />
-          ))}
-        {hasPlan &&
-          layers.soc &&
-          hasActualSoc &&
-          socActualRuns.map((run, i) => (
-            <path key={`actual-${i}`} d={buildLinePath(run)} fill="none" stroke="var(--color-soc)" strokeWidth={2.4} strokeLinecap="round" />
-          ))}
-
-        {/* price lines — sell then buy, buy on top */}
-        <path d={sellPath} fill="none" stroke="var(--color-sell)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" style={{ filter: 'drop-shadow(0 1px 4px color-mix(in srgb, var(--color-sell) 35%, transparent))' }} />
-        <path d={buyPath} fill="none" stroke="var(--color-buy)" strokeWidth={2.6} strokeLinejoin="round" strokeLinecap="round" style={{ filter: 'drop-shadow(0 1px 5px color-mix(in srgb, var(--color-buy) 40%, transparent))' }} />
-
-        {/* today/tomorrow divider + labels */}
-        {tomorrowTime && (
-          <line
-            x1={timeToX(tomorrowTime, chartData, geo, timeIndex) ?? 0}
-            y1={geo.padT}
-            x2={timeToX(tomorrowTime, chartData, geo, timeIndex) ?? 0}
-            y2={geo.baseY}
-            stroke="var(--axis-text)"
-            strokeWidth={1.2}
-            strokeDasharray="4 5"
-            opacity={0.7}
-          />
-        )}
-        {firstTime && (
-          <text x={(timeToX(firstTime, chartData, geo, timeIndex) ?? 0) + 4} y={geo.padT + 13} fontSize={10} fontWeight={700} fill="var(--axis-text)" style={{ fontFamily: 'var(--font-body)' }}>
-            Idag
-          </text>
-        )}
-        {tomorrowTime && (
-          <text x={(timeToX(tomorrowTime, chartData, geo, timeIndex) ?? 0) + 4} y={geo.padT + 13} fontSize={10} fontWeight={700} fill="var(--axis-text)" style={{ fontFamily: 'var(--font-body)' }}>
-            Imorgon
-          </text>
-        )}
-
-        {/* now marker */}
-        {nowTime &&
-          nowPoint &&
-          (() => {
-            const xn = timeToX(nowTime, chartData, geo, timeIndex);
-            if (xn == null) return null;
-            const buyNowV = Math.round(nowPoint.buy);
-            const sellNowV = Math.round(nowPoint.sell);
-            const byY = priceYScale(nowPoint.buy, priceMax, geo, priceMin);
-            let syY = priceYScale(nowPoint.sell, priceMax, geo, priceMin);
-            if (Math.abs(byY - syY) < 20) syY = byY + 20;
-            return (
-              <g>
-                <line x1={xn} y1={geo.padT} x2={xn} y2={geo.baseY} stroke="var(--color-now)" strokeWidth={2} />
-                {tag('tagB', xn, byY, `Köp ${buyNowV}`, 'var(--color-buy)')}
-                {tag('tagS', xn, syY, `Sälj ${sellNowV}`, 'var(--color-sell)')}
-                <rect x={xn - 15} y={geo.padT - 22} width={30} height={16} rx={6} fill="var(--color-now)" />
-                <text x={xn} y={geo.padT - 10.5} textAnchor="middle" fontSize={10} fontWeight={700} fill="var(--color-now-text)" style={{ fontFamily: 'var(--font-heading)' }}>
-                  Nu
-                </text>
-              </g>
-            );
-          })()}
-
-        {/* time axis */}
-        {xTicks.map((t) => {
-          const x = timeToX(t, chartData, geo, timeIndex);
-          if (x == null) return null;
-          return (
-            <text key={t} x={x} y={geo.baseY + 15} textAnchor="middle" fontSize={9.5} fill="var(--axis-text)" style={{ fontFamily: 'var(--font-body)' }}>
-              {t.slice(11, 13)}
-            </text>
-          );
-        })}
-
-        {/* hover guide + per-series dots */}
-        {hover && hoverPoint && (
-          <g pointerEvents="none">
-            <line x1={xAt(hover.index)} y1={geo.padT} x2={xAt(hover.index)} y2={geo.baseY} stroke="var(--text-muted)" strokeWidth={1} strokeDasharray="3 3" opacity={0.6} />
-            <circle cx={xAt(hover.index)} cy={priceYScale(hoverPoint.sell, priceMax, geo, priceMin)} r={3.5} fill="var(--color-sell)" stroke="var(--card-bg)" strokeWidth={1.5} />
-            <circle cx={xAt(hover.index)} cy={priceYScale(hoverPoint.buy, priceMax, geo, priceMin)} r={3.5} fill="var(--color-buy)" stroke="var(--card-bg)" strokeWidth={1.5} />
-            {hasPlan && layers.soc && hoverPoint.socPct != null && (
-              <circle cx={xAt(hover.index)} cy={socYScale(hoverPoint.socPct, geo)} r={3.5} fill="var(--color-soc)" stroke="var(--card-bg)" strokeWidth={1.5} />
-            )}
-          </g>
-        )}
-      </svg>
-
-      {hover && hoverPoint && (
-        <div
-          className="pointer-events-none absolute z-20 flex flex-col gap-1 rounded-lg p-2.5 text-xs"
-          style={{
-            ...(hover.x > hover.containerWidth * 0.6
-              ? { right: hover.containerWidth - hover.x + 14 }
-              : { left: hover.x + 14 }),
-            top: Math.max(0, hover.y - 60),
-            minWidth: 168,
-            background: 'var(--card-bg-grad, var(--card-bg))',
-            border: '1px solid var(--card-border)',
-            boxShadow: 'var(--card-shadow)',
-            color: 'var(--text)',
-            fontFamily: 'var(--font-body)',
-          }}
-        >
-          <div className="mb-0.5 font-bold" style={{ fontFamily: 'var(--font-heading)' }}>
-            {hoverPoint.time.slice(0, 10)} {hoverPoint.time.slice(11, 16)}
-            {/* deliberate decisions (match the zones) in band colors; default self-use behaviour muted */}
-            {hoverPoint.decision === 'buy' && <span style={{ color: 'var(--color-charge-band)' }}> · Laddar från nätet</span>}
-            {hoverPoint.decision === 'sell' && <span style={{ color: 'var(--color-sell-band)' }}> · Säljer till nätet</span>}
-            {hoverPoint.decision === 'hold' && <span style={{ color: 'var(--color-hold-band)' }}> · Sparar batteriet</span>}
-            {hoverPoint.decision == null && hoverPoint.action === 'discharge' && (
-              <span style={{ color: 'var(--text-muted)' }}> · Urladdar (täcker last)</span>
-            )}
-            {hoverPoint.decision == null && hoverPoint.action === 'charge' && (
-              <span style={{ color: 'var(--text-muted)' }}> · Laddar</span>
-            )}
-          </div>
-          <TooltipRow color="var(--color-buy)" label="Köp" value={`${hoverPoint.buy.toFixed(1)} öre/kWh`} />
-          <TooltipRow color="var(--color-sell)" label="Sälj" value={`${hoverPoint.sell.toFixed(1)} öre/kWh`} />
-          <TooltipRow
-            color="var(--color-solar)"
-            label={hoverPoint.solarSource === 'forecast' ? 'Sol (prognos)' : 'Sol (typisk)'}
-            value={`${hoverPoint.solarKwh.toFixed(2)} kWh`}
-          />
-          {/* planned dispatch quantities — only for deliberate buy/sell decisions, matching the
-              zones; the amount shown is the flow the zone is classified from (grid→battery for
-              a buy, battery→grid for a sell), plus the whole zone's total for context */}
-          {decisionRows && (
+          {/* solar area */}
+          {layers.solar && (
             <>
-              <TooltipRow
-                color={decisionRows.color}
-                label={`${decisionRows.noun} (denna kvart)`}
-                value={`${decisionRows.plannedSlotKwh.toFixed(1)} kWh`}
-              />
-              {hoverBand && (
-                <TooltipRow
-                  color={decisionRows.color}
-                  label={`${decisionRows.noun} (hela zonen)`}
-                  value={`${hoverBand.kwh.toFixed(1)} kWh`}
-                />
-              )}
-              {hoverPoint.actual && (
-                <TooltipRow
-                  color={decisionRows.color}
-                  label="Verkligt (denna kvart)"
-                  value={`${hoverPoint.actual[decisionRows.field].toFixed(1)} kWh`}
-                  bold
-                />
-              )}
-              {hoverBandActual && (
-                <TooltipRow
-                  color={decisionRows.color}
-                  label="Verkligt (hela zonen)"
-                  value={`${hoverBandActual.complete ? '' : '≥ '}${hoverBandActual.kwh.toFixed(1)} kWh`}
-                  bold
-                />
+              <path d={solarAreaPath} fill="color-mix(in srgb, var(--color-solar) 15%, transparent)" stroke="none" />
+              <path d={solarLinePath} fill="none" stroke="color-mix(in srgb, var(--color-solar) 55%, transparent)" strokeWidth={1.2} />
+              {peakSolarIdx >= 0 && (
+                <text
+                  x={xAt(peakSolarIdx)}
+                  y={solarTopPoints[peakSolarIdx][1] - 6}
+                  textAnchor="middle"
+                  fontSize={9}
+                  fontWeight={700}
+                  fill="color-mix(in srgb, var(--color-solar) 80%, transparent)"
+                  style={{ fontFamily: 'var(--font-body)' }}
+                >
+                  Sol
+                </text>
               )}
             </>
           )}
-          {(hoverPoint.decision === 'buy' || hoverPoint.decision === 'sell') &&
-            hoverBand &&
-            hoverBandActual &&
-            isBandDivergent(hoverBand.kwh, hoverBandActual) && (
-              <TooltipRow
-                color="var(--color-now)"
-                label="Avvikelse"
-                value={`plan ${hoverBand.kwh.toFixed(1)} / verkligt ${hoverBandActual.complete ? '' : '≥ '}${hoverBandActual.kwh.toFixed(1)} kWh`}
+
+          {/* SoC lines — planned dashed, actual solid on top */}
+          {hasPlan &&
+            layers.soc &&
+            socPlannedRuns.map((run, i) => (
+              <path
+                key={`planned-${i}`}
+                d={buildLinePath(run)}
+                fill="none"
+                stroke="color-mix(in srgb, var(--color-soc) 75%, transparent)"
+                strokeWidth={1.8}
+                strokeDasharray="6 5"
+                strokeLinecap="round"
               />
-            )}
-          {hoverPoint.interventions.length > 0 && (
-            <TooltipRow
-              color="var(--color-now)"
-              label="Ingrepp"
-              value={hoverPoint.interventions.map(interventionLabel).join(', ')}
+            ))}
+          {hasPlan &&
+            layers.soc &&
+            hasActualSoc &&
+            socActualRuns.map((run, i) => (
+              <path key={`actual-${i}`} d={buildLinePath(run)} fill="none" stroke="var(--color-soc)" strokeWidth={2.4} strokeLinecap="round" />
+            ))}
+
+          {/* price lines — sell then buy, buy on top */}
+          <path
+            d={sellPath}
+            fill="none"
+            stroke="var(--color-sell)"
+            strokeWidth={2}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            style={{ filter: 'drop-shadow(0 1px 4px color-mix(in srgb, var(--color-sell) 35%, transparent))' }}
+          />
+          <path
+            d={buyPath}
+            fill="none"
+            stroke="var(--color-buy)"
+            strokeWidth={2.6}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            style={{ filter: 'drop-shadow(0 1px 5px color-mix(in srgb, var(--color-buy) 40%, transparent))' }}
+          />
+
+          {/* today/tomorrow divider + labels */}
+          {tomorrowTime && (
+            <line
+              x1={tx(tomorrowTime) ?? 0}
+              y1={geo.padT}
+              x2={tx(tomorrowTime) ?? 0}
+              y2={geo.baseY}
+              stroke="var(--axis-text)"
+              strokeWidth={1.2}
+              strokeDasharray="4 5"
+              opacity={0.7}
             />
           )}
-          {hoverPoint.decision == null &&
-            hoverPoint.action === 'discharge' &&
-            hoverPoint.batteryToLoadKwh != null &&
-            hoverPoint.batteryToLoadKwh > 0 && (
-              <TooltipRow
-                color="var(--color-soc)"
-                label="Batteri → hus"
-                value={`${hoverPoint.batteryToLoadKwh.toFixed(1)} kWh`}
-              />
-            )}
-          {hasPlan && hoverPoint.socPct != null && (
-            <TooltipRow color="var(--color-soc)" label="Batteri-SoC (planerad)" value={`${hoverPoint.socPct.toFixed(0)} %`} />
+          {firstTime && (
+            <text x={(tx(firstTime) ?? 0) + 4} y={geo.padT + 13} fontSize={10} fontWeight={700} fill="var(--axis-text)" style={{ fontFamily: 'var(--font-body)' }}>
+              Idag
+            </text>
           )}
-          {hoverPoint.actualSocPct != null && (
-            <TooltipRow color="var(--color-soc)" label="Batteri-SoC (verklig)" value={`${hoverPoint.actualSocPct.toFixed(0)} %`} bold />
+          {tomorrowTime && (
+            <text x={(tx(tomorrowTime) ?? 0) + 4} y={geo.padT + 13} fontSize={10} fontWeight={700} fill="var(--axis-text)" style={{ fontFamily: 'var(--font-body)' }}>
+              Imorgon
+            </text>
           )}
-        </div>
-      )}
+
+          {/* now marker */}
+          {nowTime &&
+            nowPoint &&
+            (() => {
+              const xn = tx(nowTime);
+              if (xn == null) return null;
+              const buyNowV = Math.round(nowPoint.buy);
+              const sellNowV = Math.round(nowPoint.sell);
+              const byY = priceYScale(nowPoint.buy, priceMax, geo, priceMin);
+              let syY = priceYScale(nowPoint.sell, priceMax, geo, priceMin);
+              if (Math.abs(byY - syY) < 20) syY = byY + 20;
+              return (
+                <g>
+                  <line x1={xn} y1={geo.padT} x2={xn} y2={geo.baseY} stroke="var(--color-now)" strokeWidth={2} />
+                  {tag('tagB', xn, byY, `Köp ${buyNowV}`, 'var(--color-buy)')}
+                  {tag('tagS', xn, syY, `Sälj ${sellNowV}`, 'var(--color-sell)')}
+                  <rect x={xn - 15} y={geo.padT - 22} width={30} height={16} rx={6} fill="var(--color-now)" />
+                  <text x={xn} y={geo.padT - 10.5} textAnchor="middle" fontSize={10} fontWeight={700} fill="var(--color-now-text)" style={{ fontFamily: 'var(--font-heading)' }}>
+                    Nu
+                  </text>
+                </g>
+              );
+            })()}
+
+          <TimeAxis frame={frame} ticks={xTicks} />
+
+          {/* hover guide + per-series dots */}
+          {hover && hoverPoint && (
+            <g pointerEvents="none">
+              <line x1={xAt(hover.index)} y1={geo.padT} x2={xAt(hover.index)} y2={geo.baseY} stroke="var(--text-muted)" strokeWidth={1} strokeDasharray="3 3" opacity={0.6} />
+              <circle cx={xAt(hover.index)} cy={priceYScale(hoverPoint.sell, priceMax, geo, priceMin)} r={3.5} fill="var(--color-sell)" stroke="var(--card-bg)" strokeWidth={1.5} />
+              <circle cx={xAt(hover.index)} cy={priceYScale(hoverPoint.buy, priceMax, geo, priceMin)} r={3.5} fill="var(--color-buy)" stroke="var(--card-bg)" strokeWidth={1.5} />
+              {hasPlan && layers.soc && hoverPoint.socPct != null && (
+                <circle cx={xAt(hover.index)} cy={socYScale(hoverPoint.socPct, geo)} r={3.5} fill="var(--color-soc)" stroke="var(--card-bg)" strokeWidth={1.5} />
+              )}
+            </g>
+          )}
+        </svg>
+
+        {hover && hoverPoint && (
+          <ChartTooltip
+            point={hoverPoint}
+            band={hoverBand}
+            bandActual={hoverBandActual}
+            placement={{ x: hover.x, y: hover.y, containerWidth: hover.containerWidth }}
+            hasPlan={hasPlan}
+          />
+        )}
       </div>
 
       {hasPlan && (
