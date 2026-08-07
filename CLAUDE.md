@@ -53,7 +53,11 @@ elprisetjustnu.se SE3  Open Meteo (SOLAR_FORECAST_MODEL, Open Meteo (daily temp)
                   │                   └─→ lib/telemetry/  (best-effort: logs price curve
                   │                       + optimizer run to telemetry.db; no-op unless
                   ▼                       TELEMETRY_DB_PATH set — off in dev/build/tests)
-     app/components/PriceChart.tsx   (rendering only)
+     app/components/PriceChart.tsx   (rendering only — data wiring + composition; each visual
+                                 layer is a component under app/components/price-chart/,
+                                 drawn in z-order: bands → axes → series → overlay →
+                                 tooltip. All take one `frame` prop, the projection
+                                 built by price-chart/frame.ts)
      app/components/useChartData.ts  (React memos → lib/chart-utils.ts)
      lib/chart-utils.ts              (pure: buildActionBands, buildChartData, …)
 ```

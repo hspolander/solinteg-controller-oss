@@ -105,8 +105,8 @@ npm ci            # `ci` not `install` — respects the lockfile
 npm test          # vitest
 npm run test:py   # Python; use the `py` launcher on Windows in place of python3
 npm run lint
+npm run typecheck # tsc --noEmit; typechecks the TESTS too, which `build` does not
 npm run build     # catches type/CSS errors the tests won't
-npx tsc --noEmit  # typechecks the tests too, which `build` does not
 ```
 
 Small PRs get reviewed faster than large ones, and a PR that changes behaviour plus adds tests
