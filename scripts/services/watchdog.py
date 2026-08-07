@@ -38,15 +38,14 @@ Environment (beyond inverter_control.py's own SOLINTEG_* and notify.py's NTFY_*)
                              persists — the safety action itself is never rate-limited,
                              only the notification about it (default 1800)
 """
-import json
 import logging
 import os
-import sys
 from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from inverter_control import ARMED, Inverter, return_to_auto  # noqa: E402
-import notify  # noqa: E402
+# Sibling modules (scripts/services/) — script dir is sys.path[0].
+import common
+from inverter_control import ARMED, Inverter, return_to_auto
+import notify
 
 log = logging.getLogger("solinteg.watchdog")
 
@@ -63,28 +62,21 @@ def heartbeat_age_s(now: datetime):
     unreadable — e.g. dispatch_loop has never started even once, so there's nothing yet to
     compare against (not itself a fault worth alerting on; solinteg-healthcheck's own
     checks cover "has anything ever run")."""
+    data = common.read_json(HEARTBEAT_PATH)
+    if data is None:
+        return None
     try:
-        with open(HEARTBEAT_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-        ts = datetime.fromisoformat(data["timestamp"])
-        return (now - ts).total_seconds()
-    except (OSError, ValueError, KeyError, TypeError):
+        return (now - datetime.fromisoformat(data["timestamp"])).total_seconds()
+    except (ValueError, KeyError, TypeError):
         return None
 
 
 def load_state() -> dict:
-    try:
-        with open(STATE_PATH, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+    return common.read_json(STATE_PATH) or {}
 
 
 def save_state(state: dict) -> None:
-    tmp = STATE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-    os.replace(tmp, STATE_PATH)
+    common.write_json_atomic(STATE_PATH, state)
 
 
 def attempt_revert():

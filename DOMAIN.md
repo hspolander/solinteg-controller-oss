@@ -116,7 +116,7 @@ for another household's consumption shape or heating behavior, only your own mea
 **The static load shape also goes stale for the ORIGINAL household** (measured 2026-07-18: the
 2022-fitted July hour shape ran ~25% low overnight against the live house): once the telemetry
 poller has ≥5 days of readings, the per-hour consumption forecast switches automatically to a
-trailing 14-day measured profile (`readTrailingLoadProfile` in `lib/telemetry.ts`, loadSource
+trailing 14-day measured profile (`readTrailingLoadProfile` in `lib/telemetry/readings.ts`, loadSource
 `'live'`), with the fitted model above supplying only the cold-snap adjustment ratio and the
 fallback. So steps 2-3's fitted load values matter most for a fresh install's first weeks and
 for winter weather sensitivity — not for steady-state accuracy. See DESIGN-reserve.md §9.

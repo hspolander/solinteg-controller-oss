@@ -9,11 +9,9 @@ timer — systemd runs oneshot services with no [Install] timer exactly once per
 """
 import platform
 import socket
-import sys
 from datetime import datetime, timezone
 
-sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
-import notify  # noqa: E402
+import notify  # sibling module (scripts/services/) — script dir is sys.path[0]
 
 
 def main() -> int:

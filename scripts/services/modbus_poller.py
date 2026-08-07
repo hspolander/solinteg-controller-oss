@@ -36,7 +36,6 @@ Environment variables:
   POLL_INTERVAL        Poll interval in seconds (default 30)
 """
 
-import json
 import logging
 import os
 import sqlite3
@@ -157,10 +156,10 @@ def read_inverter(client: ModbusTcpClient) -> dict:
 
 
 def write_atomic(path: Path, data: dict) -> None:
-    """Write JSON to a temp file then rename — avoids partial reads."""
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    """Write JSON to a temp file then rename — avoids a partial read by the dispatch loop's
+    live-load tracking, which polls this file. Thin wrapper kept for the call sites; the
+    implementation is shared with the other state/heartbeat writers (common.py)."""
+    common.write_json_atomic(path, data, indent=2)
 
 
 def init_db(path: Path) -> sqlite3.Connection:

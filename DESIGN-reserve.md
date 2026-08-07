@@ -155,7 +155,7 @@ measured vs ~520 W modeled, every night that week), the floor arrived at 03:45 i
 06:00, and 2.18 kWh were bought at 170–220 öre — the exact hours the plan had judged most
 expensive. Two failures, two fixes:
 
-1. **Live trailing load profile** (`lib/telemetry.ts readTrailingLoadProfile` →
+1. **Live trailing load profile** (`lib/telemetry/readings.ts readTrailingLoadProfile` →
    `lib/load.ts slotConsumptionFromLive`, wired in `lib/pipeline.ts`/`lib/plan.ts`): the
    per-hour consumption forecast now comes from the house's own trailing 14-day readings
    (tagged `loadSource: 'live'`), scaled by the static model's HDD ratio so winter cold

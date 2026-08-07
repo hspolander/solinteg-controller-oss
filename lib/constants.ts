@@ -166,7 +166,7 @@ export const SOLAR_RISK_PREMIUM_ORE_PER_KWH = numEnv('SOLINTEG_SOLAR_RISK_PREMIU
 /**
  * Trailing window (days) for the live per-hour load profile read from telemetry readings,
  * which replaces the static Ellevio-fitted hour shape whenever enough data exists (see
- * lib/telemetry.ts readTrailingLoadProfile / lib/load.ts slotConsumptionFromLive). 0 disables
+ * lib/telemetry/readings.ts readTrailingLoadProfile / lib/load.ts slotConsumptionFromLive). 0 disables
  * the live profile entirely (static model only). Env: SOLINTEG_LIVE_LOAD_DAYS.
  */
 export const LIVE_LOAD_PROFILE_DAYS = numEnv('SOLINTEG_LIVE_LOAD_DAYS', 14);

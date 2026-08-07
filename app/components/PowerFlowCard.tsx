@@ -36,13 +36,11 @@ function arrowPolygon(from: Pt, to: Pt): string {
 }
 
 function FlowConnector({
-  id,
   from,
   to,
   color,
   active,
 }: {
-  id: string;
   from: Pt;
   to: Pt;
   color: string;
@@ -280,9 +278,9 @@ export default function PowerFlowCard({ data }: { data: InverterLiveData | null 
           className="pointer-events-none absolute inset-0 z-[1]"
           style={{ width: '100%', height: '100%' }}
         >
-          <FlowConnector id="s" from={solA} to={solB} color="var(--flow-solar)" active={solarActive} />
-          <FlowConnector id="b" from={bFrom} to={bTo} color="var(--flow-battery)" active={batteryActive} />
-          <FlowConnector id="g" from={gFrom} to={gTo} color={gridColor} active={gridActive} />
+          <FlowConnector from={solA} to={solB} color="var(--flow-solar)" active={solarActive} />
+          <FlowConnector from={bFrom} to={bTo} color="var(--flow-battery)" active={batteryActive} />
+          <FlowConnector from={gFrom} to={gTo} color={gridColor} active={gridActive} />
         </svg>
 
         <FlowNode

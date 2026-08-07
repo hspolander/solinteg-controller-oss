@@ -65,6 +65,12 @@ export default async function Home() {
   // Measured battery flows, for the chart hover's plan-vs-actual reconciliation (best-effort).
   let actualFlowsByTime: Record<string, ActualSlotFlows> = {};
   try {
+    // react-hooks/purity flags Date.now() here because this file default-exports a component.
+    // It is an async SERVER component whose whole job is to render "the dashboard as of now" —
+    // the wall clock is a genuine input, not an accidental impurity, and it is what tells
+    // buildActualFlowsByTime which slots have fully elapsed. The route is already dynamic
+    // (Partial Prerender, ~15 min revalidate), so there is no cached-render hazard to avoid.
+    // eslint-disable-next-line react-hooks/purity
     if (data) actualFlowsByTime = buildActualFlowsByTime(data.prices, data.today, readTodayFlowRows(), Date.now());
   } catch {
     // non-fatal — hover renders with planned quantities only, no "Verkligt" reconciliation

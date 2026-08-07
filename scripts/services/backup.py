@@ -6,7 +6,7 @@ Uses sqlite3's built-in online backup API (Connection.backup()) rather than shel
 `sqlite3 .backup` or copying the file directly — it's the one method that's safe to run against
 a live WAL-mode database with other processes writing to it concurrently (the poller and web app
 never stop), matching the "concurrent access" comment already on the WAL pragma in
-lib/telemetry.ts.
+lib/telemetry/.
 
 This is LOCAL-only rotation (protects against DB corruption, a bad deploy, or a botched query —
 not against disk/hardware failure). For offsite protection, periodically pull BACKUP_DIR over
@@ -25,12 +25,10 @@ import logging
 import os
 import shutil
 import sqlite3
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import notify  # noqa: E402
+import notify  # sibling module (scripts/services/) — script dir is sys.path[0]
 
 log = logging.getLogger("solinteg.backup")
 

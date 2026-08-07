@@ -54,7 +54,7 @@ export interface PlanResult {
  * caching — see the Next docs' Route Handlers page), so it doesn't need one either.
  *
  * Telemetry writes here (logPriceSnapshot, logOptimizerRun) are best-effort and a no-op unless
- * TELEMETRY_DB_PATH is set (see lib/telemetry.ts) — so a triggered replan from a NUC dev/test
+ * TELEMETRY_DB_PATH is set (see lib/telemetry/core.ts) — so a triggered replan from a NUC dev/test
  * environment without that var set computes the same plan but simply doesn't publish it,
  * exactly like a normal render would.
  */

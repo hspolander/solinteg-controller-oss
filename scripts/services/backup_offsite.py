@@ -27,10 +27,8 @@ Environment:
 import logging
 import os
 import subprocess
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import notify  # noqa: E402
+import notify  # sibling module (scripts/services/) — script dir is sys.path[0]
 
 log = logging.getLogger("solinteg.backup_offsite")
 

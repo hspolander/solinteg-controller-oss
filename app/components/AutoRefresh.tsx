@@ -21,9 +21,14 @@ import { useRouter } from 'next/navigation';
  */
 export default function AutoRefresh({ intervalMs = 5 * 60_000 }: { intervalMs?: number }) {
   const router = useRouter();
-  const lastRefresh = useRef(Date.now());
+  // Anchored at MOUNT, inside the effect, rather than `useRef(Date.now())`: reading the clock
+  // during render is impure (react-hooks/purity) — the initializer re-evaluates on every render
+  // even though only the first result is kept. The `=== 0` guard keeps it a once-only anchor if
+  // the effect ever re-runs, which is exactly what the render-time initializer gave us.
+  const lastRefresh = useRef(0);
 
   useEffect(() => {
+    if (lastRefresh.current === 0) lastRefresh.current = Date.now();
     const refreshIfDue = () => {
       if (document.visibilityState !== 'visible') return;
       if (Date.now() - lastRefresh.current < intervalMs) return;

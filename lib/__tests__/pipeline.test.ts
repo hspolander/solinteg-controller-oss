@@ -144,7 +144,7 @@ describe('buildOptimizerSlots', () => {
     expect(slots[0].loadSource).toBe('baseline');
   });
 
-  // ── Live trailing load profile (lib/telemetry.ts readTrailingLoadProfile → lib/load.ts) ──
+  // ── Live trailing load profile (lib/telemetry/readings.ts readTrailingLoadProfile → lib/load.ts) ──
 
   const liveProfile = {
     hourKwh: Array.from({ length: 24 }, (_, h) => (h === 12 ? 1.2 : 0.6)),

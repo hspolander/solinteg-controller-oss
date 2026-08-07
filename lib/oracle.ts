@@ -3,7 +3,7 @@
  *
  * For each completed day D this computes what a dispatcher with perfect information could have
  * earned, next to what the system actually earned, on one identical accounting basis. Pure
- * module — no I/O. The DB reads/writes live in lib/telemetry.ts, the per-day orchestration in
+ * module — no I/O. The DB reads/writes live in lib/telemetry/oracle.ts, the per-day orchestration in
  * app/api/oracle/route.ts, and the nightly trigger is deploy/solinteg-oracle.timer.
  *
  * ── Fairness design ─────────────────────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ const FULLY_ARMED = 0.9;
 /** A midnight SoC interpolated across a reading gap wider than this can't anchor the day. */
 const SOC_BOUNDARY_MAX_SPAN_MS = 30 * 60_000;
 
-// ── Input row shapes (as read from telemetry.db by lib/telemetry.ts) ─────────────────────────
+// ── Input row shapes (as read from telemetry.db by lib/telemetry/oracle.ts) ─────────────────────────
 
 export interface OracleReadingRow {
   timestamp: string; // UTC ISO (poller convention)

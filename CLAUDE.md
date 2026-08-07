@@ -50,7 +50,7 @@ elprisetjustnu.se SE3  Open Meteo (SOLAR_FORECAST_MODEL, Open Meteo (daily temp)
                   │
                   ▼
            app/page.tsx  (server component — fetches, assembles, passes props)
-                  │                   └─→ lib/telemetry.ts  (best-effort: logs price curve
+                  │                   └─→ lib/telemetry/  (best-effort: logs price curve
                   │                       + optimizer run to telemetry.db; no-op unless
                   ▼                       TELEMETRY_DB_PATH set — off in dev/build/tests)
      app/components/PriceChart.tsx   (rendering only)
@@ -170,7 +170,7 @@ different market or vendor):
   it replaced a uniform 1/96 split, which under-allocated winter load ~30-40% at exactly the
   morning/evening price peaks. Since 2026-07-18 the whole static shape is itself superseded at
   runtime by a **live trailing per-hour profile** from the telemetry readings
-  (`readTrailingLoadProfile` in `lib/telemetry.ts`, ≥5 days of data required, HDD-ratio scaled
+  (`readTrailingLoadProfile` in `lib/telemetry/readings.ts`, ≥5 days of data required, HDD-ratio scaled
   for weather; `loadSource: 'live'`) — fitted shapes go stale as the household changes (measured
   ~25% low overnight after 4 years on the reference install), so the fitted model is now the
   fallback and the cold-snap sensitivity term, not the steady-state forecast. The DP additionally

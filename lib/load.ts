@@ -63,7 +63,7 @@ export function slotConsumptionKwh(
 
 /**
  * Per-hour load profile measured from the house's own trailing poller readings
- * (lib/telemetry.ts readTrailingLoadProfile). Exists because the static Ellevio-fitted
+ * (lib/telemetry/readings.ts readTrailingLoadProfile). Exists because the static Ellevio-fitted
  * shape above goes stale: measured 2026-07-18, the 2022-era July shape ran ~25% low
  * overnight and ~40% high at the modeled dinner peak — the household simply doesn't run
  * the way it did pre-PV. A trailing mean of the actual house is the best estimator of

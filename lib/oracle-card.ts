@@ -1,6 +1,6 @@
 /**
  * Pure presentation logic for the Facit card: turns raw oracle_daily rows
- * (lib/telemetry.ts's OracleDaySummaryRow, one per scored Stockholm day) into the
+ * (lib/telemetry/oracle.ts's OracleDaySummaryRow, one per scored Stockholm day) into the
  * shape app/components/OracleCard.tsx renders. No React, no I/O — kept separate and
  * pure so the median/captured-value math is unit-testable (see
  * lib/__tests__/oracle-card.test.ts), matching lib/dispatch-card.ts's pattern.

@@ -13,7 +13,7 @@
  * existence. POST (rather than GET) is simply the conventional verb for "do a side-effecting
  * computation now" — nothing about GET vs POST changes what this is allowed to do.
  *
- * The socIsLive publish gate inside logOptimizerRun (see lib/telemetry.ts) still applies here
+ * The socIsLive publish gate inside logOptimizerRun (see lib/telemetry/dispatch.ts) still applies here
  * exactly as it does on a normal render: if the poller's live.json is missing/stale when this
  * fires, producePlan() still computes and returns a plan (anchored to socKwhOrDefault's
  * fallback SoC), but that plan is NOT written to optimizer_runs — the dispatch loop keeps acting

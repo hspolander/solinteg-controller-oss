@@ -4,7 +4,7 @@
  * logged `price_snapshots`. No counterfactual, no assumption about what a different system would
  * have done — just what actually crossed the meter, at the actual prices.
  *
- * Pure module — no I/O. The DB read + price-lookup wiring lives in lib/telemetry.ts.
+ * Pure module — no I/O. The DB read + price-lookup wiring lives in lib/telemetry/readings.ts.
  */
 import { SKATT_OVERFÖRING } from './constants';
 

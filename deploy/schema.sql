@@ -6,10 +6,10 @@
 --
 --   readings         → scripts/services/modbus_poller.py   (inverter, every 30 s)
 --   weather          → scripts/services/weather_poller.py  (Ecowitt cloud API, every 60 s)
---   price_snapshots  → lib/telemetry.ts            (web app, per price fetch)
---   optimizer_runs   → lib/telemetry.ts            (web app, per optimizer run)
+--   price_snapshots  → lib/telemetry/readings.ts            (web app, per price fetch)
+--   optimizer_runs   → lib/telemetry/dispatch.ts            (web app, per optimizer run)
 --   control_actions  → scripts/services/dispatch_loop.py    (dispatch decisions, on slot change / reassert)
---   oracle_daily     → lib/telemetry.ts            (web app, nightly via solinteg-oracle.timer)
+--   oracle_daily     → lib/telemetry/oracle.ts            (web app, nightly via solinteg-oracle.timer)
 --
 -- WAL + a busy timeout are set by each writer so the concurrent access is safe.
 -- This file documents the schema; it is not auto-applied (each writer creates its own tables).

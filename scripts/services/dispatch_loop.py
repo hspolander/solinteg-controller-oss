@@ -500,14 +500,15 @@ def read_live_reading(now: datetime):
     missing, unreadable, or stale (> LIVE_MAX_AGE_S). The poller rewrites it every 30 s,
     so stale means the poller is down and we have no trustworthy picture of current
     conditions."""
+    data = common.read_json(LIVE_JSON_PATH)
+    if data is None:
+        return None
     try:
-        with open(LIVE_JSON_PATH, encoding="utf-8") as f:
-            data = json.load(f)
         age_s = (now - datetime.fromisoformat(data["timestamp"])).total_seconds()
         if age_s > LIVE_MAX_AGE_S:
             return None
         return float(data["pv_w"]), float(data["house_load_w"])
-    except (OSError, ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError):
         return None
 
 
@@ -751,12 +752,11 @@ def write_heartbeat(now: datetime) -> None:
     """Touched every loop iteration regardless of outcome — see the module docstring's
     SAFETY note on why this, not control_actions freshness, is watchdog.py's liveness
     signal. Atomic write (temp file + rename) matching modbus_poller.py's live.json pattern."""
-    tmp = HEARTBEAT_PATH + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"timestamp": now.isoformat()}, f)
-        os.replace(tmp, HEARTBEAT_PATH)
+        common.write_json_atomic(HEARTBEAT_PATH, {"timestamp": now.isoformat()})
     except OSError as exc:
+        # Swallowed on purpose: failing to write the heartbeat must not kill the tick. The
+        # resulting staleness is exactly what watchdog.py is for — it will force auto itself.
         log.error("failed to write heartbeat: %s", exc)
 
 
@@ -769,6 +769,166 @@ def revert_best_effort() -> None:
             inv.close()
     except Exception as exc:  # noqa: BLE001
         log.error("revert_best_effort failed: %s", exc)
+
+
+# ── The apply half ───────────────────────────────────────────────────────────────────────────
+#
+# decide() has always been a separate, testable function; everything BELOW the decision — fold
+# in the solar guard, decide whether this tick warrants a register write at all, run the
+# SoC-staleness guard, apply, log, and recover from a failed apply — used to live inline in
+# main()'s loop body: ~165 lines at five levels of nesting, and (per this module's test file)
+# the one part of the executor with no unit coverage at all. Split out 2026-08-07 with the
+# logic bit-identical; scripts/tests/test_dispatch_loop.py now covers each piece.
+
+
+def effective_target(action: str, power_w: int, solar_skip: bool):
+    """Fold the solar-funding guard into the target actually applied.
+
+    Returns (action, power_w, solar_skipped). decide() re-runs check_solar_funding against a
+    fresh live.json on EVERY call, so folding the result into the target here — rather than
+    treating it as a side note — is what makes a mid-slot cloud pass (or a mid-slot solar
+    recovery) register as a real target CHANGE and get applied immediately, instead of sitting
+    on the previously-applied setpoint until the slot boundary or the next REASSERT_S. During a
+    forced charge that gap would be up to 5 minutes of uncapped grid import at full price.
+    """
+    solar_skipped = action == "charge" and solar_skip
+    return ("idle" if solar_skipped else action, 0 if solar_skipped else power_w, solar_skipped)
+
+
+def needs_apply(target, last_target, effective_action: str, effective_power: int,
+                due_for_reassert: bool) -> bool:
+    """Does this tick warrant actually writing a register?
+
+    Three rules, in tension:
+      - A genuine target change always applies — including the very first decision after a
+        restart, since last_target starts as None. That is what self-heals a setpoint a crashed
+        prior instance left forced.
+      - An unchanged target is re-asserted on REASSERT_S, but ONLY when it is non-idle. General
+        mode doesn't decay on its own, so re-poking it on a timer would blindly overwrite a mode
+        the owner set by hand in the inverter's own app.
+      - A same-slot, same-action retarget smaller than LIVE_LOAD_DEADBAND_W waits for the next
+        reassert. Live-load tracking moves the bucketed power on almost every iteration (first
+        night on the reference install: a write every ~81 s) and chasing ±100-200 W of ordinary
+        load noise buys nothing. A real event (a heat pump starting: thousands of W) clears the
+        deadband immediately, so reaction latency to the events that tracking exists for is
+        unaffected. The caller keeps the APPLIED power in last_target while suppressing, so slow
+        creep accumulates against it and still applies once it sums past the band.
+    """
+    small_power_move = (
+        last_target is not None
+        and target[:2] == last_target[:2]
+        and effective_action != "idle"
+        and abs(effective_power - last_target[2]) < LIVE_LOAD_DEADBAND_W
+    )
+    return (target != last_target and not small_power_move) or (
+        due_for_reassert and effective_action != "idle"
+    )
+
+
+def check_soc_divergence(inv: Inverter, expected_soc_kwh: float, slot_time, action: str,
+                          numbers: dict):
+    """Compare live SoC against the plan's expectation for THIS MOMENT; returns (skip, detail).
+
+    Records the drift figures in `numbers` in place on EVERY charge/discharge decision, not just
+    ones that trip SOC_DIVERGENCE_KWH — that everyday distribution is what eventually lets the
+    threshold be tuned from real control_actions data rather than a guess. decide()'s docstring
+    names main() as the writer of these two keys; this is that writer.
+
+    Two thresholds fire here, deliberately different: REPLAN_DRIFT_KWH (tighter) just ASKS for a
+    fresh plan, so that by the time drift would reach SOC_DIVERGENCE_KWH a live-anchored plan
+    usually already exists; SOC_DIVERGENCE_KWH (wider) is the one that actually refuses to force
+    a power target computed from a stale baseline.
+    """
+    actual_soc_kwh = inv.soc_pct() / 100 * BATTERY_KWH
+    drift = abs(actual_soc_kwh - expected_soc_kwh)
+    detail = (f"expected {expected_soc_kwh:.2f} kWh, actual "
+              f"{actual_soc_kwh:.2f} kWh, drift {drift:.2f} kWh")
+    numbers["soc_drift_kwh"] = round(drift, 3)
+    numbers["soc_drift_limit_kwh"] = SOC_DIVERGENCE_KWH
+    if abs(drift) > REPLAN_DRIFT_KWH:
+        maybe_request_replan("drift")
+    if drift > SOC_DIVERGENCE_KWH:
+        log.warning(
+            "slot=%s action=%s planned from %.2f kWh but actual is %.2f kWh "
+            "(drift %.2f kWh > %.2f kWh) — plan is stale, falling back to "
+            "auto instead of forcing a power target computed from the wrong "
+            "starting point", slot_time, action, expected_soc_kwh,
+            actual_soc_kwh, drift, SOC_DIVERGENCE_KWH,
+        )
+        return True, detail
+    return False, detail
+
+
+def apply_decision(con: sqlite3.Connection, slot_time, action: str, power_w: int,
+                    expected_soc_kwh, solar_skipped_now: bool, detail: str, numbers: dict,
+                    loop_in_auto: bool):
+    """Run the guards, write the register, log the control_actions row. Returns
+    (outcome, loop_in_auto).
+
+    Never raises: an apply failure reverts to auto as its own fail-safe and is reported through
+    `outcome`, because the caller's own error path is for a failed DECISION, not a failed apply.
+    Ordering inside the failure path matters and is load-bearing — revert FIRST, log second, so
+    a telemetry.db write error (shared WAL, contention is realistic) can never skip the revert.
+    """
+    inv = None  # opened lazily — an idle→idle slot boundary needs no connection
+    applied_action, applied_power = action, power_w
+    outcome = "applied"
+    try:
+        if solar_skipped_now:
+            # Live solar can't fund this charge the way the plan assumed — forcing it would buy
+            # the difference from the grid at full price. Auto still charges from whatever
+            # surplus actually exists, so skipping wastes no real solar.
+            log.warning("slot=%s planned charge can't be solar-funded as "
+                        "planned (%s) — falling back to auto instead of "
+                        "buying the difference", slot_time, detail)
+            applied_action, applied_power = "idle", 0
+            outcome = "skipped_solar_shortfall"
+            maybe_request_replan("solar_shortfall")
+        elif action != "idle" and expected_soc_kwh is not None:
+            inv = Inverter()
+            # Appended to the funding detail (charge slots) rather than replacing it, so one
+            # row carries both guards.
+            skip, soc_detail = check_soc_divergence(inv, expected_soc_kwh, slot_time, action, numbers)
+            detail = f"{detail}; {soc_detail}" if detail else soc_detail
+            if skip:
+                applied_action, applied_power = "idle", 0
+                outcome = "skipped_divergence"
+                maybe_request_replan("divergence_skip")
+        # Never stomp an owner-set mode: when the loop's own last write already left the
+        # inverter in auto, an idle decision (planned, or a guard demotion above) needs no
+        # register write. The row below is STILL logged — it carries the skip outcomes, and
+        # armed-coverage measurement reads row cadence as "loop alive" (silence >
+        # ARMED_SEGMENT_CAP_MS counts as down — lib/oracle.ts).
+        if not (applied_action == "idle" and loop_in_auto):
+            if inv is None:
+                inv = Inverter()
+            apply_target(inv, applied_action, applied_power)
+        loop_in_auto = applied_action == "idle"
+        log_action(con, slot_time, applied_action, applied_power, outcome, detail, detail_json=numbers)
+        log.info("slot=%s action=%s power=%dW armed=%s -> %s%s",
+                  slot_time, applied_action, applied_power, ARMED, outcome,
+                  f" ({detail})" if detail else "")
+    except Exception as exc:  # noqa: BLE001
+        log.error("apply failed for slot=%s action=%s power=%dW: %s — "
+                  "falling back to auto", slot_time, applied_action, applied_power, exc)
+        try:
+            if inv is None:
+                inv = Inverter()
+            return_to_auto(inv)
+            outcome, detail = "error_reverted", str(exc)
+            loop_in_auto = True
+        except Exception as exc2:  # noqa: BLE001
+            log.error("fail-safe return_to_auto also failed: %s", exc2)
+            outcome, detail = "error_revert_failed", f"{exc} | revert also failed: {exc2}"
+            loop_in_auto = False  # inverter state unconfirmed — next idle must write
+        try:
+            log_action(con, slot_time, applied_action, applied_power, outcome, detail, detail_json=numbers)
+        except Exception as exc3:  # noqa: BLE001
+            log.error("log_action failed after apply error: %s", exc3)
+    finally:
+        if inv is not None:
+            inv.close()
+    return outcome, loop_in_auto
 
 
 def main() -> None:
@@ -818,125 +978,14 @@ def main() -> None:
             if decide_failure_reverted:
                 decide_failure_reverted = False
                 last_target = None
-            # Fold the solar-funding guard into the target itself (decide() re-checks
-            # check_solar_funding against fresh live.json every call, i.e. every
-            # LOOP_INTERVAL_S) so a mid-slot cloud pass — or solar recovering mid-slot —
-            # is treated as a real target change and applied immediately, instead of
-            # silently sitting on the previously-applied setpoint until the slot
-            # boundary or the next REASSERT_S (up to 5 min of buying uncapped grid
-            # power at full price during a forced charge the plan no longer funds).
-            solar_skipped_now = action == "charge" and solar_skip
-            effective_action = "idle" if solar_skipped_now else action
-            effective_power = 0 if solar_skipped_now else power_w
+            effective_action, effective_power, solar_skipped_now = effective_target(
+                action, power_w, solar_skip)
             target = (slot_time, effective_action, effective_power)
             due_for_reassert = (time.monotonic() - last_write_monotonic) >= REASSERT_S
-            # Idle reassertion is only insurance against a forced (charge/discharge)
-            # setpoint drifting — General mode doesn't decay on its own, so re-poking it
-            # on a timer would just blindly overwrite a mode the owner set by hand via the
-            # inverter's own app. Still always apply on an actual target change (including
-            # the very first decision after a restart, since last_target starts as None —
-            # that's what self-heals a setpoint a crashed prior instance left forced).
-            # Same-slot same-action retargets smaller than LIVE_LOAD_DEADBAND_W wait for
-            # the next reassert instead of writing every tick — live-load tracking moves
-            # the bucketed power on almost every iteration (first night: a write every
-            # ~81 s), and chasing ±100-200 W of ordinary load noise buys nothing. A real
-            # event (heat pump: thousands of W) clears the deadband immediately, and
-            # last_target deliberately keeps the APPLIED power while suppressed, so slow
-            # creep accumulates against it and still applies once it sums past the band.
-            small_power_move = (
-                last_target is not None
-                and target[:2] == last_target[:2]
-                and effective_action != "idle"
-                and abs(effective_power - last_target[2]) < LIVE_LOAD_DEADBAND_W
-            )
-            needs_apply = (target != last_target and not small_power_move) or (
-                due_for_reassert and effective_action != "idle"
-            )
-
-            if needs_apply:
-                inv = None  # opened lazily — an idle→idle slot boundary needs no connection
-                applied_action, applied_power = action, power_w
-                outcome = "applied"
-                try:
-                    if solar_skipped_now:
-                        # Live solar can't fund this charge the way the plan assumed —
-                        # forcing it would buy the difference from the grid at full price.
-                        # Auto still charges from whatever surplus actually exists.
-                        log.warning("slot=%s planned charge can't be solar-funded as "
-                                    "planned (%s) — falling back to auto instead of "
-                                    "buying the difference", slot_time, detail)
-                        applied_action, applied_power = "idle", 0
-                        outcome = "skipped_solar_shortfall"
-                        maybe_request_replan("solar_shortfall")
-                    elif action != "idle" and expected_soc_kwh is not None:
-                        inv = Inverter()
-                        actual_soc_kwh = inv.soc_pct() / 100 * BATTERY_KWH
-                        drift = abs(actual_soc_kwh - expected_soc_kwh)
-                        # Recorded on EVERY charge/discharge decision, not just ones that trip
-                        # SOC_DIVERGENCE_KWH — this is what lets that threshold eventually be
-                        # tuned from real data (the everyday drift distribution) rather than a
-                        # guess. Appended to the funding detail (charge slots) rather than
-                        # replacing it, so one row carries both guards.
-                        soc_detail = (f"expected {expected_soc_kwh:.2f} kWh, actual "
-                                      f"{actual_soc_kwh:.2f} kWh, drift {drift:.2f} kWh")
-                        detail = f"{detail}; {soc_detail}" if detail else soc_detail
-                        numbers["soc_drift_kwh"] = round(drift, 3)
-                        numbers["soc_drift_limit_kwh"] = SOC_DIVERGENCE_KWH
-                        if abs(drift) > REPLAN_DRIFT_KWH:
-                            # Preemptive — a tighter, earlier threshold than SOC_DIVERGENCE_KWH
-                            # below (see the module docstring's REPLAN TRIGGERS section): by the
-                            # time drift would cross THAT guard's wider threshold, a fresh
-                            # live-anchored plan is usually already in place from this nudge.
-                            maybe_request_replan("drift")
-                        if drift > SOC_DIVERGENCE_KWH:
-                            log.warning(
-                                "slot=%s action=%s planned from %.2f kWh but actual is %.2f kWh "
-                                "(drift %.2f kWh > %.2f kWh) — plan is stale, falling back to "
-                                "auto instead of forcing a power target computed from the wrong "
-                                "starting point", slot_time, action, expected_soc_kwh,
-                                actual_soc_kwh, drift, SOC_DIVERGENCE_KWH,
-                            )
-                            applied_action, applied_power = "idle", 0
-                            outcome = "skipped_divergence"
-                            maybe_request_replan("divergence_skip")
-                    # Never stomp an owner-set mode: when the loop's own last write already
-                    # left the inverter in auto, an idle decision (planned, or a guard demotion
-                    # above) needs no register write — re-poking General mode at every idle
-                    # slot boundary would blindly overwrite a mode set by hand via the
-                    # inverter's app. The row below is STILL logged: it carries the skip
-                    # outcomes, and armed-coverage measurement reads row cadence as "loop
-                    # alive" (silence > ARMED_SEGMENT_CAP_MS counts as down — lib/oracle.ts).
-                    if not (applied_action == "idle" and loop_in_auto):
-                        if inv is None:
-                            inv = Inverter()
-                        apply_target(inv, applied_action, applied_power)
-                    loop_in_auto = applied_action == "idle"
-                    log_action(con, slot_time, applied_action, applied_power, outcome, detail, detail_json=numbers)
-                    log.info("slot=%s action=%s power=%dW armed=%s -> %s%s",
-                              slot_time, applied_action, applied_power, ARMED, outcome,
-                              f" ({detail})" if detail else "")
-                except Exception as exc:  # noqa: BLE001
-                    log.error("apply failed for slot=%s action=%s power=%dW: %s — "
-                              "falling back to auto", slot_time, applied_action, applied_power, exc)
-                    # Revert first, log second — a DB error in log_action must never skip
-                    # the fail-safe (telemetry.db is shared WAL, contention is realistic).
-                    try:
-                        if inv is None:
-                            inv = Inverter()
-                        return_to_auto(inv)
-                        outcome, detail = "error_reverted", str(exc)
-                        loop_in_auto = True
-                    except Exception as exc2:  # noqa: BLE001
-                        log.error("fail-safe return_to_auto also failed: %s", exc2)
-                        outcome, detail = "error_revert_failed", f"{exc} | revert also failed: {exc2}"
-                        loop_in_auto = False  # inverter state unconfirmed — next idle must write
-                    try:
-                        log_action(con, slot_time, applied_action, applied_power, outcome, detail, detail_json=numbers)
-                    except Exception as exc3:  # noqa: BLE001
-                        log.error("log_action failed after apply error: %s", exc3)
-                finally:
-                    if inv is not None:
-                        inv.close()
+            if needs_apply(target, last_target, effective_action, effective_power, due_for_reassert):
+                outcome, loop_in_auto = apply_decision(
+                    con, slot_time, action, power_w, expected_soc_kwh, solar_skipped_now,
+                    detail, numbers, loop_in_auto)
                 if outcome == "error_revert_failed":
                     # Both the apply AND the fail-safe revert failed — the inverter
                     # may still be running the PREVIOUS slot's forced setpoint.

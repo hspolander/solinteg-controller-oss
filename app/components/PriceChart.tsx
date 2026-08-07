@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PriceData } from '@/lib/prices';
 import type { DispatchSlot } from '@/lib/optimizer';
 import {
@@ -16,7 +16,7 @@ import {
   sumActualForBand,
   timeToX,
 } from '@/lib/chart-utils';
-import type { BandKind, ChartGeometry, ChartPoint } from '@/lib/chart-utils';
+import type { BandKind, ChartGeometry } from '@/lib/chart-utils';
 import type { ActualSlotFlows } from '@/lib/actual-flows';
 import { useChartData } from './useChartData';
 
@@ -49,6 +49,17 @@ const BAND_LABEL: Record<BandKind, string> = { buy: 'Ladda', sell: 'Sälj', hold
 // Hold zones ("the plan is deliberately NOT using the battery") are context, not action —
 // drawn fainter and without the leading edge bar so buy/sell decisions stay dominant.
 const BAND_FILL_PCT: Record<BandKind, number> = { buy: 11, sell: 11, hold: 6 };
+
+// The hover tooltip renders an identical four-row block for a buy and for a sell — planned
+// this slot, planned this zone, actual this slot, actual this zone — differing only in which
+// ChartPoint flow field carries the quantity, which CSS colour marks it, and the Swedish noun.
+// Kept as data rather than two parallel JSX branches so the two can't drift (they had already
+// diverged once in wording). 'hold' has no quantity of its own: it is the absence of a battery
+// flow, so it is deliberately absent here.
+const DECISION_ROWS = {
+  buy: { color: 'var(--color-charge-band)', noun: 'Laddning', field: 'gridToBatteryKwh' },
+  sell: { color: 'var(--color-sell-band)', noun: 'Försäljning', field: 'batteryToGridKwh' },
+} as const satisfies Record<'buy' | 'sell', { color: string; noun: string; field: 'gridToBatteryKwh' | 'batteryToGridKwh' }>;
 
 type Point = [number, number];
 
@@ -167,19 +178,22 @@ export default function PriceChart({
   const count = chartData.length;
   const stepX = count > 1 ? geo.plotW / (count - 1) : 0;
 
-  const xAt = (i: number) => indexToX(i, count, geo);
+  // Memoised so the five useMemos below can list it as a dependency honestly. An inline arrow
+  // is a new identity every render, so react-hooks/exhaustive-deps could not be satisfied
+  // without either defeating every memo or silencing the rule.
+  const xAt = useCallback((i: number) => indexToX(i, count, geo), [count, geo]);
 
   const buyPath = useMemo(
     () => buildLinePath(chartData.map((d, i): Point => [xAt(i), priceYScale(d.buy, priceMax, geo, priceMin)])),
-    [chartData, priceMax, priceMin, geo],
+    [chartData, priceMax, priceMin, geo, xAt],
   );
   const sellPath = useMemo(
     () => buildLinePath(chartData.map((d, i): Point => [xAt(i), priceYScale(d.sell, priceMax, geo, priceMin)])),
-    [chartData, priceMax, priceMin, geo],
+    [chartData, priceMax, priceMin, geo, xAt],
   );
   const solarTopPoints = useMemo(
     () => chartData.map((d, i): Point => [xAt(i), solarYScale(d.solarKwh, solarMax, geo)]),
-    [chartData, solarMax, geo],
+    [chartData, solarMax, geo, xAt],
   );
   const solarAreaPath = useMemo(() => buildAreaPath(solarTopPoints, geo.baseY), [solarTopPoints, geo]);
   const solarLinePath = useMemo(() => buildLinePath(solarTopPoints), [solarTopPoints]);
@@ -189,7 +203,7 @@ export default function PriceChart({
       contiguousRuns(
         chartData.map((d, i): Point | null => (d.socPct == null ? null : [xAt(i), socYScale(d.socPct, geo)])),
       ),
-    [chartData, geo],
+    [chartData, geo, xAt],
   );
   const socActualRuns = useMemo(
     () =>
@@ -198,7 +212,7 @@ export default function PriceChart({
           d.actualSocPct == null ? null : [xAt(i), socYScale(d.actualSocPct, geo)],
         ),
       ),
-    [chartData, geo],
+    [chartData, geo, xAt],
   );
 
   const peakSolarIdx = useMemo(() => {
@@ -249,6 +263,19 @@ export default function PriceChart({
   // the tooltip's "Verkligt (hela zonen)" row) — bands are few, a linear scan is fine.
   const hoverBandActual =
     hoverBand && hoverBand.kind !== 'hold' ? sumActualForBand(hoverBand, chartData, timeIndex) : null;
+
+  // Resolves the hovered slot's decision to the one quantity block the tooltip should show
+  // (see DECISION_ROWS). Null for a hold, for a slot with no deliberate decision, and for the
+  // case the old two-branch version guarded explicitly: a buy/sell zone whose own flow field
+  // is missing, which would otherwise render "undefined kWh".
+  const decisionRows = (() => {
+    if (!hoverPoint) return null;
+    const kind = hoverPoint.decision;
+    if (kind !== 'buy' && kind !== 'sell') return null;
+    const spec = DECISION_ROWS[kind];
+    const plannedSlotKwh = hoverPoint[spec.field];
+    return plannedSlotKwh == null ? null : { ...spec, plannedSlotKwh };
+  })();
 
   return (
     <div
@@ -589,7 +616,7 @@ export default function PriceChart({
             if (xn == null) return null;
             const buyNowV = Math.round(nowPoint.buy);
             const sellNowV = Math.round(nowPoint.sell);
-            let byY = priceYScale(nowPoint.buy, priceMax, geo, priceMin);
+            const byY = priceYScale(nowPoint.buy, priceMax, geo, priceMin);
             let syY = priceYScale(nowPoint.sell, priceMax, geo, priceMin);
             if (Math.abs(byY - syY) < 20) syY = byY + 20;
             return (
@@ -668,63 +695,31 @@ export default function PriceChart({
           {/* planned dispatch quantities — only for deliberate buy/sell decisions, matching the
               zones; the amount shown is the flow the zone is classified from (grid→battery for
               a buy, battery→grid for a sell), plus the whole zone's total for context */}
-          {hoverPoint.decision === 'buy' && hoverPoint.gridToBatteryKwh != null && (
+          {decisionRows && (
             <>
               <TooltipRow
-                color="var(--color-charge-band)"
-                label="Laddning (denna kvart)"
-                value={`${hoverPoint.gridToBatteryKwh.toFixed(1)} kWh`}
+                color={decisionRows.color}
+                label={`${decisionRows.noun} (denna kvart)`}
+                value={`${decisionRows.plannedSlotKwh.toFixed(1)} kWh`}
               />
               {hoverBand && (
                 <TooltipRow
-                  color="var(--color-charge-band)"
-                  label="Laddning (hela zonen)"
+                  color={decisionRows.color}
+                  label={`${decisionRows.noun} (hela zonen)`}
                   value={`${hoverBand.kwh.toFixed(1)} kWh`}
                 />
               )}
               {hoverPoint.actual && (
                 <TooltipRow
-                  color="var(--color-charge-band)"
+                  color={decisionRows.color}
                   label="Verkligt (denna kvart)"
-                  value={`${hoverPoint.actual.gridToBatteryKwh.toFixed(1)} kWh`}
+                  value={`${hoverPoint.actual[decisionRows.field].toFixed(1)} kWh`}
                   bold
                 />
               )}
               {hoverBandActual && (
                 <TooltipRow
-                  color="var(--color-charge-band)"
-                  label="Verkligt (hela zonen)"
-                  value={`${hoverBandActual.complete ? '' : '≥ '}${hoverBandActual.kwh.toFixed(1)} kWh`}
-                  bold
-                />
-              )}
-            </>
-          )}
-          {hoverPoint.decision === 'sell' && hoverPoint.batteryToGridKwh != null && (
-            <>
-              <TooltipRow
-                color="var(--color-sell-band)"
-                label="Försäljning (denna kvart)"
-                value={`${hoverPoint.batteryToGridKwh.toFixed(1)} kWh`}
-              />
-              {hoverBand && (
-                <TooltipRow
-                  color="var(--color-sell-band)"
-                  label="Försäljning (hela zonen)"
-                  value={`${hoverBand.kwh.toFixed(1)} kWh`}
-                />
-              )}
-              {hoverPoint.actual && (
-                <TooltipRow
-                  color="var(--color-sell-band)"
-                  label="Verkligt (denna kvart)"
-                  value={`${hoverPoint.actual.batteryToGridKwh.toFixed(1)} kWh`}
-                  bold
-                />
-              )}
-              {hoverBandActual && (
-                <TooltipRow
-                  color="var(--color-sell-band)"
+                  color={decisionRows.color}
                   label="Verkligt (hela zonen)"
                   value={`${hoverBandActual.complete ? '' : '≥ '}${hoverBandActual.kwh.toFixed(1)} kWh`}
                   bold

@@ -27,7 +27,7 @@
 // THREDDS_FETCH_TIMEOUT_MS comment) — hammering it in parallel would be both slow to fail and
 // impolite to MET Norway's server. ~100 requests for a 25-day window; budget 20-40 minutes.
 //
-// Usage: node scripts/tools/compare-thredds-fallback.mjs [--csv solar-data/own_station_july.csv]
+// Usage: node scripts/tools/compare-thredds-fallback.mjs [--csv solar-data/own_station_feb_jul.csv]
 //            [--lat 57.64] [--lon 11.78]
 //
 // FINDINGS (2026-07-25, 2026-07-01..07-25, 412-433 shared daylight hours; recorded here
@@ -59,7 +59,7 @@ const argVal = (flag, fallback) => {
   const i = args.indexOf(flag);
   return i >= 0 ? args[i + 1] : fallback;
 };
-const CSV = argVal('--csv', 'solar-data/own_station_july.csv');
+const CSV = argVal('--csv', 'solar-data/own_station_feb_jul.csv');
 const LAT = parseFloat(argVal('--lat', process.env.SITE_LATITUDE ?? '57.64'));
 const LON = parseFloat(argVal('--lon', process.env.SITE_LONGITUDE ?? '11.78'));
 const DAYLIGHT_WM2 = 5;

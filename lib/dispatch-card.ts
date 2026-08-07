@@ -1,6 +1,6 @@
 /**
  * Pure presentation logic for the Dispatch card: turns raw control_actions rows
- * (lib/telemetry.ts's LatestControlAction, one row per logged dispatch-loop decision)
+ * (lib/telemetry/dispatch.ts's LatestControlAction, one row per logged dispatch-loop decision)
  * into the shape app/components/DispatchCard.tsx renders. No React, no I/O — kept
  * separate and pure so the reasoning-sentence/gauge/tone logic is unit-testable
  * (see lib/__tests__/dispatch-card.test.ts), matching lib/chart-utils.ts's pattern.

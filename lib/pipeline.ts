@@ -29,7 +29,7 @@ export function buildSolarProfiles(
  * Pure function — no I/O, no Next.js dependencies, fully testable.
  *
  * `liveLoad` (optional) is the trailing measured per-hour load profile
- * (lib/telemetry.ts readTrailingLoadProfile) — when present it replaces the static
+ * (lib/telemetry/readings.ts readTrailingLoadProfile) — when present it replaces the static
  * Ellevio-fitted hour shape as the consumption forecast (see lib/load.ts for why),
  * tagged loadSource 'live'. Passing null/undefined keeps the previous behavior exactly.
  */

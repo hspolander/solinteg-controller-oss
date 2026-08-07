@@ -93,7 +93,7 @@ sleep 2
 echo "\$SOLPW" | sudo -S systemctl is-active solinteg-web
 
 # dispatch_loop.py is a long-running Python process, not hot-reloaded by the rsync above —
-# needs its own restart whenever scripts/dispatch_loop.py (or anything it imports) changes.
+# needs its own restart whenever scripts/services/dispatch_loop.py (or an import) changes.
 echo "\$SOLPW" | sudo -S systemctl restart solinteg-dispatch
 sleep 2
 echo "\$SOLPW" | sudo -S systemctl is-active solinteg-dispatch
