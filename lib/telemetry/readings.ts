@@ -5,7 +5,7 @@
  * Joining optimizer_runs (forecast, see ./dispatch.ts) against `readings` (actual) by
  * timestamp is the forecast-vs-actual feedback loop described in DESIGN-reserve.md.
  */
-import { getDb } from './core';
+import { getDb, readOrFallback } from './core';
 import { stockholmParts, stockholmToUtc } from '../prices';
 import type { PriceData } from '../prices';
 import type { TrailingLoadProfile } from '../load';
@@ -62,9 +62,8 @@ export function logPriceSnapshot(data: PriceData): void {
  * `readings` table doesn't exist yet (the poller creates it on its first successful poll).
  */
 export function readReadings(sinceIso?: string, beforeIso?: string): EconReading[] {
-  const handle = getDb();
-  if (!handle) return [];
-  try {
+  // Falls back to [] when the table is absent (poller never ran) or unreadable.
+  return readOrFallback([] as EconReading[], (handle) => {
     const where: string[] = [];
     const params: string[] = [];
     if (sinceIso) {
@@ -80,9 +79,7 @@ export function readReadings(sinceIso?: string, beforeIso?: string): EconReading
       (where.length ? ` WHERE ${where.join(' AND ')}` : '') +
       ' ORDER BY timestamp';
     return handle.prepare(sql).all(...params) as unknown as EconReading[];
-  } catch {
-    return []; // table absent (poller never ran) or unreadable
-  }
+  });
 }
 
 // buildPriceLookup parses every logged snapshot's JSON (one row per day, ~20 kB each), which
@@ -95,9 +92,7 @@ let priceLookupKey: string | null = null;
 
 /** A price lookup over all logged snapshots: UTC instant → that 15-min slot's buy/sell price. */
 export function buildPriceLookup(): PriceLookup {
-  const handle = getDb();
-  if (!handle) return () => null;
-  try {
+  return readOrFallback<PriceLookup>(() => null, (handle) => {
     const newest = handle
       .prepare('SELECT date, has_tomorrow FROM price_snapshots ORDER BY date DESC LIMIT 1')
       .get() as { date: string; has_tomorrow: number } | undefined;
@@ -111,9 +106,7 @@ export function buildPriceLookup(): PriceLookup {
     priceLookupCache = (timestampUtc: string) => map.get(stockholmSlotKey(timestampUtc)) ?? null;
     priceLookupKey = key;
     return priceLookupCache;
-  } catch {
-    return () => null;
-  }
+  });
 }
 
 // Per-day economics for fully elapsed Stockholm days, cached per process. Readings are
@@ -136,9 +129,7 @@ let frozenForDate: string | null = null;
  * of one reading per day — noise).
  */
 export function readDailyEconomics(now: Date = new Date()): Map<string, EconTotals> {
-  const handle = getDb();
-  if (!handle) return new Map();
-  try {
+  return readOrFallback(new Map<string, EconTotals>(), () => {
     const today = stockholmDateOf(now.toISOString());
     if (frozenDaily === null || frozenForDate !== today) {
       const p = stockholmParts(now);
@@ -149,9 +140,7 @@ export function readDailyEconomics(now: Date = new Date()): Map<string, EconTota
     }
     const live = computeDailyEconomics(readReadings(frozenBoundaryIso!), buildPriceLookup());
     return mergeDailyEconomics(frozenDaily, live);
-  } catch {
-    return new Map();
-  }
+  });
 }
 
 /**
@@ -161,17 +150,14 @@ export function readDailyEconomics(now: Date = new Date()): Map<string, EconTota
  * grows without limit as the deployment ages.
  */
 export function readTodaySocHistory(now: Date = new Date()): { timestamp: string; soc_pct: number }[] {
-  const handle = getDb();
-  if (!handle) return [];
-  try {
+  // Falls back to [] when the table is absent (poller never ran) or unreadable.
+  return readOrFallback([] as { timestamp: string; soc_pct: number }[], (handle) => {
     const p = stockholmParts(now);
     const boundary = stockholmToUtc(p.year, p.month0, p.day, p.utcOffset, 0, 0).toISOString();
     return handle
       .prepare('SELECT timestamp, soc_pct FROM readings WHERE timestamp >= ? ORDER BY timestamp')
       .all(boundary) as unknown as { timestamp: string; soc_pct: number }[];
-  } catch {
-    return []; // table absent (poller never ran) or unreadable
-  }
+  });
 }
 
 /**
@@ -180,9 +166,8 @@ export function readTodaySocHistory(now: Date = new Date()): { timestamp: string
  * day-boundary pattern as readTodaySocHistory above.
  */
 export function readTodayFlowRows(now: Date = new Date()): FlowReading[] {
-  const handle = getDb();
-  if (!handle) return [];
-  try {
+  // Falls back to [] when the table is absent (poller never ran) or unreadable.
+  return readOrFallback([] as FlowReading[], (handle) => {
     const p = stockholmParts(now);
     const boundary = stockholmToUtc(p.year, p.month0, p.day, p.utcOffset, 0, 0).toISOString();
     return handle
@@ -190,9 +175,7 @@ export function readTodayFlowRows(now: Date = new Date()): FlowReading[] {
         'SELECT timestamp, pv_w, house_load_w, battery_w FROM readings WHERE timestamp >= ? ORDER BY timestamp',
       )
       .all(boundary) as unknown as FlowReading[];
-  } catch {
-    return []; // table absent (poller never ran) or unreadable
-  }
+  });
 }
 
 // The trailing load profile scans `days` worth of readings (~120k rows at the 10 s cadence),
@@ -216,9 +199,9 @@ let loadProfileKey: string | null = null;
  * profile itself.
  */
 export function readTrailingLoadProfile(days = 14, minDays = 5): TrailingLoadProfile | null {
-  const handle = getDb();
-  if (!handle || days <= 0) return null;
-  try {
+  if (days <= 0) return null;
+  // Falls back to null when the readings table is absent (poller never ran) or unreadable.
+  return readOrFallback<TrailingLoadProfile | null>(null, (handle) => {
     const now = new Date();
     const key = `${stockholmDateOf(now.toISOString())}:${days}`;
     if (loadProfileCache && key === loadProfileKey) return loadProfileCache;
@@ -261,9 +244,7 @@ export function readTrailingLoadProfile(days = 14, minDays = 5): TrailingLoadPro
     loadProfileCache = { hourKwh, trailingMeanTempC, days: localDays.size };
     loadProfileKey = key;
     return loadProfileCache;
-  } catch {
-    return null; // readings table absent (poller never ran) or unreadable
-  }
+  });
 }
 
 export interface LatestWeather {
@@ -284,16 +265,13 @@ export interface LatestWeather {
  * it is empty.
  */
 export function readLatestWeather(): LatestWeather | null {
-  const handle = getDb();
-  if (!handle) return null;
-  try {
+  // Falls back to null when the table is absent (weather poller never ran) or unreadable.
+  return readOrFallback<LatestWeather | null>(null, (handle) => {
     const row = handle
       .prepare(
         'SELECT timestamp, temp_c, solar_wm2, humidity_pct, wind_ms, rain_day_mm FROM weather ORDER BY timestamp DESC LIMIT 1',
       )
       .get() as LatestWeather | undefined;
     return row ?? null;
-  } catch {
-    return null; // table absent (weather poller never ran) or unreadable
-  }
+  });
 }

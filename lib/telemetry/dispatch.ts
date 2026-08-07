@@ -2,7 +2,7 @@
  * Dispatch-loop-facing telemetry: `control_actions` (read, written by
  * scripts/services/dispatch_loop.py) and `optimizer_runs` (written here, read by the loop).
  */
-import { getDb } from './core';
+import { getDb, readOrFallback } from './core';
 import type { OptimizerSlot, DispatchSlot } from '../optimizer';
 
 /**
@@ -91,9 +91,7 @@ function rowToControlAction(row: ControlActionRow): LatestControlAction {
  * sign of trouble.
  */
 export function readRecentControlActions(limit = 12): LatestControlAction[] {
-  const handle = getDb();
-  if (!handle) return [];
-  try {
+  return readOrFallback([], (handle) => {
     const rows = handle
       .prepare(
         `SELECT timestamp, slot_time, planned_action, power_w, armed, outcome, detail, detail_json
@@ -101,9 +99,7 @@ export function readRecentControlActions(limit = 12): LatestControlAction[] {
       )
       .all(limit) as ControlActionRow[];
     return rows.map(rowToControlAction).reverse();
-  } catch {
-    return [];
-  }
+  });
 }
 
 /**
@@ -122,9 +118,7 @@ export function readRecentControlActions(limit = 12): LatestControlAction[] {
  * than two runs logged for this date).
  */
 export function readPastDispatchSlots(priceDate: string): DispatchSlot[] {
-  const handle = getDb();
-  if (!handle) return [];
-  try {
+  return readOrFallback([] as DispatchSlot[], (handle) => {
     const rows = handle
       .prepare('SELECT dispatch_json FROM optimizer_runs WHERE price_date = ? ORDER BY id ASC')
       .all(priceDate) as { dispatch_json: string }[];
@@ -140,9 +134,7 @@ export function readPastDispatchSlots(priceDate: string): DispatchSlot[] {
       }
     }
     return past;
-  } catch {
-    return [];
-  }
+  });
 }
 
 /**
@@ -154,9 +146,7 @@ export function readPastDispatchSlots(priceDate: string): DispatchSlot[] {
  * telemetry is off or the table is empty/absent.
  */
 export function readControlActionsForDay(priceDate: string): Record<string, string[]> {
-  const handle = getDb();
-  if (!handle) return {};
-  try {
+  return readOrFallback({} as Record<string, string[]>, (handle) => {
     const rows = handle
       .prepare('SELECT slot_time, outcome FROM control_actions WHERE slot_time LIKE ? ORDER BY id ASC')
       .all(`${priceDate}T%`) as { slot_time: string | null; outcome: string }[];
@@ -167,9 +157,7 @@ export function readControlActionsForDay(priceDate: string): Record<string, stri
       if (!list.includes(r.outcome)) list.push(r.outcome);
     }
     return out;
-  } catch {
-    return {};
-  }
+  });
 }
 
 /** JSON.stringify replacer: round every finite number to 3 decimals (Wh / milli-öre — far

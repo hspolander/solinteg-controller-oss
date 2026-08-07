@@ -73,11 +73,11 @@ Exit status: 0 = consistent, 1 = a sustained divergence worth investigating.
 from __future__ import annotations
 
 import argparse
-import os
-import sqlite3
 import sys
 
-DEFAULT_DB = os.environ.get("TELEMETRY_DB_PATH", "/opt/solinteg/telemetry.db")
+import common  # sibling module (scripts/tools/) — script dir is sys.path[0]
+
+DEFAULT_DB = common.DEFAULT_DB
 
 # Well clear of the ~50 W typical divergence measured above, and clear of the sampling-skew
 # excursions that a single transient produces.
@@ -120,7 +120,7 @@ def summary_sql(days: int, threshold: int) -> str:
 
 
 def fetch(db: str, days: int) -> list[tuple[str, int]]:
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con = common.connect_ro(db)
     try:
         return con.execute(
             """
@@ -162,7 +162,7 @@ def pct(values: list[int], q: float) -> int:
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--db", default=DEFAULT_DB)
+    common.add_db_arg(ap)
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--threshold-w", type=int, default=DEFAULT_THRESHOLD_W)
     ap.add_argument("--min-run", type=int, default=DEFAULT_MIN_RUN,

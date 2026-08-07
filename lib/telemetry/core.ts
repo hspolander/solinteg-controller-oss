@@ -83,3 +83,34 @@ export function getDb(): DatabaseSync | null {
     return null;
   }
 }
+
+/**
+ * Run a READ against telemetry.db, degrading to `fallback` on either failure mode: telemetry is
+ * off (TELEMETRY_DB_PATH unset — local dev, `next build`, tests) or the query itself throws (a
+ * table the poller has never created, a locked DB, a schema older than the query).
+ *
+ * Every reader in this directory used to spell that out by hand:
+ *
+ *     const handle = getDb();
+ *     if (!handle) return [];
+ *     try { ...query...; return rows; } catch { return []; }
+ *
+ * — which meant the fallback value was written TWICE per reader and the two copies had to
+ * agree. They all did, but nothing made them: changing one and not the other would give a
+ * function that returns a different shape depending on WHICH failure happened, and no test
+ * would have to notice. Passing the fallback once removes that.
+ *
+ * The catch is deliberately silent. A telemetry read failing must never break a page render,
+ * and these run on every render — logging would be noise on any install without a poller. The
+ * WRITERS are the opposite case and stay hand-rolled: a failed write is a real fault, so they
+ * log it.
+ */
+export function readOrFallback<T>(fallback: T, read: (db: DatabaseSync) => T): T {
+  const handle = getDb();
+  if (!handle) return fallback;
+  try {
+    return read(handle);
+  } catch {
+    return fallback;
+  }
+}

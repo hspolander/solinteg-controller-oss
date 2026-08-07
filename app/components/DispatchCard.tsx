@@ -3,9 +3,7 @@
 import { useEffect, useState } from 'react';
 import type { DispatchCardData, DispatchTone, GaugeTone, DecisionOutcome } from '@/lib/dispatch-card';
 import { gaugeFillPct, gaugeTone } from '@/lib/dispatch-card';
-
-// Matches LiveInverterPanel's polling cadence for the rest of the live dashboard data.
-const POLL_MS = 10_000;
+import { DASHBOARD_POLL_MS } from './poll-cadence';
 
 const BADGE_TONE_STYLE: Record<DispatchTone, { bg: string; color: string }> = {
   AKTIV: { bg: 'color-mix(in srgb, var(--color-buy) 16%, transparent)', color: 'var(--color-buy)' },
@@ -75,9 +73,15 @@ export default function DispatchCard({ initialData }: { initialData: DispatchCar
     initialData ? Math.round(initialData.current.secondsAgo) : null,
   );
 
-  // Poll for fresh decisions — there's no push channel, and the underlying data changes
-  // at most once per LOOP_INTERVAL_S (60s) server-side, but polling at the same 10s
-  // cadence as the rest of the live panel keeps this card in step with everything else.
+  // Poll for fresh decisions — there's no push channel, and the underlying data changes at
+  // most once per LOOP_INTERVAL_S server-side; polling on the shared dashboard cadence keeps
+  // this card in step with the panels beside it (see poll-cadence.ts).
+  //
+  // ON FAILURE: keep the last known decision. A dispatch decision stays MEANINGFUL when it
+  // ages — "reserving for the evening peak, 4 min ago" is still the reason the battery is
+  // doing what it's doing, and the header shows how old it is. That is the opposite call from
+  // Systemstatus, which blanks (see LiveInverterPanel), and the difference is deliberate:
+  // live instantaneous power goes stale in seconds, a decision does not.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
@@ -86,11 +90,10 @@ export default function DispatchCard({ initialData }: { initialData: DispatchCar
         const next = res.ok ? ((await res.json()) as DispatchCardData) : null;
         if (!cancelled && next) setData(next);
       } catch {
-        // keep showing the last known data rather than blanking the card on a transient
-        // fetch error — matches LiveInverterPanel's tolerance for one bad poll.
+        // swallowed on purpose — see ON FAILURE above
       }
     };
-    const id = setInterval(tick, POLL_MS);
+    const id = setInterval(tick, DASHBOARD_POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(id);

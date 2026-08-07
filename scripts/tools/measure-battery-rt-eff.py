@@ -41,9 +41,10 @@ Usage (on the NUC, or against a pulled copy of telemetry.db):
 """
 import argparse
 import math
-import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
+
+import common  # sibling module (scripts/tools/) — script dir is sys.path[0]
 
 ASSUMED_RT_EFF = 0.96  # keep in sync with lib/constants.ts BATTERY_RT_EFF default
 
@@ -66,7 +67,7 @@ def solve_rt_eff(e_in: float, e_out: float, d_soc: float) -> float | None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="/opt/solinteg/telemetry.db")
+    common.add_db_arg(ap)
     ap.add_argument("--from", dest="date_from", default=None, help="UTC date, inclusive")
     ap.add_argument("--to", dest="date_to", default=None, help="UTC date, inclusive")
     ap.add_argument("--window-days", type=int, default=7)
@@ -89,7 +90,7 @@ def main() -> int:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY timestamp"
 
-    con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    con = common.connect_ro(args.db)
     rows = [(parse_ts(t), bw, soc) for t, bw, soc in con.execute(sql, params)]
     con.close()
     if len(rows) < 2:

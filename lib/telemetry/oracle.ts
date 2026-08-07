@@ -4,7 +4,7 @@
  * `oracle_daily`) plus the summary rows the dashboard's Facit card reads back
  * (lib/oracle-card.ts).
  */
-import { getDb } from './core';
+import { getDb, readOrFallback } from './core';
 import type { PriceSlot } from '../prices';
 import type { OracleReadingRow, ArmedEventRow, OracleDayRow } from '../oracle';
 
@@ -32,9 +32,7 @@ export interface OracleDaySummaryRow {
  * exist yet (first sweep hasn't run) or telemetry is off.
  */
 export function readRecentOracleDays(limit = 14): OracleDaySummaryRow[] {
-  const handle = getDb();
-  if (!handle) return [];
-  try {
+  return readOrFallback([] as OracleDaySummaryRow[], (handle) => {
     const rows = handle
       .prepare(
         `SELECT date, status, armed_fraction, regret_ore, regret_intraday_ore,
@@ -65,72 +63,56 @@ export function readRecentOracleDays(limit = 14): OracleDaySummaryRow[] {
         baselineNetOre: r.baseline_net_ore,
       }))
       .reverse();
-  } catch {
-    return [];
-  }
+  });
 }
 
-/** Full poller rows for oracle scoring, oldest first, UTC ISO range [sinceIso, beforeIso). */
+/** Full poller rows for oracle scoring, oldest first, UTC ISO range [sinceIso, beforeIso).
+ *  Falls back to [] when the readings table is absent (poller never ran) or unreadable. */
 export function readOracleReadings(sinceIso: string, beforeIso: string): OracleReadingRow[] {
-  const handle = getDb();
-  if (!handle) return [];
-  try {
-    return handle
+  return readOrFallback([] as OracleReadingRow[], (handle) =>
+    handle
       .prepare(
         `SELECT timestamp, pv_w, house_load_w, soc_kwh, grid_w
          FROM readings WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp`,
       )
-      .all(sinceIso, beforeIso) as unknown as OracleReadingRow[];
-  } catch {
-    return []; // table absent (poller never ran) or unreadable
-  }
+      .all(sinceIso, beforeIso) as unknown as OracleReadingRow[],
+  );
 }
 
 /** One day's logged price curve; prices holds that day's slots + tomorrow's when has_tomorrow. */
 export function readPriceSnapshot(date: string): { hasTomorrow: boolean; prices: PriceSlot[] } | null {
-  const handle = getDb();
-  if (!handle) return null;
-  try {
+  return readOrFallback<{ hasTomorrow: boolean; prices: PriceSlot[] } | null>(null, (handle) => {
     const row = handle
       .prepare('SELECT has_tomorrow, prices_json FROM price_snapshots WHERE date = ?')
       .get(date) as { has_tomorrow: number; prices_json: string } | undefined;
     if (!row) return null;
     return { hasTomorrow: row.has_tomorrow === 1, prices: JSON.parse(row.prices_json) as PriceSlot[] };
-  } catch {
-    return null;
-  }
+  });
 }
 
-/** Dispatch-loop decisions (armed flag + outcome) in a UTC range, for armed-coverage scoring. */
+/** Dispatch-loop decisions (armed flag + outcome) in a UTC range, for armed-coverage scoring.
+ *  Falls back to [] when the control_actions table is absent (loop never ran) or unreadable. */
 export function readArmedEvents(sinceIso: string, beforeIso: string): ArmedEventRow[] {
-  const handle = getDb();
-  if (!handle) return [];
-  try {
-    return handle
+  return readOrFallback([] as ArmedEventRow[], (handle) =>
+    handle
       .prepare(
         `SELECT timestamp, armed, outcome
          FROM control_actions WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp`,
       )
-      .all(sinceIso, beforeIso) as unknown as ArmedEventRow[];
-  } catch {
-    return []; // table absent (dispatch loop never ran) or unreadable
-  }
+      .all(sinceIso, beforeIso) as unknown as ArmedEventRow[],
+  );
 }
 
 /** Dates that already have an oracle_daily row, within [sinceDate, beforeDate) — for the
  *  nightly sweep to skip. Statuses are returned so callers can distinguish a scored day from
  *  one recorded as unscorable. */
 export function readOracleDates(sinceDate: string, beforeDate: string): Map<string, string> {
-  const handle = getDb();
-  if (!handle) return new Map();
-  try {
+  return readOrFallback(new Map<string, string>(), (handle) => {
     const rows = handle
       .prepare('SELECT date, status FROM oracle_daily WHERE date >= ? AND date < ?')
       .all(sinceDate, beforeDate) as { date: string; status: string }[];
     return new Map(rows.map((r) => [r.date, r.status]));
-  } catch {
-    return new Map();
-  }
+  });
 }
 
 /** Upsert one scored day. Returns false when telemetry is off or the write failed. */

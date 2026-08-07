@@ -33,14 +33,14 @@ Usage (run wherever both the db and solar-data/ellevio are available):
 """
 import argparse
 import json
-import sqlite3
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-STHLM = ZoneInfo("Europe/Stockholm")
+import common  # sibling module (scripts/tools/) — script dir is sys.path[0]
+
+STHLM = common.STOCKHOLM
 
 
 def parse_utc(ts: str) -> datetime:
@@ -105,7 +105,7 @@ def load_readings(db: str, date_from: str | None, date_to: str | None,
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY timestamp"
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con = common.connect_ro(db)
     rows = [(parse_utc(t), gw) for t, gw in con.execute(sql, params)]
     con.close()
 
@@ -238,7 +238,7 @@ def flip_split(ours: dict, meter: dict, args) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="/opt/solinteg/telemetry.db")
+    common.add_db_arg(ap)
     ap.add_argument("--ellevio-dir", default="solar-data/ellevio")
     ap.add_argument("--from", dest="date_from", default=None, help="Stockholm date, inclusive")
     ap.add_argument("--to", dest="date_to", default=None, help="Stockholm date, inclusive")

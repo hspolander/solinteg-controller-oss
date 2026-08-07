@@ -5,8 +5,7 @@ import type { InverterLiveData } from '@/lib/inverter';
 import type { DispatchCardData } from '@/lib/dispatch-card';
 import PowerFlowCard from '@/app/components/PowerFlowCard';
 import DispatchCard from '@/app/components/DispatchCard';
-
-const POLL_MS = 10_000;
+import { DASHBOARD_POLL_MS } from './poll-cadence';
 
 // Keeps Systemstatus live between page loads by polling the existing /api/inverter route
 // (same readLiveInverterData() the server render used for the first paint). DispatchCard
@@ -25,6 +24,11 @@ export default function LiveInverterPanel({
 }) {
   const [data, setData] = useState(initialData);
 
+  // ON FAILURE: blank, deliberately — unlike the two cards beside it, which keep their last
+  // known value (see poll-cadence.ts). Instantaneous power is only meaningful as of NOW; a
+  // stale "3.1 kW" still rendered under a "Live" header is actively misleading about what the
+  // house is doing. PowerFlowCard has a first-class empty state saying so ("ingen aktuell data
+  // från växelriktaren"), which is the honest thing to show when the poller is down.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
@@ -36,7 +40,7 @@ export default function LiveInverterPanel({
         if (!cancelled) setData(null);
       }
     };
-    const id = setInterval(tick, POLL_MS);
+    const id = setInterval(tick, DASHBOARD_POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(id);

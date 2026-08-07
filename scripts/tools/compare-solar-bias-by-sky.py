@@ -52,9 +52,10 @@ import sqlite3
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
-STOCKHOLM = ZoneInfo("Europe/Stockholm")
+import common  # sibling module (scripts/tools/) — script dir is sys.path[0]
+
+STOCKHOLM = common.STOCKHOLM
 
 
 def parse_ts(ts: str) -> datetime:
@@ -95,13 +96,13 @@ def sky_class(rel: float) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="/opt/solinteg/telemetry.db")
+    common.add_db_arg(ap)
     ap.add_argument("--from", dest="from_date", default=None, help="first price_date (YYYY-MM-DD)")
     ap.add_argument("--to", dest="to_date", default=None, help="last price_date inclusive")
     ap.add_argument("--min-samples", type=int, default=10, help="min poller readings per 15-min slot")
     args = ap.parse_args()
 
-    con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    con = common.connect_ro(args.db)
     con.row_factory = sqlite3.Row
 
     where, params = [], []
