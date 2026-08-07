@@ -28,6 +28,17 @@ Environment (beyond notify.py's own NTFY_*):
   ORACLE_REVIEW_MIN_DAYS        one-shot: send a single "oracle-review data is ready" notice
                                 once this many status='ok' oracle_daily rows exist
                                 (default 16; 0 disables)
+  PROBE_READY_MIN_PV_W          daily notice: live conditions suit
+                                scripts/tools/probe_50209_pv_only.py right now. The value is
+                                the PV floor in W. **Default 0 = OFF** — this is opt-in,
+                                since it is a "go run this probe" nag and most installs never
+                                need to. Set e.g. 3000 to enable. See probe_conditions_ready()
+                                for what the other thresholds mean and when it is worth it.
+  PROBE_READY_WINDOW_S          how far back the conditions window looks (default 600)
+  PROBE_READY_MAX_PV_SWING      max (pv_max-pv_min)/pv_max across the window (default 0.25)
+  PROBE_READY_MIN_SURPLUS_W     min avg(pv) - avg(house_load) (default 2000)
+  PROBE_READY_MAX_SOC_PCT       max current SoC, so the charge has headroom (default 85)
+  PROBE_READY_MIN_SAMPLES       min readings in the window to trust min/max (default 30)
   POLLER_STALE_S                readings table max age before flagging (default 300 — 10x
                                 the poller's 30 s interval)
   WEATHER_STALE_S               weather table max age before flagging (default 1800 — the
@@ -61,6 +72,17 @@ CONTROL_ERROR_WINDOW_S = int(os.environ.get("CONTROL_ERROR_WINDOW_S", "900"))
 DISK_FREE_MIN_PCT = float(os.environ.get("DISK_FREE_MIN_PCT", "10"))
 PLAN_GRACE_AFTER_MIDNIGHT_S = int(os.environ.get("PLAN_GRACE_AFTER_MIDNIGHT_S", "1800"))
 ORACLE_REVIEW_MIN_DAYS = int(os.environ.get("ORACLE_REVIEW_MIN_DAYS", "16"))
+# Default 0 = OFF, deliberately: this is a "go run this probe" nag, and the question it scouts
+# for has already been answered once on the reference deployment (see MODBUS.md). Opt in by
+# setting a PV floor in W if you want to verify the register behaviour on your OWN unit.
+PROBE_READY_MIN_PV_W = float(os.environ.get("PROBE_READY_MIN_PV_W", "0"))
+PROBE_READY_WINDOW_S = int(os.environ.get("PROBE_READY_WINDOW_S", "600"))
+PROBE_READY_MAX_PV_SWING = float(os.environ.get("PROBE_READY_MAX_PV_SWING", "0.25"))
+PROBE_READY_MIN_SURPLUS_W = float(os.environ.get("PROBE_READY_MIN_SURPLUS_W", "2000"))
+PROBE_READY_MAX_SOC_PCT = float(os.environ.get("PROBE_READY_MAX_SOC_PCT", "85"))
+# Enough samples in the window to trust min/max. A 10 s poller fills a 600 s window with 60 —
+# require half, so a briefly degraded poller can't produce a confident verdict from four rows.
+PROBE_READY_MIN_SAMPLES = int(os.environ.get("PROBE_READY_MIN_SAMPLES", "30"))
 
 # State keys with this prefix are one-shot notices: sent once, then remembered forever —
 # excluded from both the cooldown re-alert path and the "resolved" sweep in main().
@@ -244,6 +266,92 @@ def oracle_review_ready(con: sqlite3.Connection):
             f"against the hindsight oracle.")
 
 
+def probe_conditions_ready(con: sqlite3.Connection, now: datetime):
+    """Daily notice: live conditions suit `scripts/tools/probe_50209_pv_only.py` right now.
+
+    OFF by default (PROBE_READY_MIN_PV_W=0) — opt in with a PV floor in W. Why you might: that
+    probe writes an ASYMMETRIC cap, which nothing in normal operation ever does, and it is the
+    only way to know whether YOUR unit enforces 50208/50209 the way the reference deployment's
+    does. Worth enabling if you intend to build a battery-freeze/hold action. Not worth it
+    otherwise — the PV-only-charge idea it originally scouted for turned out not to be worth
+    building on any unit (MODBUS.md has the reasoning).
+
+    The hard part isn't running the probe, it's catching a window: it needs steady sun, real
+    surplus, and SoC headroom, all at once, and those come and go. Hence a notice rather than
+    a checklist item. What it checks over the trailing PROBE_READY_WINDOW_S:
+
+      pv floor      min(pv) over the window >= PROBE_READY_MIN_PV_W — MIN, not average: the
+                    point is that the floor never dropped, which an average hides.
+      stability     (max-min)/max <= PROBE_READY_MAX_PV_SWING across the window. Broken cloud
+                    can hold a high MEAN while swinging wildly; only this catches that, and a
+                    probe run through passing cloud produces a confidently wrong answer.
+      surplus       avg(pv) - avg(house_load) >= PROBE_READY_MIN_SURPLUS_W, so the battery has
+                    something to charge from and the blocked/unblocked contrast is visible.
+      soc headroom  latest SoC <= PROBE_READY_MAX_SOC_PCT — force_charge bails at the SoC
+                    ceiling, so the sunniest day is not automatically the best one.
+
+    Plus two things that make the probe impossible rather than merely unclean: the dispatch
+    loop actively forcing a charge/discharge (the probe would fight it, or interrupt a
+    revenue-earning sell), and control being disarmed (writes short-circuit, so the probe
+    would silently measure nothing). `armed` is read off the latest control_actions row since
+    it is not stored anywhere else.
+
+    Keyed per local date so it fires at most once a day and retries tomorrow if missed —
+    deliberately NOT a true once-ever one-shot (conditions come and go, and a missed ping
+    shouldn't burn the opportunity) and deliberately not an `issues`-style check either, since
+    that path would emit a "resolved" notice every time a cloud passed.
+    """
+    if PROBE_READY_MIN_PV_W <= 0:
+        return None
+
+    row = con.execute(
+        """
+        SELECT COUNT(*), MIN(pv_w), MAX(pv_w), AVG(pv_w), AVG(house_load_w)
+        FROM readings
+        WHERE timestamp >= ? AND pv_w IS NOT NULL AND house_load_w IS NOT NULL
+        """,
+        ((now - timedelta(seconds=PROBE_READY_WINDOW_S)).isoformat(),),
+    ).fetchone()
+    if row is None:
+        return None
+    n, pv_min, pv_max, pv_avg, house_avg = row
+    if not n or n < PROBE_READY_MIN_SAMPLES or pv_max is None or pv_max <= 0:
+        return None
+
+    if pv_min < PROBE_READY_MIN_PV_W:
+        return None
+    if (pv_max - pv_min) / pv_max > PROBE_READY_MAX_PV_SWING:
+        return None
+    surplus = pv_avg - house_avg
+    if surplus < PROBE_READY_MIN_SURPLUS_W:
+        return None
+
+    soc = safe_scalar(con, "SELECT soc_pct FROM readings ORDER BY timestamp DESC LIMIT 1")
+    if soc is None or soc > PROBE_READY_MAX_SOC_PCT:
+        return None
+
+    # Latest dispatch decision: skip while it is actively forcing, or while disarmed.
+    last = con.execute(
+        "SELECT planned_action, outcome, armed FROM control_actions ORDER BY timestamp DESC LIMIT 1"
+    ).fetchone()
+    if last is None:
+        return None
+    planned_action, outcome, armed = last
+    if not armed:
+        return None
+    if planned_action in ("charge", "discharge") and outcome == "applied":
+        return None
+
+    return (ONESHOT_PREFIX + "probe_ready:" + stockholm_date(now),
+            "Solinteg: good window for the PV-only-charge probe",
+            f"Steady sun right now — PV {pv_min:.0f}-{pv_max:.0f} W over the last "
+            f"{PROBE_READY_WINDOW_S // 60} min, {surplus:.0f} W surplus above house load, "
+            f"SoC {soc:.0f}%, no forced charge/discharge running. Good conditions for "
+            f"scripts/tools/probe_50209_pv_only.py (MODBUS.md: 50208/50209 polarity and the "
+            f"write-order rule). Takes about 15 minutes and writes to the inverter — read the "
+            f"script's docstring first.")
+
+
 def run_checks(con: sqlite3.Connection, now: datetime):
     today = stockholm_date(now)
     checks = [
@@ -284,7 +392,9 @@ def main() -> int:
 
     try:
         issues = run_checks(con, now)
-        oneshots = [n for n in (oracle_review_ready(con),) if n is not None]
+        oneshots = [n for n in (oracle_review_ready(con),
+                                probe_conditions_ready(con, now))
+                    if n is not None]
     finally:
         con.close()
 
