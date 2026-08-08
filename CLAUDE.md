@@ -217,6 +217,9 @@ lib/__tests__/optimizer-property.test.ts  property-based DP checks (optimality v
                                   emission validity, endSoc mode) over seeded random scenarios
 lib/__tests__/dispatch-card.test.ts  Dispatch-card view-model (tone, labels, reason/warning building)
 lib/__tests__/oracle-card.test.ts    Facit-card view-model (ok-day selection, medians, trend rows)
+lib/__tests__/weather-series.test.ts  /api/weather wire form: monthly solar calibration applied
+                                  (and indexed by month0), null-irradiance skip, naive-stamp
+                                  timestamps read as UTC
 scripts/tests/                    Python service tests (stdlib unittest + a pymodbus fake — see
                                   scripts/tests/README.md): dispatch_loop slot indexing/drift
                                   interpolation/guards, inverter_control write ordering + fast
