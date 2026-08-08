@@ -306,25 +306,3 @@ export function readDayAheadDispatch(beforeIso: string): DispatchSlot[] | null {
     return null;
   }
 }
-
-/** Per-slot dispatch decisions (planned action + power) in a UTC range, for the replanned
- *  shadow reconstruction. Multiple rows per slot (reasserts) are expected; the caller dedupes
- *  by slot_time (last write wins). */
-export function readPlannedDecisions(
-  sinceIso: string,
-  beforeIso: string,
-): { slotTime: string | null; action: string; powerW: number | null }[] {
-  const handle = getDb();
-  if (!handle) return [];
-  try {
-    const rows = handle
-      .prepare(
-        `SELECT slot_time, planned_action, power_w
-         FROM control_actions WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp`,
-      )
-      .all(sinceIso, beforeIso) as { slot_time: string | null; planned_action: string; power_w: number | null }[];
-    return rows.map((r) => ({ slotTime: r.slot_time, action: r.planned_action, powerW: r.power_w }));
-  } catch {
-    return [];
-  }
-}

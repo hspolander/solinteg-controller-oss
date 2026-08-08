@@ -26,12 +26,11 @@ import {
   readOracleDates,
   readRecentOracleDays,
   readDayAheadDispatch,
-  readPlannedDecisions,
   upsertOracleDaily,
 } from '@/lib/telemetry';
 import type { OracleDaySummaryRow } from '@/lib/telemetry';
 import type { DispatchSlot } from '@/lib/optimizer';
-import { computeOracleDay, ARMED_SEGMENT_CAP_MS } from '@/lib/oracle';
+import { computeOracleDay, ARMED_SEGMENT_CAP_MS, SHADOW_SCORE_VERSION } from '@/lib/oracle';
 
 const SLOT_MS = 900_000;
 const SWEEP_DAYS = 14; // nightly self-healing window: recompute anything missing this far back
@@ -69,12 +68,11 @@ interface DaySummary {
   /** Day-D energy-balance residual (kWh) — systematic drift here means the model's physics
    *  disagree with the meter; surfaced in the nightly journal so it gets noticed. */
   balanceResidualKwh?: number | null;
-  // Shadow: what the Solinteg optimizer's own plan would have earned vs facit (see shadow=1).
+  // Shadow: what the Solinteg optimizer's own day-ahead plan would have earned vs facit
+  // (see shadow=1). Null when the day couldn't be shadow-scored — the reason is recorded as
+  // a shadowDayAheadSkip diagnostic on the row, never silently.
   shadowDayAheadRegretKr?: number | null;
   shadowDayAheadTotalKr?: number | null;
-  shadowReplannedRegretKr?: number | null;
-  shadowReplannedTotalKr?: number | null;
-  shadowReplannedCoverage?: number | null;
 }
 
 const kr = (ore: number | null) => (ore === null ? null : Math.round(ore) / 100);
@@ -95,9 +93,6 @@ function summaryRowToDay(r: OracleDaySummaryRow): DaySummary {
     armedFraction: r.armedFraction,
     shadowDayAheadRegretKr: kr(r.shadowDayAheadRegretOre ?? null),
     shadowDayAheadTotalKr: kr(r.shadowDayAheadTotalOre ?? null),
-    shadowReplannedRegretKr: kr(r.shadowReplannedRegretOre ?? null),
-    shadowReplannedTotalKr: kr(r.shadowReplannedTotalOre ?? null),
-    shadowReplannedCoverage: r.shadowReplannedCoverage ?? null,
   };
 }
 
@@ -140,15 +135,13 @@ function scoreDay(date: string, dry: boolean, shadow = false): DaySummary {
   ).get(date);
   const achievedCashOre = econ ? econ.netKr * 100 : null;
 
-  // Shadow inputs (only when requested): the day-ahead committed plan (last run before D's
-  // midnight that had D as its "tomorrow", sliced to D's slots) and the per-slot replanned
-  // decisions logged during D.
-  let planDayAheadD: DispatchSlot[] | null = null;
-  let controlActionsD: { slotTime: string | null; action: string; powerW: number | null }[] | null = null;
+  // Shadow input (only when requested): the day-ahead committed plan — last run before D's
+  // midnight that had D as its "tomorrow", sliced to D's slots. undefined = not requested;
+  // null = requested but no qualifying run (computeOracleDay records the skip either way).
+  let planDayAheadD: DispatchSlot[] | null | undefined;
   if (shadow) {
     const full = readDayAheadDispatch(iso(dayStartMs));
     planDayAheadD = full ? full.filter((d) => d.startTime.startsWith(date)) : null;
-    controlActionsD = readPlannedDecisions(iso(dayStartMs), iso(dayEndMs));
   }
 
   const row = computeOracleDay({
@@ -160,18 +153,22 @@ function scoreDay(date: string, dry: boolean, shadow = false): DaySummary {
     armedEvents,
     achievedCashOre,
     planDayAheadD,
-    controlActionsD,
   });
 
-  // Persist the shadow scores alongside the row so the Facit can show them without a live
+  // Persist the shadow score alongside the row so the Facit can show it without a live
   // recompute (control_armed=false makes regret_ore's achieved side the incumbent's, while
-  // these say what the Solinteg optimizer's own plan would have earned). oracle_daily has no
-  // shadow columns, so they ride inside diagnostics_json; the key's presence also tells the
-  // nightly sweep this row was already shadow-scored (see readRecentOracleDays / GET).
+  // this says what the Solinteg optimizer's own plan would have earned). oracle_daily has no
+  // shadow columns, so it rides inside diagnostics_json — documented at the column in
+  // deploy/schema.sql. shadowVersion is the sweep's backfill sentinel (an explicit field, not
+  // key-presence): a row whose stored version doesn't match SHADOW_SCORE_VERSION gets
+  // re-scored once, so bumping the constant is the deliberate re-backfill lever. The blob is
+  // written even when the score is null — "the sweep ran, nothing to score" (the reason sits
+  // in shadowDayAheadSkip next to it) must not read as "never swept", or the sweep would
+  // recompute such days every night.
   if (shadow) {
     (row.diagnostics as Record<string, unknown>).shadow = {
+      shadowVersion: SHADOW_SCORE_VERSION,
       dayAhead: row.shadowDayAhead ?? null,
-      replanned: row.shadowReplanned ?? null,
     };
   }
 
@@ -193,9 +190,6 @@ function scoreDay(date: string, dry: boolean, shadow = false): DaySummary {
     balanceResidualKwh: balance ? balance.residualKwh : null,
     shadowDayAheadRegretKr: row.shadowDayAhead ? kr(row.shadowDayAhead.regretOre) : null,
     shadowDayAheadTotalKr: row.shadowDayAhead ? kr(row.shadowDayAhead.totalOre) : null,
-    shadowReplannedRegretKr: row.shadowReplanned ? kr(row.shadowReplanned.regretOre) : null,
-    shadowReplannedTotalKr: row.shadowReplanned ? kr(row.shadowReplanned.totalOre) : null,
-    shadowReplannedCoverage: row.shadowReplanned ? row.shadowReplanned.coverageD : null,
   };
 }
 
@@ -251,9 +245,13 @@ export async function GET(request: Request) {
     const days: DaySummary[] = [];
     for (let d = from; d <= newestScorable; d = addDays(d, 1)) {
       const row = storedRows.get(d);
-      // Recompute when forced, never scored, or scored before the shadow backfill existed
-      // (older rows lack the shadow key → shadowScored:false, recomputed once). The sweep
-      // always scores shadow so the Solinteg optimizer's plan-vs-facit is persisted.
+      // Recompute when forced, never scored, or the stored shadow blob's shadowVersion doesn't
+      // match SHADOW_SCORE_VERSION (pre-backfill rows have no blob at all) — a ONE-TIME
+      // backfill per row per version, after which the stored row is served as-is. NB the
+      // backfill is a full re-score of the day at current code (same path as force=1), not a
+      // patch of the shadow key alone — deterministic given unchanged code and telemetry, but
+      // it does refresh the whole row. The sweep always scores shadow so the Solinteg
+      // optimizer's plan-vs-facit is persisted.
       if (row && !force && row.shadowScored) {
         days.push(summaryRowToDay(row));
       } else {

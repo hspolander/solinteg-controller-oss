@@ -7,6 +7,7 @@
 import { getDb } from './core';
 import type { PriceSlot } from '../prices';
 import type { OracleReadingRow, ArmedEventRow, OracleDayRow, ShadowScore } from '../oracle';
+import { SHADOW_SCORE_VERSION } from '../oracle';
 
 /**
  * One scored day from oracle_daily, as the dashboard's Facit card consumes it
@@ -23,17 +24,16 @@ export interface OracleDaySummaryRow {
   achievedTotalOre: number | null;
   oracleTotalOre: number | null;
   baselineNetOre: number | null;
-  // Shadow scores of the Solinteg optimizer's own plan (persisted inside diagnostics_json by
-  // the nightly shadow sweep — see app/api/oracle/route.ts). shadowScored is the backfill
-  // sentinel: false/absent means this row predates the shadow sweep and should be recomputed
-  // once. Optional so existing plain-row constructors (tests, fixtures) stay valid — every
-  // row readRecentOracleDays returns has them set.
+  // Shadow score of the Solinteg optimizer's own day-ahead plan (persisted inside
+  // diagnostics_json by the nightly shadow sweep — see app/api/oracle/route.ts). shadowScored
+  // is the backfill sentinel: true iff the stored blob's shadowVersion matches
+  // SHADOW_SCORE_VERSION, so pre-sweep rows (no blob), pre-versioning rows, and rows scored
+  // under an older arithmetic all read false and get re-scored once. Optional so existing
+  // plain-row constructors (tests, fixtures) stay valid — every row readRecentOracleDays
+  // returns has them set.
   shadowScored?: boolean;
   shadowDayAheadRegretOre?: number | null;
   shadowDayAheadTotalOre?: number | null;
-  shadowReplannedRegretOre?: number | null;
-  shadowReplannedTotalOre?: number | null;
-  shadowReplannedCoverage?: number | null;
 }
 
 /**
@@ -67,16 +67,21 @@ export function readRecentOracleDays(limit = 14): OracleDaySummaryRow[] {
     }[];
     return rows
       .map((r) => {
-        // The shadow scores live under diagnostics_json.shadow (folded in by the nightly
-        // shadow sweep). Absent key = row predates the sweep → shadowScored:false triggers a
-        // one-time recompute. A malformed blob degrades to "not scored", never throws.
-        let shadow: { dayAhead?: ShadowScore | null; replanned?: ShadowScore | null } | null = null;
+        // The shadow score lives under diagnostics_json.shadow (folded in by the nightly
+        // shadow sweep). shadowScored is true only for a parseable blob whose shadowVersion
+        // matches — anything else (absent key, malformed blob, older version) reads false and
+        // triggers a one-time re-score, whose write then replaces the blob with a current one
+        // (so a malformed blob self-heals on the next sweep rather than recomputing forever).
+        let shadow: { shadowVersion?: number; dayAhead?: ShadowScore | null } | null = null;
         try {
           const diag = JSON.parse(r.diagnostics_json ?? 'null');
-          if (diag && typeof diag === 'object' && 'shadow' in diag) shadow = diag.shadow ?? {};
+          if (diag && typeof diag === 'object' && 'shadow' in diag) shadow = diag.shadow ?? null;
         } catch {
           /* leave shadow null */
         }
+        // A version mismatch is treated as unscored THROUGHOUT: the sweep re-scores the row,
+        // and until it has, the stale-arithmetic numbers are withheld rather than served.
+        const scored = shadow?.shadowVersion === SHADOW_SCORE_VERSION;
         return {
           date: r.date,
           status: r.status,
@@ -87,12 +92,9 @@ export function readRecentOracleDays(limit = 14): OracleDaySummaryRow[] {
           achievedTotalOre: r.achieved_total_ore,
           oracleTotalOre: r.oracle_total_ore,
           baselineNetOre: r.baseline_net_ore,
-          shadowScored: shadow !== null,
-          shadowDayAheadRegretOre: shadow?.dayAhead?.regretOre ?? null,
-          shadowDayAheadTotalOre: shadow?.dayAhead?.totalOre ?? null,
-          shadowReplannedRegretOre: shadow?.replanned?.regretOre ?? null,
-          shadowReplannedTotalOre: shadow?.replanned?.totalOre ?? null,
-          shadowReplannedCoverage: shadow?.replanned?.coverageD ?? null,
+          shadowScored: scored,
+          shadowDayAheadRegretOre: scored ? (shadow?.dayAhead?.regretOre ?? null) : null,
+          shadowDayAheadTotalOre: scored ? (shadow?.dayAhead?.totalOre ?? null) : null,
         };
       })
       .reverse();
