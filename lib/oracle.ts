@@ -95,6 +95,22 @@ export interface ArmedEventRow {
 
 export type OracleDayStatus = 'ok' | 'shadow' | 'degraded' | 'skipped_no_readings';
 
+/** Counterfactual score of a would-be dispatch plan against day D's actuals — same arithmetic
+ *  as the achieved/oracle totals, so regret is directly comparable. See computeOracleDay.
+ *  Always a full-day score: a plan that doesn't cover all of D is skipped (with a
+ *  shadowDayAheadSkip diagnostic), never partially scored. */
+export interface ShadowScore {
+  totalOre: number; // day-D value (cash − wear) + continuation value of the plan's end SoC
+  regretOre: number; // oracleTotalOre − totalOre (money left on the table vs perfect info)
+  endSocKwh: number; // where the plan would have left the battery at day's end
+}
+
+/** Version of the persisted shadow blob (diagnostics_json.shadow.shadowVersion — see
+ *  app/api/oracle/route.ts). The nightly sweep re-scores any row whose stored version doesn't
+ *  match, so bumping this is the deliberate way to re-backfill after changing the shadow
+ *  arithmetic; rows stay untouched otherwise. */
+export const SHADOW_SCORE_VERSION = 1;
+
 export interface OracleDayRow {
   date: string;
   status: OracleDayStatus;
@@ -116,6 +132,9 @@ export interface OracleDayRow {
   regretCarryOre: number | null;
   params: Record<string, number | string>;
   oracleDispatchD: DispatchSlot[] | null; // day-D slice of the 48 h oracle trajectory
+  /** Shadow score (only when a day-ahead plan was supplied in the inputs; null with a
+   *  diagnostics.shadowDayAheadSkip explaining why when it couldn't be scored). */
+  shadowDayAhead?: ShadowScore | null;
   diagnostics: Record<string, unknown>;
 }
 
@@ -346,6 +365,10 @@ export interface OracleDayInputs {
   readings: OracleReadingRow[]; // [D 00:00, end of continuation) UTC, ordered by timestamp
   armedEvents: ArmedEventRow[]; // [D 00:00, D+1 00:00) UTC, ordered by timestamp
   achievedCashOre: number | null; // day-D meter cash from computeDailyEconomics (netKr × 100)
+  /** Optional would-be plan to score against day D (see /api/oracle?shadow=1).
+   *  undefined = shadow scoring not requested; null = requested but no qualifying run found
+   *  (recorded as a shadowDayAheadSkip diagnostic). */
+  planDayAheadD?: DispatchSlot[] | null; // day-D slice of the day-ahead committed plan's dispatch
 }
 
 export function computeOracleDay(inputs: OracleDayInputs): OracleDayRow {
@@ -466,6 +489,45 @@ export function computeOracleDay(inputs: OracleDayInputs): OracleDayRow {
     constrainedValueOre !== null ? constrainedValueOre - achievedDayValueOre : null;
   const regretCarryOre = regretIntradayOre !== null ? regretOre - regretIntradayOre : null;
 
+  // ── Shadow scoring: what a would-be plan (never executed) would have earned ──────────────
+  // Same arithmetic as achievedTotal (day-D value + continuation value of its end SoC), scored
+  // on the SAME actual slotsD from the SAME real startSoc, so shadowRegret is directly
+  // comparable to the achieved regret above. evaluateDispatch only reads socAfter.
+  //
+  // Only the day-ahead committed plan is scored — its socAfter chain is the run's own end to
+  // end, so the counterfactual is clean. A continuously-replanned variant (reconstructed from
+  // control_actions) was cut in review: forced slots advance SoC by the commanded power while
+  // idle slots snap to MEASURED SoC, and evaluateDispatch prices every seam between the two as
+  // physical battery flow — phantom flows, and biased exactly where the feature is aimed, since
+  // shadow mode makes plan-vs-incumbent divergence the normal case. A clean version needs the
+  // plan's own idle physics simulated forward (a design of its own, not a reconstruction).
+  //
+  // NB: a plan produced with hold mode enabled (see lib/plan.ts) plays a RELAXED game — the
+  // hold-free oracle is then not an upper bound, and this regret can legitimately go negative
+  // when hold genuinely helps. Nothing miscalculated; read the sign accordingly.
+  let shadowDayAhead: ShadowScore | null = null;
+  const planDA = inputs.planDayAheadD;
+  if (planDA !== undefined) {
+    if (planDA !== null && planDA.length === nD) {
+      const dayVal = evaluateDispatch(slotsD, planDA, startSoc.soc);
+      const planEnd = planDA[planDA.length - 1].socAfter;
+      const contValueOre = evaluateDispatch(slotsCont, optimizeDispatch(slotsCont, planEnd), planEnd).valueOre;
+      const totalOre = dayVal.valueOre + contValueOre;
+      shadowDayAhead = {
+        totalOre: round1(totalOre),
+        regretOre: round1(oracleTotalOre - totalOre),
+        endSocKwh: round3(planEnd),
+      };
+    } else if (planDA === null) {
+      // Requested but no qualifying optimizer run existed — as loud as any other skip.
+      diagnostics.shadowDayAheadSkip = 'no day-ahead run found before D midnight with D covered';
+    } else {
+      // Partial AND zero coverage both land here: a run whose horizon misses D entirely
+      // (planDA.length === 0) must leave a trace too, or the null score is undebuggable later.
+      diagnostics.shadowDayAheadSkip = `plan covered ${planDA.length}/${nD} day-D slots`;
+    }
+  }
+
   // Day-D energy-balance residual: pv + import − load − export − ΔSoC. Systematically nonzero
   // ⇒ the model's physics (DC-side pv_w, RT_EFF, derived load) drift from the real meter —
   // exactly the case where small negative regrets stop being noise. In kWh and as a fraction
@@ -513,6 +575,7 @@ export function computeOracleDay(inputs: OracleDayInputs): OracleDayRow {
     regretIntradayOre: regretIntradayOre !== null ? round1(regretIntradayOre) : null,
     regretCarryOre: regretCarryOre !== null ? round1(regretCarryOre) : null,
     oracleDispatchD: dispatch48.slice(0, nD),
+    shadowDayAhead,
   };
 }
 

@@ -10,6 +10,7 @@ import {
 } from '../oracle';
 import type { OracleReadingRow, ArmedEventRow, OracleDayInputs } from '../oracle';
 import { BATTERY_KWH, BATTERY_MIN_SOC_KWH, GRID_KW, BATTERY_MAX_KW } from '../optimizer';
+import type { DispatchSlot } from '../optimizer';
 import { BATTERY_RT_EFF, SKATT_OVERFÖRING } from '../constants';
 import type { PriceSlot } from '../prices';
 
@@ -358,5 +359,87 @@ describe('computeOracleDay', () => {
     expect(row.status).toBe('skipped_no_readings');
     expect(row.regretOre).toBeNull();
     expect(row.oracleTotalOre).toBeNull();
+  });
+});
+
+describe('computeOracleDay — shadow scoring (day-ahead plan)', () => {
+  /** Fabricated day-ahead plan slots: only socAfter is priced (evaluateDispatch recomputes the
+   *  flows itself), the flow fields just satisfy the type honestly. */
+  function shadowPlan(dateStr: string, socAfters: number[]): DispatchSlot[] {
+    return socAfters.map((socAfter, i) => {
+      const h = String(Math.floor((i * 15) / 60) % 24).padStart(2, '0');
+      const m = String((i * 15) % 60).padStart(2, '0');
+      return {
+        startTime: `${dateStr}T${h}:${m}:00`,
+        action: 'idle',
+        gridKwh: 0,
+        solarExportKwh: 0,
+        batteryToGridKwh: 0,
+        gridToBatteryKwh: 0,
+        batteryToLoadKwh: 0,
+        loadFromGridKwh: 0,
+        socAfter,
+      };
+    });
+  }
+  const socFlat = (n: number, soc: number) => Array.from({ length: n }, () => soc);
+
+  it('a plan replaying the achieved trajectory scores exactly the achieved total and regret', () => {
+    // makeInputs' fixture holds SoC at a constant 10 kWh with zero solar, so the achieved side
+    // (metered cash − wear) and the shadow side (evaluateDispatch over the socAfter chain)
+    // describe the same physics — the two totals must coincide, and so must the regrets. This
+    // pins the "directly comparable to achieved regret" promise, not just a plausible number.
+    const row = computeOracleDay(makeInputs({ planDayAheadD: shadowPlan('2026-06-29', socFlat(96, 10)) }));
+    expect(row.status).toBe('ok');
+    const s = row.shadowDayAhead;
+    expect(s).not.toBeNull();
+    expect(s!.totalOre).toBeCloseTo(row.achievedTotalOre as number, 4);
+    expect(s!.regretOre).toBeCloseTo(row.regretOre as number, 4);
+    expect(s!.endSocKwh).toBeCloseTo(10, 3);
+    expect(row.diagnostics.shadowDayAheadSkip).toBeUndefined();
+  });
+
+  it("the oracle's own day-D trajectory re-scored through the shadow path has ~zero regret", () => {
+    // Upper-bound sanity on a real price-spread day: feeding the facit's own dispatch back in
+    // as the "plan" must come out at (near-)zero shadow regret — day value + re-optimized
+    // continuation from its end SoC reproduces the 48 h optimum by optimal substructure.
+    const buy = Array.from({ length: 96 }, (_, i) => 120 + 100 * Math.sin((2 * Math.PI * (i - 20)) / 96));
+    const sell = buy.map((b) => b - 90);
+    const varied = {
+      priceSlotsD: priceDay('2026-06-29', 96, (i: number) => buy[i], (i: number) => sell[i]),
+      priceSlotsCont: priceDay('2026-06-30', 96, (i: number) => buy[i], (i: number) => sell[i]),
+    };
+    const first = computeOracleDay(makeInputs(varied));
+    expect(first.status).toBe('ok');
+    const row = computeOracleDay(makeInputs({ ...varied, planDayAheadD: first.oracleDispatchD }));
+    expect(row.shadowDayAhead).not.toBeNull();
+    // Same snapping tolerance as the suite's regret invariants.
+    expect(Math.abs(row.shadowDayAhead!.regretOre)).toBeLessThanOrEqual(25);
+    // And the achieved side left real money on the table, so the scorer separates the two.
+    expect(row.regretOre as number).toBeGreaterThan(100);
+  });
+
+  it('a plan covering only part of day D is skipped, with the coverage recorded', () => {
+    const row = computeOracleDay(makeInputs({ planDayAheadD: shadowPlan('2026-06-29', socFlat(40, 10)) }));
+    expect(row.shadowDayAhead).toBeNull();
+    expect(row.diagnostics.shadowDayAheadSkip).toBe('plan covered 40/96 day-D slots');
+  });
+
+  it('zero day-D coverage (a run exists but its horizon misses D) is recorded, not silent', () => {
+    const row = computeOracleDay(makeInputs({ planDayAheadD: [] }));
+    expect(row.shadowDayAhead).toBeNull();
+    expect(row.diagnostics.shadowDayAheadSkip).toBe('plan covered 0/96 day-D slots');
+  });
+
+  it('shadow requested but no qualifying run found (null) is recorded, not silent', () => {
+    const row = computeOracleDay(makeInputs({ planDayAheadD: null }));
+    expect(row.shadowDayAhead).toBeNull();
+    expect(row.diagnostics.shadowDayAheadSkip).toBe('no day-ahead run found before D midnight with D covered');
+  });
+
+  it('shadow not requested (undefined) leaves score and diagnostics untouched', () => {
+    const row = computeOracleDay(makeInputs());
+    expect(row.shadowDayAhead).toBeNull();
+    expect(row.diagnostics.shadowDayAheadSkip).toBeUndefined();
   });
 });

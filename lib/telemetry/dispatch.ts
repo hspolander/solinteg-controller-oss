@@ -242,3 +242,55 @@ export function logOptimizerRun(
     console.error('logOptimizerRun failed:', err);
   }
 }
+
+/** The most recent optimizer run regardless of horizon — the optimizer's CURRENT forward
+ *  plan, as fresh as the last dispatch-loop replan. Includes the run's inputs (the solar/load
+ *  forecast the plan was computed AGAINST — same provenance, same slots). Feeds GET /api/plan. */
+export function readLatestOptimizerRun(): {
+  loggedAt: string;
+  startSocKwh: number;
+  inputs: OptimizerSlot[];
+  dispatch: DispatchSlot[];
+} | null {
+  const handle = getDb();
+  if (!handle) return null;
+  try {
+    const row = handle
+      .prepare(
+        `SELECT logged_at, start_soc_kwh, inputs_json, dispatch_json
+         FROM optimizer_runs ORDER BY logged_at DESC LIMIT 1`,
+      )
+      .get() as
+      | { logged_at: string; start_soc_kwh: number; inputs_json: string; dispatch_json: string }
+      | undefined;
+    return row
+      ? {
+          loggedAt: row.logged_at,
+          startSocKwh: row.start_soc_kwh,
+          inputs: JSON.parse(row.inputs_json) as OptimizerSlot[],
+          dispatch: JSON.parse(row.dispatch_json) as DispatchSlot[],
+        }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The last optimizer run committed BEFORE beforeIso that covered tomorrow — the full 48 h
+ *  dispatch trajectory; the caller slices it to the day being scored by startTime. Used by the
+ *  shadow scorer (/api/oracle?shadow=1) to score "the plan committed the evening before". */
+export function readDayAheadDispatch(beforeIso: string): DispatchSlot[] | null {
+  const handle = getDb();
+  if (!handle) return null;
+  try {
+    const row = handle
+      .prepare(
+        `SELECT dispatch_json FROM optimizer_runs
+         WHERE has_tomorrow = 1 AND logged_at < ? ORDER BY logged_at DESC LIMIT 1`,
+      )
+      .get(beforeIso) as { dispatch_json: string } | undefined;
+    return row ? (JSON.parse(row.dispatch_json) as DispatchSlot[]) : null;
+  } catch {
+    return null;
+  }
+}
