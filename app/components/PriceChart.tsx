@@ -657,6 +657,13 @@ export default function PriceChart({
             {hoverPoint.decision == null && hoverPoint.action === 'charge' && (
               <span style={{ color: 'var(--text-muted)' }}> · Laddar</span>
             )}
+            {/* optimizer 'hold' (decline the surplus, export it) never forms a band — classifyBand
+                works off flows and sees neither grid-to-battery nor battery-to-grid — so it only
+                exists here. NB: distinct from BandKind 'hold' ("Sparar batteriet"), which is about
+                not DISCHARGING; this is about not CHARGING. */}
+            {hoverPoint.decision == null && hoverPoint.action === 'hold' && (
+              <span style={{ color: 'var(--text-muted)' }}> · Hålläge (exporterar överskott)</span>
+            )}
           </div>
           <TooltipRow color="var(--color-buy)" label="Köp" value={`${hoverPoint.buy.toFixed(1)} öre/kWh`} />
           <TooltipRow color="var(--color-sell)" label="Sälj" value={`${hoverPoint.sell.toFixed(1)} öre/kWh`} />

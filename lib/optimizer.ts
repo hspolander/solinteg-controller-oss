@@ -6,6 +6,10 @@ import {
   BATTERY_WEAR_COST_ORE_PER_KWH,
   GRID_KW,
   MAX_DEFERRAL_SACRIFICE_ORE,
+  HOLD_MIN_PV_KW,
+  HOLD_REFILL_WINDOW_H,
+  HOLD_REFILL_MARGIN,
+  HOLD_PRICE_DROP_MARGIN_ORE,
 } from './constants';
 
 export { BATTERY_KWH, BATTERY_MAX_KW, GRID_KW, BATTERY_MIN_SOC_KWH }; // re-export for tests and external callers
@@ -19,12 +23,10 @@ const SOC_LEVELS = 193; // SoC discretisation for the DP (≈0.12 kWh resolution
 
 // Hold mode (gated, opt-in via holdEnabled). Lets the DP freeze SoC and EXPORT
 // solar surplus instead of forcing it into the battery — but only when three gate conditions
-// hold (see dpCore). All env-overridable; NaN (env unset) → default.
-const num = (v: string | undefined, d: number) => (Number.isFinite(Number(v)) ? Number(v) : d);
-const HOLD_MIN_PV_KWH = num(process.env.SOLINTEG_HOLD_MIN_PV_KW, 3) / 4; // gate 2: gross PV > 3 kW → per 15-min slot
-const HOLD_REFILL_WINDOW_SLOTS = Math.round(num(process.env.SOLINTEG_HOLD_REFILL_WINDOW_H, 12) * 4); // gate 1+3: 12 h
-const HOLD_REFILL_MARGIN = num(process.env.SOLINTEG_HOLD_REFILL_MARGIN, 1.1); // gate 3: fill to full + 10 %
-const HOLD_PRICE_DROP_MARGIN_ORE = num(process.env.SOLINTEG_HOLD_PRICE_DROP_ORE, 0); // gate 1, tunable
+// hold (see dpCore). Gate parameters live in lib/constants.ts (env-overridable, natural units);
+// only the slot-unit conversions happen here.
+const HOLD_MIN_PV_KWH = HOLD_MIN_PV_KW / 4; // gate 2: gross PV threshold → per 15-min slot
+const HOLD_REFILL_WINDOW_SLOTS = Math.round(HOLD_REFILL_WINDOW_H * 4); // gates 1+3: hours → slots
 
 export type Action = 'charge' | 'discharge' | 'idle' | 'hold';
 

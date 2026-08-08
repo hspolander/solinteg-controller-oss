@@ -137,15 +137,25 @@ export async function producePlan(): Promise<PlanResult> {
       // carry these, same as loadFactor. Kill switches: set the corresponding env vars
       // (SOLINTEG_DEFERRAL_RATE_ORE / SOLINTEG_SOLAR_RISK_PREMIUM_ORE) to 0.
       // holdEnabled: gated hold mode (freeze SoC + export the solar surplus when prices are
-      // falling, gross PV > 3 kW, and the next 12 h of forecast can refill the battery to
-      // full +10%). OPT-IN and OFF by default — only active when the user explicitly sets
-      // SOLINTEG_HOLD_ENABLED=1, so existing installs are unchanged. Live plans only; the
-      // hindsight oracle never sets it, so the facit stays hold-free and can judge the plan.
+      // falling, gross PV > HOLD_MIN_PV_KW, and the refill window's forecast can re-fill the
+      // battery to full ×HOLD_REFILL_MARGIN — see lib/constants.ts). OPT-IN and OFF by default
+      // (SOLINTEG_HOLD_ENABLED=1), and additionally FORCED OFF while control is armed: no known
+      // register expresses "don't charge, export the surplus" (MODBUS.md warns against the
+      // nearest approximation, 0x303 with 50207=0), so dispatch_loop.py's apply_target maps
+      // 'hold' to return_to_auto — which charges the surplus, the exact opposite. On an armed
+      // install every hold slot would silently invert the plan and trip the SoC-divergence
+      // guard; until someone field-probes a real hold register, this stays an evaluation
+      // feature for shadow (disarmed) installs. Live plans only; the hindsight oracle never
+      // sets it, so the facit stays hold-free. NB: hold is a pure relaxation of the solution
+      // space, so that hold-free facit is NOT an upper bound on a hold-enabled plan — a
+      // shadow-scored regret (see lib/oracle.ts) can legitimately go negative when hold helps.
       dispatchSchedule = optimizeDispatch(optimizerSlots, startSoc, {
         loadFactor: LOAD_FORECAST_MARGIN,
         deferralRateOrePerKwhHour: DEFERRAL_RATE_ORE_PER_KWH_HOUR,
         solarRiskPremiumOre: SOLAR_RISK_PREMIUM_ORE_PER_KWH,
-        holdEnabled: process.env.SOLINTEG_HOLD_ENABLED === '1',
+        holdEnabled:
+          process.env.SOLINTEG_HOLD_ENABLED === '1' &&
+          process.env.SOLINTEG_CONTROL_ARMED !== '1',
       });
       logOptimizerRun(data.today, data.hasTomorrow, startSoc, optimizerSlots, dispatchSchedule, socIsLive);
     } catch (err) {

@@ -57,7 +57,11 @@ function stockholmTimeLabel(isoUtc: string): string {
 }
 
 export function toneFor(action: LatestControlAction): DispatchTone {
-  if (action.outcome === 'applied') return action.plannedAction === 'idle' ? 'PLANERAT' : 'AKTIV';
+  // 'hold' groups with 'idle': the hardware is in auto either way (apply_target maps hold to
+  // return_to_auto), so nothing is being actively forced — AKTIV would overstate it.
+  if (action.outcome === 'applied') {
+    return action.plannedAction === 'idle' || action.plannedAction === 'hold' ? 'PLANERAT' : 'AKTIV';
+  }
   return 'AVVAKTAR'; // both skip outcomes and both error outcomes read as "needs attention"
 }
 
@@ -71,6 +75,9 @@ export function actionLabel(action: LatestControlAction['plannedAction'], outcom
   if (outcome === 'error_reverted' || outcome === 'error_revert_failed') return 'Fel';
   if (action === 'charge') return 'Laddning';
   if (action === 'discharge') return 'Urladdning';
+  // The plan's intent, not the hardware's state — the inverter does sit in auto during a hold
+  // slot, but labelling it 'Auto' would hide that the plan chose to decline the surplus.
+  if (action === 'hold') return 'Hålläge';
   return outcome === 'applied' ? 'Auto' : 'Överhoppad';
 }
 
@@ -120,7 +127,10 @@ function buildReason(a: LatestControlAction): { reason: string; warning?: string
     }
     if (d.nextAction && d.nextActionTime) {
       const time = d.nextActionTime.slice(11, 16); // already naive Stockholm local, no conversion needed
-      const label = d.nextAction === 'charge' ? 'laddning' : 'urladdning';
+      // next_action is the plan's next non-idle slot (dispatch_loop.py decide()), so 'hold'
+      // reaches here too — it must not fall through to 'urladdning'.
+      const label =
+        d.nextAction === 'charge' ? 'laddning' : d.nextAction === 'hold' ? 'hålläge' : 'urladdning';
       return { reason: `Automatiskt läge — nästa ${label} kl ${time}.` };
     }
     return { reason: 'Automatiskt läge — följer planen, ingen tvingad laddning just nu.' };

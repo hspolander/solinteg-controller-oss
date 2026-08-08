@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { PriceData } from '../prices';
 import type { OptimizerSlot, DispatchSlot } from '../optimizer';
 
@@ -145,10 +145,13 @@ describe('producePlan — happy path wiring', () => {
 
     // The single most important wiring assertion: a typo'd option name here would silently
     // disable risk-aware planning without any optimizer-level test ever catching it.
+    // holdEnabled: false is asserted exactly (not omitted) — the default-off promise is that
+    // an install that never set SOLINTEG_HOLD_ENABLED gets a bit-identical DP.
     expect(optimizeDispatch).toHaveBeenCalledWith(ALL_SLOTS.slice(1), 7.5, {
       loadFactor: LOAD_FORECAST_MARGIN,
       deferralRateOrePerKwhHour: DEFERRAL_RATE_ORE_PER_KWH_HOUR,
       solarRiskPremiumOre: SOLAR_RISK_PREMIUM_ORE_PER_KWH,
+      holdEnabled: false,
     });
 
     expect(logPriceSnapshot).toHaveBeenCalledWith(PRICE_DATA);
@@ -175,6 +178,39 @@ describe('producePlan — happy path wiring', () => {
     expect(result.startSoc).toBe(12.8);
     expect(logOptimizerRun).toHaveBeenCalledWith(
       expect.anything(), expect.anything(), 12.8, expect.anything(), expect.anything(), false,
+    );
+  });
+});
+
+describe('producePlan — hold-mode gating', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('enables hold when SOLINTEG_HOLD_ENABLED=1 on a disarmed (shadow) install', async () => {
+    vi.stubEnv('SOLINTEG_HOLD_ENABLED', '1');
+
+    await producePlan();
+
+    expect(optimizeDispatch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ holdEnabled: true }),
+    );
+  });
+
+  it('forces hold OFF while control is armed, even when explicitly enabled', async () => {
+    // The hardware cannot express hold — dispatch_loop maps it to return_to_auto, which
+    // charges the surplus (the opposite). Armed installs must never see hold slots.
+    vi.stubEnv('SOLINTEG_HOLD_ENABLED', '1');
+    vi.stubEnv('SOLINTEG_CONTROL_ARMED', '1');
+
+    await producePlan();
+
+    expect(optimizeDispatch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ holdEnabled: false }),
     );
   });
 });

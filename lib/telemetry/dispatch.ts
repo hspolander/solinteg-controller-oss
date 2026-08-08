@@ -21,14 +21,14 @@ export interface ControlActionDetail {
   socDriftKwh?: number;
   socDriftLimitKwh?: number;
   gridKwh?: number; // discharge only: the plan's net grid exchange, +import/−export
-  nextAction?: 'charge' | 'discharge';
+  nextAction?: 'charge' | 'discharge' | 'hold'; // the plan's next non-idle slot — 'hold' included (dispatch_loop's decide() copies the action verbatim)
   nextActionTime?: string;
 }
 
 export interface LatestControlAction {
   timestamp: string; // UTC ISO — when the dispatch loop logged this decision
   slotTime: string | null; // naive Stockholm local slot start, matches DispatchSlot.startTime
-  plannedAction: 'charge' | 'discharge' | 'idle';
+  plannedAction: 'charge' | 'discharge' | 'idle' | 'hold'; // mirrors optimizer.ts's Action — 'hold' rows only occur on shadow (disarmed) installs, see lib/plan.ts
   powerW: number | null;
   armed: boolean;
   outcome: string; // 'applied' | 'skipped_divergence' | 'skipped_solar_shortfall' | 'error_reverted' | 'error_revert_failed'
