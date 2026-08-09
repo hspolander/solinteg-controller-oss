@@ -1,5 +1,13 @@
-import { describe, it, expect } from 'vitest';
-import { stockholmParts, stockholmToUtc, computeMaxAge, currentSlotIndexInPrices } from '../prices';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  stockholmParts,
+  stockholmToUtc,
+  computeMaxAge,
+  currentSlotIndexInPrices,
+  toSlot,
+  fetchDay,
+} from '../prices';
+import { EXPORT_BONUS_ORE, SUPPLIER_SURCHARGE_ORE, VAT_RATE } from '../constants';
 
 // ─── stockholmParts ───────────────────────────────────────────────────────────
 
@@ -177,5 +185,114 @@ describe('currentSlotIndexInPrices', () => {
     // next midnight (2026-10-25 24:00 CET = 23:00Z) → slot 100, the 25 h day's length.
     expect(currentSlotIndexInPrices('2026-10-25', new Date('2026-10-25T03:00:00Z'))).toBe(20);
     expect(currentSlotIndexInPrices('2026-10-25', new Date('2026-10-25T23:00:00Z'))).toBe(100);
+  });
+});
+
+// ─── toSlot — the two pricing formulas ────────────────────────────────────────
+//
+// DOMAIN.md is the spec here: sell = spot + EXPORT_BONUS_ORE, buy = (spot + SUPPLIER_SURCHARGE)
+// × (1 + VAT). The surcharge and VAT were fitted against a real supplier invoice to a 0.00 öre
+// residual over 96 slots, so these are measured constants, not guesses — and every kr the
+// optimizer, economics and oracle report is denominated in their output.
+
+const slot = (sekPerKwh: number) =>
+  toSlot({
+    SEK_per_kWh: sekPerKwh,
+    time_start: '2026-08-09T14:00:00+02:00',
+    time_end: '2026-08-09T14:15:00+02:00',
+  } as Parameters<typeof toSlot>[0]);
+
+describe('toSlot', () => {
+  it('converts SEK/kWh to öre/kWh', () => {
+    // 0.85 SEK/kWh = 85 öre spot; sell adds the flat export compensation on top.
+    expect(slot(0.85).price).toBeCloseTo(85 + EXPORT_BONUS_ORE, 2);
+  });
+
+  it('reconstructs the buy price as (spot + surcharge) x (1 + VAT)', () => {
+    expect(slot(0.85).priceIncludingTaxAndSurcharge).toBeCloseTo((85 + SUPPLIER_SURCHARGE_ORE) * (1 + VAT_RATE), 2);
+  });
+
+  it('never puts VAT or the surcharge on the sell price', () => {
+    // The single most consequential rule in DOMAIN.md: an exported kWh earns spot + nätnytta,
+    // full stop. Folding tax in here would inflate every sell decision the DP makes.
+    const s = slot(1.0);
+    expect(s.price).toBeCloseTo(100 + EXPORT_BONUS_ORE, 2);
+    expect(s.price).toBeLessThan(s.priceIncludingTaxAndSurcharge);
+  });
+
+  it('handles a negative spot price without losing the sign', () => {
+    // Negative spot happens on windy low-demand days, and the DP is expected to exploit it.
+    const s = slot(-0.15);
+    expect(s.price).toBeCloseTo(-15 + EXPORT_BONUS_ORE, 2);
+    expect(s.priceIncludingTaxAndSurcharge).toBeCloseTo((-15 + SUPPLIER_SURCHARGE_ORE) * (1 + VAT_RATE), 2);
+  });
+
+  it('handles a zero spot price', () => {
+    expect(slot(0).price).toBeCloseTo(EXPORT_BONUS_ORE, 2);
+  });
+
+  it('rounds to two decimals rather than carrying float noise', () => {
+    // Unrounded these carry ~17 digits into telemetry payloads; see logOptimizerRun's own
+    // rounding for the same reason.
+    const s = slot(0.123456789);
+    expect(s.price).toBe(Math.round(s.price * 100) / 100);
+    expect(s.priceIncludingTaxAndSurcharge).toBe(Math.round(s.priceIncludingTaxAndSurcharge * 100) / 100);
+  });
+
+  it('strips the UTC offset, leaving naive Stockholm local time', () => {
+    // The whole codebase keys slots on this naive form (see CLAUDE.md's key invariants);
+    // leaving the "+02:00" on would break every map lookup that joins on startTime.
+    const s = slot(0.85);
+    expect(s.startTime).toBe('2026-08-09T14:00:00');
+    expect(s.endTime).toBe('2026-08-09T14:15:00');
+    expect(s.startTime).not.toContain('+');
+  });
+});
+
+// ─── fetchDay — "no prices yet" vs "prices are zero" ──────────────────────────
+
+describe('fetchDay', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const ok = (body: unknown) =>
+    vi.fn(async (_url: string) => new Response(JSON.stringify(body), { status: 200 }));
+
+  it('requests the documented URL shape for the configured zone', async () => {
+    const f = ok([{ SEK_per_kWh: 0.5, time_start: '2026-08-09T00:00:00+02:00', time_end: '2026-08-09T00:15:00+02:00' }]);
+    vi.stubGlobal('fetch', f);
+    await fetchDay('2026-08-09');
+    expect(f.mock.calls[0][0]).toContain('/2026/08-09_');
+  });
+
+  it('maps every returned slot', async () => {
+    vi.stubGlobal('fetch', ok([
+      { SEK_per_kWh: 0.5, time_start: '2026-08-09T00:00:00+02:00', time_end: '2026-08-09T00:15:00+02:00' },
+      { SEK_per_kWh: 0.6, time_start: '2026-08-09T00:15:00+02:00', time_end: '2026-08-09T00:30:00+02:00' },
+    ]));
+    const slots = await fetchDay('2026-08-09');
+    expect(slots).toHaveLength(2);
+    expect(slots![1].price).toBeCloseTo(60 + EXPORT_BONUS_ORE, 2);
+  });
+
+  it('returns null on 404 — tomorrow before the ~13:00 release', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 404 })));
+    await expect(fetchDay('2026-08-10')).resolves.toBeNull();
+  });
+
+  it('returns null on any non-ok status rather than throwing', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 500 })));
+    await expect(fetchDay('2026-08-10')).resolves.toBeNull();
+  });
+
+  it('returns null for an empty array, not an empty day', async () => {
+    // An empty day would flow downstream as "prices exist and they are all zero", which the
+    // optimizer would happily arbitrage against. Null makes the caller fail loudly instead.
+    vi.stubGlobal('fetch', ok([]));
+    await expect(fetchDay('2026-08-10')).resolves.toBeNull();
+  });
+
+  it('returns null when the body is not an array', async () => {
+    vi.stubGlobal('fetch', ok({ error: 'nope' }));
+    await expect(fetchDay('2026-08-10')).resolves.toBeNull();
   });
 });

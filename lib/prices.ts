@@ -34,7 +34,7 @@ interface ElprisSlot {
  * from the raw spot; the sell price is the spot plus the flat grid-export compensation
  * (EXPORT_BONUS_ORE) that the owner actually receives per exported kWh.
  */
-function toSlot(p: ElprisSlot): PriceSlot {
+export function toSlot(p: ElprisSlot): PriceSlot {
   const spot = Math.round(p.SEK_per_kWh * 100 * 100) / 100; // SEK/kWh → öre/kWh (2 dp)
   const inclTax = Math.round((spot + SUPPLIER_SURCHARGE_ORE) * (1 + VAT_RATE) * 100) / 100;
   return {
@@ -46,7 +46,7 @@ function toSlot(p: ElprisSlot): PriceSlot {
 }
 
 /** Fetch one Stockholm day of 15-min slots, or null if not published yet (404 before release). */
-async function fetchDay(dateStr: string): Promise<PriceSlot[] | null> {
+export async function fetchDay(dateStr: string): Promise<PriceSlot[] | null> {
   const url = `${PRICES_BASE_URL}/${dateStr.slice(0, 4)}/${dateStr.slice(5)}_${PRICE_ZONE}.json`;
   const res = await fetch(url, {
     headers: { 'User-Agent': 'solinteg-controller' },

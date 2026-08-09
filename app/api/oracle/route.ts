@@ -32,18 +32,18 @@ const SLOT_MS = 900_000;
 const SWEEP_DAYS = 14; // nightly self-healing window: recompute anything missing this far back
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function addDays(dateStr: string, n: number): string {
+export function addDays(dateStr: string, n: number): string {
   const [y, m, d] = dateStr.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
 }
 
-function midnightMs(dateStr: string): number {
+export function midnightMs(dateStr: string): number {
   const [y, m, d] = dateStr.split('-').map(Number);
   return stockholmMidnightUtc(y, m - 1, d).getTime();
 }
 
 /** That day's slots out of a snapshot's prices (which may also hold the next day's). */
-function slotsForDay(prices: PriceSlot[] | undefined, dateStr: string): PriceSlot[] {
+export function slotsForDay(prices: PriceSlot[] | undefined, dateStr: string): PriceSlot[] {
   return (prices ?? []).filter((p) => p.startTime.startsWith(dateStr));
 }
 
@@ -66,7 +66,7 @@ interface DaySummary {
   balanceResidualKwh?: number | null;
 }
 
-const kr = (ore: number | null) => (ore === null ? null : Math.round(ore) / 100);
+export const kr = (ore: number | null) => (ore === null ? null : Math.round(ore) / 100);
 
 function scoreDay(date: string, dry: boolean): DaySummary {
   const d1 = addDays(date, 1);
