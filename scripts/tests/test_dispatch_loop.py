@@ -332,6 +332,54 @@ class NeedsApplyTests(unittest.TestCase):
         self.assertTrue(dl.needs_apply(("t0", "discharge", 100), last, "discharge", 100, False))
 
 
+class NextLastTargetTests(unittest.TestCase):
+    """What gets recorded as "the inverter is now at this target" after an apply.
+
+    `last_target` is the input needs_apply() gates on, so recording a target the inverter is NOT
+    at silently delays recovery by a full DISPATCH_REASSERT_S.
+    """
+
+    TARGET = ("t0", "discharge", 3000)
+
+    def test_a_successful_apply_records_the_target(self):
+        self.assertEqual(dl.next_last_target("applied", self.TARGET), self.TARGET)
+
+    def test_error_reverted_records_nothing(self):
+        """The fail-safe revert succeeded, so the inverter is in AUTO — recording the forced
+        target claims otherwise. This path used to fall through to the success branch, and on the
+        reference deployment that cost the full reassert interval (294-309 s measured) against
+        16-21 s for the failed-revert path, i.e. the milder failure recovered slower."""
+        self.assertIsNone(dl.next_last_target("error_reverted", self.TARGET))
+
+    def test_error_revert_failed_records_nothing(self):
+        self.assertIsNone(dl.next_last_target("error_revert_failed", self.TARGET))
+
+    def test_both_error_paths_now_agree(self):
+        self.assertEqual(dl.next_last_target("error_reverted", self.TARGET),
+                         dl.next_last_target("error_revert_failed", self.TARGET))
+
+    def test_the_guard_skips_deliberately_keep_the_target(self):
+        """NOT failures: the guard chose auto on purpose and has already asked for a fresh plan,
+        so retrying every tick would re-trip the same guard and log a row every LOOP_INTERVAL_S.
+        These wait for a changed target — a new plan, or solar recovering."""
+        for outcome in ("skipped_divergence", "skipped_solar_shortfall"):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(dl.next_last_target(outcome, self.TARGET), self.TARGET)
+
+    def test_a_reverted_error_makes_the_very_next_tick_re_apply(self):
+        """The two functions composed — the property that actually matters. Same slot, same
+        target, no reassert due: it must still apply, because the inverter is in auto."""
+        last = dl.next_last_target("error_reverted", self.TARGET)
+        self.assertTrue(dl.needs_apply(self.TARGET, last, "discharge", 3000,
+                                       due_for_reassert=False))
+
+    def test_a_successful_apply_still_suppresses_the_next_identical_tick(self):
+        """The other side of it — the fix must not turn every steady discharge tick into a write."""
+        last = dl.next_last_target("applied", self.TARGET)
+        self.assertFalse(dl.needs_apply(self.TARGET, last, "discharge", 3000,
+                                        due_for_reassert=False))
+
+
 class FakeInverter:
     """Stands in for inverter_control.Inverter in apply_decision tests."""
 

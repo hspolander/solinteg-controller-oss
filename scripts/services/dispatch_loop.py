@@ -42,11 +42,13 @@ SAFETY:
   - A failed apply attempts return_to_auto as its own fail-safe rather than leaving a
     half-applied setpoint — reverted before the failure is logged, so a telemetry.db
     write error (shared WAL db, contention is realistic) can never skip the revert.
-    If that fail-safe revert ALSO fails (outcome 'error_revert_failed', e.g. a Modbus
-    outage spanning both calls), last_target is deliberately NOT recorded, so the next
-    tick retries the apply/revert instead of treating the target as handled — otherwise
-    an unchanged idle target would never be re-attempted and the previous slot's forced
-    setpoint could keep running (added 2026-07-08).
+    Neither error outcome records last_target (next_last_target), so the next tick retries
+    instead of treating the target as handled: after 'error_revert_failed' the previous
+    slot's forced setpoint may still be running, and after 'error_reverted' the inverter is
+    in auto — in both cases it is NOT at the target the loop just tried to apply. Recording
+    it would make needs_apply() consider the target satisfied and delay recovery by a full
+    DISPATCH_REASSERT_S (added 2026-07-08 for the failed-revert half; extended to
+    'error_reverted' after measuring that asymmetry live).
   - A failure in decide() itself (e.g. a corrupt dispatch_json row) also triggers a
     best-effort revert, so a run of bad data can't leave a previous slot's forced setpoint
     running indefinitely just because a new one can't be computed. Only the FIRST failure of
@@ -825,6 +827,47 @@ def needs_apply(target, last_target, effective_action: str, effective_power: int
     )
 
 
+# Outcomes after which the inverter is NOT at `target` — the apply failed and the loop either
+# reverted to auto or could not confirm what state it left behind. Recording `target` for these
+# would tell needs_apply() the target is already satisfied.
+_UNAPPLIED_OUTCOMES = ("error_reverted", "error_revert_failed")
+
+
+def next_last_target(outcome: str, target):
+    """What to record as the last-applied target, given how the apply actually turned out.
+
+    `last_target` means "what the inverter is currently set to", and needs_apply() reads it that
+    way. So it may only be recorded when the apply really landed.
+
+    Both error outcomes therefore record None, which makes the next tick retry:
+      - error_revert_failed: the revert failed too, so the inverter may still be running the
+        PREVIOUS slot's forced setpoint. Recording an unchanged idle target here would leave that
+        stale setpoint running until the next slot boundary — or forever when slot_time is None.
+      - error_reverted: the fail-safe revert SUCCEEDED, so the inverter is in auto — which is
+        precisely why `target` is the wrong thing to record. This path used to fall through to the
+        success branch, and the bug is worth describing because it is invisible until the error
+        rate rises: the loop believed a forced target was live while the inverter sat in auto, and
+        since needs_apply() only re-asserts an unchanged non-idle target on REASSERT_S, recovery
+        waited the FULL reassert interval. Measured on the reference deployment during a period of
+        Modbus link degradation: error_reverted rows recovered in 294-309 s while
+        error_revert_failed rows recovered on the next tick at 16-21 s — the milder failure
+        recovering slower than the worse one. Both now retry on the next tick.
+
+    The SKIP outcomes deliberately keep `target` and must not be added here. skipped_divergence
+    and skipped_solar_shortfall are not failures: the guard chose auto on purpose and has already
+    asked for a fresh plan (maybe_request_replan), so retrying every tick would just re-trip the
+    same guard and log a row every LOOP_INTERVAL_S. They wait for a changed target — a new plan,
+    or solar recovering — which is the intended behaviour.
+
+    NOTE the cost of retrying on the next tick during a SUSTAINED outage: one control_actions row
+    per LOOP_INTERVAL_S rather than per REASSERT_S. Accepted because that is already
+    error_revert_failed's behaviour, and because a transient Modbus blip typically clears on the
+    very next tick. healthcheck.py's alert de-duplication is what keeps a long outage from
+    becoming a push storm.
+    """
+    return None if outcome in _UNAPPLIED_OUTCOMES else target
+
+
 def check_soc_divergence(inv: Inverter, expected_soc_kwh: float, slot_time, action: str,
                           numbers: dict):
     """Compare live SoC against the plan's expectation for THIS MOMENT; returns (skip, detail).
@@ -986,17 +1029,10 @@ def main() -> None:
                 outcome, loop_in_auto = apply_decision(
                     con, slot_time, action, power_w, expected_soc_kwh, solar_skipped_now,
                     detail, numbers, loop_in_auto)
-                if outcome == "error_revert_failed":
-                    # Both the apply AND the fail-safe revert failed — the inverter
-                    # may still be running the PREVIOUS slot's forced setpoint.
-                    # Recording last_target here would make an unchanged idle target
-                    # never retry (needs_apply requires a target change or a non-idle
-                    # reassert), leaving that stale setpoint running until the next
-                    # slot boundary — or forever when slot_time is None. Leave it
-                    # unset so the very next tick retries the apply/revert.
-                    last_target = None
-                else:
-                    last_target = target
+                # Only record the target when the inverter is actually AT it — see
+                # next_last_target() for why both error outcomes (not just the failed revert)
+                # must leave it unset so the next tick retries.
+                last_target = next_last_target(outcome, target)
                 last_write_monotonic = time.monotonic()
         except Exception as exc:  # noqa: BLE001
             # decide() itself failed (e.g. a corrupt dispatch_json row) — we don't know

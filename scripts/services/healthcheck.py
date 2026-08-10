@@ -10,17 +10,30 @@ need an inverter-safety response, just your attention; see watchdog.py for the o
 
 Run as a one-shot systemd timer (deploy/solinteg-healthcheck.timer), a few minutes' interval.
 
-Alerts are de-duplicated via a small state file: each detected issue alerts once, then again
-only after HEALTHCHECK_ALERT_COOLDOWN_S if still unresolved (a persistent problem gets a
-periodic reminder, not a notification every run), plus a "resolved" notice once it clears.
-One-shot notices (state keys prefixed "oneshot:") are different: sent exactly once ever,
-never repeated, never "resolved" — for milestones rather than problems.
+Alerts are de-duplicated via a small state file. An issue alerts when it is new, when its
+CLASSIFICATION changes (a check's optional 5th tuple element, defaulting to its severity — see
+should_alert()), or when HEALTHCHECK_ALERT_COOLDOWN_S has passed and it is still unresolved.
+It is declared resolved, with a ✅ notice, only after HEALTHCHECK_RESOLVE_QUIET_S with no
+recurrence. One-shot notices (state keys prefixed "oneshot:") are different: sent exactly once
+ever, never repeated, never "resolved" — for milestones rather than problems.
+
+These rules were rewritten after the simpler ones behaved badly on an INTERMITTENT fault, which
+is worth knowing if you are tempted to simplify them back. Resolving after a single clean run
+deleted the state entry, so the next occurrence took the "new" path and pushed again: a flapping
+hardware fault (a degrading Modbus link, recurring every few hours) cost an alert plus a
+"resolved" notice every single time, and the multi-hour cooldown never engaged at all. The two
+fixes are symmetric — hold the entry through a quiet period so a recurrence is recognised as the
+same standing issue, and compare classification rather than mere presence so an alert still fires
+the moment the KIND of failure changes.
 
 Environment (beyond notify.py's own NTFY_*):
   TELEMETRY_DB_PATH             SQLite path (default /opt/solinteg/telemetry.db)
   HEALTHCHECK_STATE_PATH        dedup state (default /opt/solinteg/healthcheck-state.json)
   HEALTHCHECK_ALERT_COOLDOWN_S  minimum time between repeat alerts for the same issue
                                 (default 14400 = 4 h)
+  HEALTHCHECK_RESOLVE_QUIET_S   how long an issue must be absent before it is declared resolved
+                                (default 10800 = 3 h) — set well above the recurrence gap of a
+                                flapping fault, else each blip reads as a brand-new issue
   PLAN_GRACE_AFTER_MIDNIGHT_S   suppress the "no prices/plan today" checks this long after
                                 Stockholm midnight (default 1800) — the rows only exist once
                                 the first post-midnight render lands (solinteg-telemetry.timer
@@ -65,6 +78,12 @@ log = logging.getLogger("solinteg.healthcheck")
 DB_PATH = os.environ.get("TELEMETRY_DB_PATH", "/opt/solinteg/telemetry.db")
 STATE_PATH = os.environ.get("HEALTHCHECK_STATE_PATH", "/opt/solinteg/healthcheck-state.json")
 ALERT_COOLDOWN_S = int(os.environ.get("HEALTHCHECK_ALERT_COOLDOWN_S", "14400"))
+# How long an issue must stay ABSENT before it counts as resolved. Must be comfortably longer
+# than the gap between recurrences of a flapping fault, or the state entry gets dropped between
+# blips and every blip reads as a brand-new issue (see the resolve sweep in main()). The default
+# is sized against a fault recurring every few hours; a fault quieter than this is genuinely
+# worth an all-clear.
+RESOLVE_QUIET_S = int(os.environ.get("HEALTHCHECK_RESOLVE_QUIET_S", "10800"))
 POLLER_STALE_S = int(os.environ.get("POLLER_STALE_S", "300"))
 WEATHER_STALE_S = int(os.environ.get("WEATHER_STALE_S", "1800"))
 CONTROL_ERROR_WINDOW_S = int(os.environ.get("CONTROL_ERROR_WINDOW_S", "900"))
@@ -232,9 +251,18 @@ def check_control_errors(con: sqlite3.Connection, now: datetime):
                 "writes nothing, and a successful revert restores auto. They normally clear on "
                 "the next tick; persistent or lengthening runs point at the Modbus link/dongle, "
                 "not at dispatch.")
+    # Fingerprint = which KINDS of failure this run found, never how many. Counts must stay out
+    # of it: with "x3" vs "x4" in the fingerprint every blip would re-classify and the
+    # de-duplication would achieve nothing. What DOES break through is benign -> unconfirmed,
+    # i.e. the transition from "connect failed, nothing written" to "a write may have landed and
+    # the revert did not" — the distinction this check exists to make.
+    fingerprint = "+".join(
+        k for k, present in (("reverted", reverted), ("benign", benign),
+                             ("unconfirmed", bool(unconfirmed))) if present
+    )
     return ("control_errors", severity, "Solinteg: dispatch loop hit errors",
             f"In the last {CONTROL_ERROR_WINDOW_S // 60} min: {', '.join(parts)}. {tail} "
-            f"See control_actions.detail.")
+            f"See control_actions.detail.", fingerprint)
 
 
 def check_disk_space(path: str = "/"):
@@ -371,6 +399,40 @@ def save_state(state: dict) -> None:
     common.write_json_atomic(STATE_PATH, state)
 
 
+def should_alert(prior, fingerprint: str, now: datetime):
+    """Does this occurrence of an already-known issue warrant another push? -> (bool, reason).
+
+    Three ways through, in priority order:
+
+    1. **Nothing on record** — the issue is new (or its quiet period fully elapsed and the
+       resolve sweep dropped it). Always alert.
+    2. **The classification changed.** `fingerprint` describes WHAT was found, not how much, so a
+       benign-connect-failure run followed by a `state UNCONFIRMED` run alerts immediately even
+       inside the cooldown. Without this, edge-triggering would let the one case that matters be
+       swallowed by an ongoing benign condition — which is exactly what check_control_errors'
+       severity split exists to prevent. A prior entry with NO recorded fingerprint (a state file
+       written by an older version) is not treated as a change, so upgrading doesn't manufacture
+       one spurious push per standing issue.
+    3. **The cooldown elapsed** while the issue is still present. This is what stops a slow
+       degradation from going silent after one push: a condition that never clears still reports
+       every ALERT_COOLDOWN_S. Edge-triggering ALONE would announce a degrading link once and
+       never mention that the rate had quadrupled over the following days.
+
+    Otherwise: suppressed. Combined with the resolve hysteresis in main(), a condition that blips
+    every few hours costs ONE push per cooldown window instead of a push plus a "resolved" notice
+    per blip.
+    """
+    if not prior or not prior.get("last_alert"):
+        return True, "new"
+    was = prior.get("fingerprint")
+    if was is not None and was != fingerprint:
+        return True, f"reclassified {was} -> {fingerprint}"
+    quiet = (now - datetime.fromisoformat(prior["last_alert"])).total_seconds()
+    if quiet >= ALERT_COOLDOWN_S:
+        return True, f"still unresolved after {quiet / 3600:.1f} h"
+    return False, f"last alerted {prior['last_alert']}"
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     now = datetime.now(UTC)
@@ -392,18 +454,27 @@ def main() -> int:
 
     state = load_state()
     seen_keys = set()
-    for key, severity, title, message in issues:
+    for issue in issues:
+        key, severity, title, message = issue[:4]
+        # A check may declare a fingerprint: the CLASSIFICATION of what it found, as opposed to
+        # how much of it there was. Defaults to the severity, so any check whose severity moves
+        # breaks through the cooldown without having to opt in. See should_alert().
+        fingerprint = issue[4] if len(issue) > 4 else str(severity)
         seen_keys.add(key)
         prior = state.get(key)
-        due = prior is None or (
-            now - datetime.fromisoformat(prior["last_alert"])
-        ).total_seconds() >= ALERT_COOLDOWN_S
-        if due:
+        alert, reason = should_alert(prior, fingerprint, now)
+        if alert:
             notify.send(title, message, priority=severity)
-            state[key] = {"last_alert": now.isoformat()}
-            log.warning("%s: %s", key, message)
+            log.warning("%s (%s): %s", key, reason, message)
         else:
-            log.info("%s still present (suppressed, last alerted %s)", key, prior["last_alert"])
+            log.info("%s still present (suppressed, %s)", key, reason)
+        # last_seen advances either way — it is what the resolve sweep below measures quiet
+        # time against, and a suppressed run is still an occurrence.
+        state[key] = {
+            "last_alert": now.isoformat() if alert else prior["last_alert"],
+            "last_seen": now.isoformat(),
+            "fingerprint": fingerprint,
+        }
 
     # One-shot notices: sent at most once ever. Only recorded on a CONFIRMED publish, so a
     # failed send retries on the next run instead of silently marking itself done.
@@ -414,15 +485,32 @@ def main() -> int:
                 state[key] = {"sent": now.isoformat()}
                 log.info("one-shot notice sent: %s", key)
 
-    # Anything previously flagged but no longer present has resolved. One-shot keys are
-    # milestones, not issues — they never "resolve" and must survive here forever.
-    for key in list(state.keys()):
-        if key.startswith(ONESHOT_PREFIX):
+    # Anything previously flagged but absent for a full quiet period has resolved. One-shot keys
+    # are milestones, not issues — they never "resolve" and must survive here forever.
+    #
+    # The quiet period is the other half of the de-duplication (see should_alert()). Declaring
+    # "resolved" after a single clean run is what made an INTERMITTENT fault behave like a stream
+    # of unrelated new ones: the key was deleted, so the next occurrence hours later took the
+    # "new" path and pushed again, and the cooldown never got to do its job. Keeping the entry
+    # alive through the quiet window means a recurrence is recognised as the same standing issue.
+    # Cost: a genuinely-fixed issue's ✅ arrives up to RESOLVE_QUIET_S late. Worth it — a
+    # premature all-clear on a flapping fault is the more misleading of the two.
+    for key, entry in list(state.items()):
+        if key.startswith(ONESHOT_PREFIX) or key in seen_keys:
             continue
-        if key not in seen_keys:
-            notify.send(f"Solinteg: resolved — {key}", "This issue is no longer detected.",
+        last_seen = entry.get("last_seen") or entry.get("last_alert")
+        if last_seen is None:  # malformed entry — don't wedge on it
+            del state[key]
+            continue
+        quiet_s = (now - datetime.fromisoformat(last_seen)).total_seconds()
+        if quiet_s >= RESOLVE_QUIET_S:
+            notify.send(f"Solinteg: resolved — {key}",
+                        f"This issue has not recurred for {quiet_s / 3600:.1f} h.",
                         priority=notify.PRIORITY_DEFAULT, tags=["white_check_mark"])
             del state[key]
+        else:
+            log.info("%s absent for %.0f min — holding before declaring it resolved",
+                     key, quiet_s / 60)
 
     save_state(state)
     if issues:
