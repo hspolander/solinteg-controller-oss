@@ -249,9 +249,12 @@ class ProbeConditionsReadyTests(unittest.TestCase):
 
 
 class ControlErrorFingerprintTests(unittest.TestCase):
-    """The fingerprint decides what breaks through the alert cooldown. It must track the KIND of
-    failure and nothing else — putting counts in it would re-classify on every blip and defeat the
-    de-duplication the fingerprint exists to make safe."""
+    """The fingerprint decides what breaks through the alert cooldown. It must track the SEVERITY
+    CLASS and nothing else — putting counts in it would re-classify on every blip and defeat the
+    de-duplication the fingerprint exists to make safe. `reverted` and `benign` collapse into one
+    "benign_errors" token: both leave the inverter in a known-good state, so treating them as
+    different classifications just re-alerted on the ordinary mix of failure types shifting run
+    to run, drowning out the one unconfirmed transition that actually matters."""
 
     def fingerprint(self, rows):
         con = sqlite3.connect(":memory:")
@@ -276,10 +279,23 @@ class ControlErrorFingerprintTests(unittest.TestCase):
         self.assertNotEqual(benign, escalated)
         self.assertIn("unconfirmed", escalated)
 
-    def test_different_kinds_have_different_fingerprints(self):
+    def test_reverted_and_benign_share_a_fingerprint(self):
+        """These are equally non-urgent (see the shared HIGH `tail` message), so their mix must
+        NOT reclassify — that was the entire source of the alert-fatigue bug this fixes."""
         reverted = self.fingerprint([("error_reverted", "Modbus Error: whatever")])
         benign = self.fingerprint([("error_revert_failed", CONNECT_FAILED)])
-        self.assertNotEqual(reverted, benign)
+        mixed = self.fingerprint([("error_reverted", "Modbus Error: whatever"),
+                                  ("error_revert_failed", CONNECT_FAILED)])
+        self.assertEqual(reverted, benign)
+        self.assertEqual(reverted, mixed)
+        self.assertNotIn("unconfirmed", reverted)
+
+    def test_unconfirmed_alone_is_distinct_from_benign_errors(self):
+        unconfirmed = self.fingerprint([("error_revert_failed", NO_RESPONSE)])
+        benign = self.fingerprint([("error_revert_failed", CONNECT_FAILED)])
+        self.assertNotEqual(unconfirmed, benign)
+        self.assertIn("unconfirmed", unconfirmed)
+        self.assertNotIn("benign_errors", unconfirmed)
 
 
 class ShouldAlertTests(unittest.TestCase):

@@ -251,13 +251,17 @@ def check_control_errors(con: sqlite3.Connection, now: datetime):
                 "writes nothing, and a successful revert restores auto. They normally clear on "
                 "the next tick; persistent or lengthening runs point at the Modbus link/dongle, "
                 "not at dispatch.")
-    # Fingerprint = which KINDS of failure this run found, never how many. Counts must stay out
-    # of it: with "x3" vs "x4" in the fingerprint every blip would re-classify and the
-    # de-duplication would achieve nothing. What DOES break through is benign -> unconfirmed,
-    # i.e. the transition from "connect failed, nothing written" to "a write may have landed and
-    # the revert did not" — the distinction this check exists to make.
+    # Fingerprint = which SEVERITY CLASS this run found, never how many and never which of the
+    # two equally-benign outcomes. `reverted` and `benign` are deliberately ONE token
+    # ("benign_errors"): both leave the inverter in a known-good state (see `tail` above), and
+    # only `unconfirmed` is the transition that must break through the cooldown. Treating them as
+    # separate tokens re-classified on the ordinary mix of failure TYPES shifting run to run —
+    # nothing about actual severity changing — which drowned the one transition that matters in
+    # alert noise. Counts must still stay out of it for the same reason as always: with "x3" vs
+    # "x4" in the fingerprint every blip would re-classify and the de-duplication would achieve
+    # nothing.
     fingerprint = "+".join(
-        k for k, present in (("reverted", reverted), ("benign", benign),
+        k for k, present in (("benign_errors", reverted or benign),
                              ("unconfirmed", bool(unconfirmed))) if present
     )
     return ("control_errors", severity, "Solinteg: dispatch loop hit errors",
