@@ -18,8 +18,12 @@ import type { OptimizerSlot, DispatchSlot } from '../optimizer';
 // Every dependency is mocked (module-level, not real network/Next.js/telemetry) — this is the
 // first file in this repo to use vi.mock, since it's the first case where the module under
 // test is pure orchestration around I/O rather than pure computation or a real sqlite temp db.
+// producePlan() awaits connection() to declare itself request-time (it reads the clock, live
+// SoC and writes telemetry, so it can never be prerendered). Outside a Next request scope that
+// throws, so it is stubbed — this suite is about orchestration, not the runtime.
+vi.mock('next/server', () => ({ connection: vi.fn(async () => undefined) }));
 vi.mock('../prices', () => ({
-  fetchPrices: vi.fn(),
+  fetchPricesUncached: vi.fn(),
   currentSlotIndexInPrices: vi.fn(),
 }));
 vi.mock('../forecast', () => ({
@@ -47,7 +51,7 @@ vi.mock('../telemetry', () => ({
   readTrailingLoadProfile: vi.fn(),
 }));
 
-import { fetchPrices, currentSlotIndexInPrices } from '../prices';
+import { fetchPricesUncached, currentSlotIndexInPrices } from '../prices';
 import { fetchSolarForecast, fetchDailyMeanTemp } from '../forecast';
 import { fetchSolarForecastDirect, fetchDailyMeanTempDirect } from '../metno-thredds';
 import { buildSolarProfiles, buildOptimizerSlots } from '../pipeline';
@@ -110,7 +114,7 @@ function silenceConsoleError() {
 }
 
 beforeEach(() => {
-  vi.mocked(fetchPrices).mockReset().mockResolvedValue(PRICE_DATA);
+  vi.mocked(fetchPricesUncached).mockReset().mockResolvedValue(PRICE_DATA);
   vi.mocked(currentSlotIndexInPrices).mockReset().mockReturnValue(0);
   vi.mocked(fetchSolarForecast).mockReset().mockResolvedValue(FORECAST);
   vi.mocked(fetchDailyMeanTemp).mockReset().mockResolvedValue(TEMP_BY_DATE);
@@ -206,7 +210,7 @@ describe('producePlan — slot-index clamping', () => {
 describe('producePlan — prices outage', () => {
   it('degrades to a priceless plan without ever touching the optimizer', async () => {
     const errSpy = silenceConsoleError();
-    vi.mocked(fetchPrices).mockRejectedValue(new Error('elprisetjustnu 503'));
+    vi.mocked(fetchPricesUncached).mockRejectedValue(new Error('elprisetjustnu 503'));
 
     const result = await producePlan();
 

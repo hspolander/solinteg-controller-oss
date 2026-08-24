@@ -11,10 +11,11 @@ import { useRouter } from 'next/navigation';
  * "Imorgons priser" notice — and the header chrome says "Live", so without
  * this an evening viewer sees the morning's plan styled as current.
  *
- * router.refresh() re-renders the server components without touching the
- * server-side 'use cache' entries: fetchPrices stays cached until its own
- * maxAge (spot prices don't change intraday), while the optimizer run and
- * telemetry reads re-execute. Each refresh therefore also logs a fresh
+ * router.refresh() re-renders the server components. The price read re-executes
+ * for real every time (producePlan calls fetchPricesUncached — see lib/plan.ts's
+ * cache contract; it used to come from a 'use cache' entry, which is what made
+ * the day-ahead horizon flip-flop possible), while the solar/temp forecasts do
+ * stay cached on their own 1 h/8 h schedule, deliberately. Each refresh therefore also logs a fresh
  * optimizer_runs row — same as any real page view, and only while a tab is
  * actually open AND visible (hidden tabs skip ticks; a tab becoming visible
  * again catches up at most once per interval).

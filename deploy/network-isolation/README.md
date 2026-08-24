@@ -39,3 +39,19 @@ unreachable from anything except this box).
 
 **Physical note:** the real isolation boundary is the physical cable, not this config — link
 the box and inverter with a direct patch cable and no switch in between if at all possible.
+
+**Do not put this link over powerline/HomePlug.** On the reference deployment it ran that way
+until 2026-08-22 and cost 14 ms average RTT with 107 ms spikes (vs 0.97 ms / 1.22 ms on direct
+cable) plus roughly 200 slow-but-successful Modbus polls a day. It was misdiagnosed as a failing
+inverter dongle for two weeks, because **the NIC's own error counters read a clean zero
+throughout** — a bridged hop hides its loss and latency internally. If you must diagnose this
+link, measure RTT and jitter (`ping -c 30 -i 1`), not `rx_errors`. Ping at 1 s, not faster: the
+dongle rate-limits ICMP, so a fast ping manufactures fake packet loss (20% at 0.3 s vs 0% at 1 s
+on the same link).
+
+**Cabling gotcha, once two NICs are in play:** if the onboard and USB adapter cables get swapped,
+the symptom is distinctive — the poller keeps working (the adapter is still on the inverter) while
+the box is unreachable from your LAN (the onboard port is on a cable leading nowhere). Swapped the
+other way is worse: `dnsmasq` starts offering the isolated subnet's leases onto your home LAN.
+Netplan matches the adapter by MAC, so which USB port it occupies is irrelevant — only which
+Ethernet cable is plugged into it matters.

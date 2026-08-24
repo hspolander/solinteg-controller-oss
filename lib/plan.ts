@@ -1,4 +1,5 @@
-import { fetchPrices, currentSlotIndexInPrices } from './prices';
+import { connection } from 'next/server';
+import { fetchPricesUncached, currentSlotIndexInPrices } from './prices';
 import type { PriceData } from './prices';
 import { fetchSolarForecast, fetchDailyMeanTemp } from './forecast';
 import { fetchSolarForecastDirect, fetchDailyMeanTempDirect } from './metno-thredds';
@@ -44,14 +45,29 @@ export interface PlanResult {
  * render and a triggered replan are therefore the exact same code path, not two implementations
  * that could quietly diverge.
  *
- * Deliberately does NOT carry a 'use cache' directive anywhere in this call graph: this app
- * runs with cacheComponents on (next.config.ts), and prices/solar/temp/live-SoC are exactly
- * the inputs that must be re-read at request time, never baked into a build-time or long-lived
- * cache entry. readLiveInverterData() already calls connection() internally, which is what
- * lets a Server Component caller (app/page.tsx) legally bail out of prerendering without this
- * module needing a dynamic marker of its own; a POST Route Handler caller (app/api/replan) is
- * never prerendered or cached regardless of what it touches (only GET handlers can opt into
- * caching — see the Next docs' Route Handlers page), so it doesn't need one either.
+ * **Caching in this call graph, and the one rule that matters.** This app runs with
+ * cacheComponents on (next.config.ts). This docstring used to claim the call graph carried no
+ * 'use cache' directive anywhere — it was not true, and the gap between the claim and the code
+ * is where a real bug lived: fetchPrices() carried one, so the plan's price horizon came from a
+ * cache entry that a page render and a POST route handler resolved differently, and the newest
+ * published plan flip-flopped between horizon-aware and today-only after each day-ahead release.
+ * The price read is now fetchPricesUncached() and genuinely request-time.
+ *
+ * The rule, stated properly: **staleness is only acceptable where a stale answer beats the
+ * fallback.**
+ *   - Prices: NEVER cached here. A stale horizon is not an old number, it is the optimizer
+ *     solving yesterday's problem, and it reaches the inverter.
+ *   - Solar/temp forecasts: DELIBERATELY still cached (lib/forecast.ts, 1 h revalidate / 8 h
+ *     expire). A several-hours-old real forecast still encodes today-specific conditions — an
+ *     approaching front, expected cloud cover — and strictly beats the alternative, which is the
+ *     seasonal-average climatology this chain falls back to. Do not "fix" these to match prices;
+ *     that trades a good input for a worse one.
+ *   - Live SoC: readLiveInverterData() calls connection() internally, which is what lets a
+ *     Server Component caller (app/page.tsx) legally bail out of prerendering.
+ *
+ * A POST Route Handler caller (app/api/replan) is never prerendered or cached regardless of what
+ * it touches (only GET handlers can opt into caching — see the Next docs' Route Handlers page),
+ * so it doesn't need a marker either.
  *
  * Telemetry writes here (logPriceSnapshot, logOptimizerRun) are best-effort and a no-op unless
  * TELEMETRY_DB_PATH is set (see lib/telemetry/core.ts) — so a triggered replan from a NUC dev/test
@@ -59,11 +75,20 @@ export interface PlanResult {
  * exactly like a normal render would.
  */
 export async function producePlan(): Promise<PlanResult> {
+  // Awaited FIRST, before anything in the Promise.all below starts. readLiveInverterData() also
+  // calls connection(), but that is only sufficient while everything else in the group sits in a
+  // 'use cache' scope. With a genuinely request-time price read, its `new Date()` and fetch()
+  // run concurrently with that bail-out and the prerender aborts on whichever illegal access
+  // lands first — a real build failure ("Error occurred prerendering page /"). Declaring the
+  // dependency once, up front, is the honest statement anyway: a plan reads the clock, reads live
+  // SoC and writes telemetry. It can never be part of a prerendered shell.
+  await connection();
+
   const [data, solarForecast, tempByDate, inverterData] = await Promise.all([
     // A prices outage must not take down the whole page: live status and earnings don't
     // need spot prices. The chart/optimizer sections degrade to a notice instead.
-    fetchPrices().catch((err) => {
-      console.error('fetchPrices failed, rendering without price chart/optimizer:', err);
+    fetchPricesUncached().catch((err) => {
+      console.error('fetchPricesUncached failed, rendering without price chart/optimizer:', err);
       return null;
     }),
     // Logged (not just silently swallowed) so we can tell from journalctl how often this
@@ -109,8 +134,8 @@ export async function producePlan(): Promise<PlanResult> {
     const liveLoad = readTrailingLoadProfile(LIVE_LOAD_PROFILE_DAYS);
     const allSlots = buildOptimizerSlots(data, solarForecast, solarProfiles, tempByDate, liveLoad);
 
-    // Telemetry (best-effort, no-op unless TELEMETRY_DB_PATH is set). readLiveInverterData()
-    // calls connection() above, so this runs at request time, never during `next build`.
+    // Telemetry (best-effort, no-op unless TELEMETRY_DB_PATH is set). producePlan() awaits
+    // connection() at its top, so this runs at request time, never during `next build`.
     logPriceSnapshot(data);
 
     try {

@@ -27,6 +27,43 @@ still a list of things to confirm on **your** hardware, and that script is there
   brief and infrequent minimizes overlap regardless, rather than treating that finding as
   airtight — it is not a documented guarantee from the vendor, just a repeated empirical result
   on this exact dongle/firmware.
+- **The dongle stalls local Modbus for 4-8 s while it talks to the cloud — a design property of
+  the hardware, not a fault, and it will affect YOUR install too (confirmed 2026-08-24).** It
+  uploads to Solinteg's cloud **~once a minute** over the *same internal path* local Modbus uses;
+  if that upload is slow it retries and monopolizes the path. Independently reported by other
+  owners and reproduced on the reference deployment, where 61% of all read stalls fell in a 4-8 s
+  band. It gets worse when Solinteg's cloud is unwell — a ~7 s stall mode appeared on 2026-08-07
+  that had been entirely absent before, on identical hardware, cabling and poll interval.
+
+  **How to recognise it**, because two separate investigations here blamed the hardware and then
+  the cabling before finding it. Build a histogram of how long reads actually take — the gap
+  between consecutive `readings` rows, minus your `POLL_INTERVAL`:
+
+  ```sql
+  SELECT CAST(gap - 20 AS INT) AS excess_s, COUNT(*) AS n   -- change 20 to your POLL_INTERVAL
+  FROM (SELECT (julianday(timestamp) - julianday(LAG(timestamp) OVER (ORDER BY timestamp)))*86400.0 AS gap
+        FROM readings WHERE timestamp >= date('now','-2 days'))
+  WHERE gap IS NOT NULL AND gap > 21.5 AND gap < 300
+  GROUP BY excess_s ORDER BY excess_s;
+  ```
+
+  - **A mode at 4-8 s → the cloud.** Not your dongle, not your cabling. Nothing local fixes it.
+  - **A mode at exactly one `POLL_INTERVAL` → whole skipped cycles** (the read failed, the next
+    succeeded). Cross-check your poller's log for failed polls.
+  - **A long flat tail, with ping jitter to match → your network path.**
+
+  **Consequences to design around:**
+  - **Modbus client timeouts must exceed 8 s.** A timeout during a stall is worse than waiting for
+    the result. Owner consensus in the Nordic user group is 10-12 s; several tools ship a 5 s
+    default, which sits inside the stall band.
+  - **Shorter poll intervals collide with these stalls more often**, costing whole skipped cycles
+    — measured at 15.7/day at a 10 s interval vs 2.0/day at 20 s on the same install. Nothing
+    downstream here needs sub-minute data, so prefer the longer interval.
+  - A third-party local cloud simulator exists (github.com/sixuniform/YOUEMS
+    `solinteg-cloud-simulator`, Apache 2.0) that answers the upload locally so the module never
+    stalls. **Not used here.** It hijacks the vendor channel via iptables NAT and warns it may
+    affect firmware services, warranty and safety notifications — weigh that against what the
+    stalls actually cost you, which on the reference deployment was nothing measurable.
 - Byte order big-endian; 32-bit word order **big** (high word at lower address)
 - Block size 120; all registers are **holding** registers (FC03 read / FC06 write-single)
 - pymodbus 3.13+: `read_holding_registers(addr, count=N, device_id=ID)`, `write_register(addr, val, device_id=ID)`. The older `slave=` kwarg and positional `count` were removed. Pin `pymodbus>=3.13,<4`.

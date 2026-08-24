@@ -99,12 +99,12 @@ describe('computeMaxAge', () => {
     expect(maxAge).toBeCloseTo(11100, -2);
   });
 
-  it('returns 20 minutes when no tomorrow prices and hour >= 13', () => {
+  it('re-checks every 3 minutes when no tomorrow prices and hour >= 13', () => {
     // Stockholm 15:00 — prices should have been released but are still missing
     const now = new Date('2026-06-15T13:00:00Z'); // Stockholm 15:00
     const parts = stockholmParts(now);
     const maxAge = computeMaxAge(false, now, parts);
-    expect(maxAge).toBe(20 * 60);
+    expect(maxAge).toBe(3 * 60);
   });
 
   it('never returns less than 60 seconds', () => {

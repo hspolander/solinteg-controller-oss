@@ -223,8 +223,16 @@ scripts/tests/                    Python service tests (stdlib unittest + a pymo
                                   path + SoC gates
 ```
 
-Run `npm test` (vitest) AND `npm run test:py` (Python; on Windows use the `py` launcher in
-place of `python3`) before any change that touches lib/ or scripts/services/.
+Run `npm test` (vitest), `npm run test:py` (Python; on Windows use the `py` launcher in
+place of `python3`) **and `npm run build`** before any change that touches lib/ or
+scripts/services/.
+
+**The build is not redundant with the tests.** This app runs with `cacheComponents` on, and a
+whole class of error is invisible to vitest, typecheck and lint, surfacing only when Next
+prerenders: reading the clock or fetching outside a cache scope or a `connection()` bail-out. On
+the reference deployment that shipped once with every other gate green and failed at build with
+"Error occurred prerendering page /". Treat it as non-negotiable for any change touching a
+`use cache` directive.
 
 ### Data-processing scripts (offline, not part of the app build)
 

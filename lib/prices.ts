@@ -150,6 +150,15 @@ export function stockholmToUtc(
   return new Date(Date.UTC(year, month0, day, h - utcOffset, min, 0));
 }
 
+/**
+ * How long a "tomorrow isn't published yet" answer stays cached once past the 13:05 release
+ * window. 20 min pins first sight of the day-ahead prices to a 13:05 + 20 min grid, well after
+ * the feed actually has them, and starves any replan trigger that re-asks on a shorter cycle —
+ * every re-ask lands in this same cache entry and gets the same pre-release answer back. 3 min
+ * costs at most a couple of extra ~100 ms fetches per day against a free feed.
+ */
+const AWAITING_TOMORROW_RECHECK_S = 3 * 60;
+
 export function computeMaxAge(
   hasTomorrow: boolean,
   now: Date,
@@ -164,11 +173,24 @@ export function computeMaxAge(
     const release = stockholmToUtc(parts.year, parts.month0, parts.day, parts.utcOffset, 13, 5);
     return Math.max(60, Math.floor((release.getTime() - now.getTime()) / 1000));
   }
-  return 20 * 60; // after 13:00 but still no tomorrow — keep checking every 20 min
+  return AWAITING_TOMORROW_RECHECK_S;
 }
 
-export async function fetchPrices(): Promise<PriceData> {
-  'use cache';
+/**
+ * The real fetch. **No 'use cache' here, deliberately** — this is what lib/plan.ts calls, and a
+ * plan is a dispatch input: a stale price horizon is not a slightly-old number, it is the
+ * optimizer solving yesterday's problem.
+ *
+ * On the reference deployment this cost two failed fix attempts before the cause was found. With
+ * the price read behind 'use cache', a GET page render and a POST route handler resolved the same
+ * argument-less entry differently, so the newest published plan alternated between horizon-aware
+ * and today-only for the better part of an hour after each day-ahead release. Tuning cacheLife
+ * does not fix it; taking the plan's price read out of the cache does.
+ *
+ * Cost of not caching: two ~100 ms fetches per plan against a free, unmetered feed, at whatever
+ * cadence you render.
+ */
+export async function fetchPricesUncached(): Promise<PriceData> {
 
   const now = new Date();
   const parts = stockholmParts(now);
@@ -186,8 +208,6 @@ export async function fetchPrices(): Promise<PriceData> {
   const prices = tomorrowSlots ? [...todaySlots, ...tomorrowSlots] : todaySlots;
   const maxAge = computeMaxAge(hasTomorrow, now, parts);
 
-  cacheLife({ revalidate: maxAge, expire: maxAge * 2 });
-
   const sells = prices.map((p) => p.price);
   return {
     today: parts.dateStr,
@@ -198,4 +218,19 @@ export async function fetchPrices(): Promise<PriceData> {
     prices,
     maxAge,
   };
+}
+
+/**
+ * Cached wrapper, for display-only callers (app/api/prices/route.ts). **Never call this from
+ * anything that feeds dispatch** — see fetchPricesUncached above for why.
+ *
+ * expire hugs revalidate rather than doubling it: maxAge means "seconds until this answer can be
+ * wrong", so a stale-while-revalidate window past it serves an answer already known to be
+ * outdated. The +1 is only because cacheLife validates "expire must be greater than revalidate".
+ */
+export async function fetchPrices(): Promise<PriceData> {
+  'use cache';
+  const data = await fetchPricesUncached();
+  cacheLife({ revalidate: data.maxAge, expire: data.maxAge + 1 });
+  return data;
 }
