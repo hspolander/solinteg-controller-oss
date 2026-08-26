@@ -64,6 +64,14 @@ interface DaySummary {
   /** Day-D energy-balance residual (kWh) — systematic drift here means the model's physics
    *  disagree with the meter; surfaced in the nightly journal so it gets noticed. */
   balanceResidualKwh?: number | null;
+  /** Day-D perfect-foresight prize: what the battery could have won over having no battery at
+   *  all. regretKr alone is confounded by the day's price level — on the reference deployment it
+   *  correlates +0.35 with the day's buy spread, and high-spread days carry roughly 2.3× the
+   *  regret of low-spread ones — so a regret number in the journal can't be read as "how well
+   *  did we dispatch" without its denominator beside it. regret ÷ prize is the form that trends
+   *  across seasons; scripts/tools/oracle-diagnose.py pools it over a window, and this is the
+   *  per-day input to that. */
+  prizeKr?: number | null;
 }
 
 export const kr = (ore: number | null) => (ore === null ? null : Math.round(ore) / 100);
@@ -133,6 +141,10 @@ function scoreDay(date: string, dry: boolean): DaySummary {
     armedFraction: row.armedFraction,
     readingCoverage: row.readingCoverage,
     balanceResidualKwh: balance ? balance.residualKwh : null,
+    prizeKr:
+      row.oracleDayCashOre !== null && row.oracleDayWearOre !== null && row.baselineNetOre !== null
+        ? kr(row.oracleDayCashOre - row.oracleDayWearOre - row.baselineNetOre)
+        : null,
   };
 }
 

@@ -329,6 +329,40 @@ describe('computeOracleDay', () => {
     expect(row.oracleDispatchD).toHaveLength(96);
   });
 
+  it('reports the model-vs-meter accounting gap, and it is ~0 on a physics-consistent day', () => {
+    // simulateSelfUse books its cash from the same flows the DP's physics implies, so pricing
+    // its trajectory on the MODEL's basis must reproduce the meter cash it hands in. A gap here
+    // would mean the two sides of the regret comparison are drifting apart in accounting —
+    // exactly what the diagnostic exists to catch. On a real install expect a systematically
+    // positive gap instead (the model re-dispatches raw DC-side pv the meters never fully saw);
+    // this test pins the arithmetic, not that any particular install nets to zero.
+    const buy = Array.from({ length: 96 }, (_, i) => 120 + 100 * Math.sin((2 * Math.PI * (i - 20)) / 96));
+    const sell = buy.map((b) => b - 90);
+    const solar = Array.from({ length: 96 }, (_, i) => {
+      const h = i / 4;
+      return h >= 7 && h < 19 ? 2.2 * Math.sin((Math.PI * (h - 7)) / 12) : 0;
+    });
+    const load = Array.from({ length: 96 }, (_, i) => 0.25 + (i >= 68 && i < 88 ? 0.45 : 0));
+    const simD = simulateSelfUse(DAY_MS, solar, load, 9);
+    const simCont = simulateSelfUse(DAY_MS + 96 * SLOT_MS, solar, load, simD.socEnd);
+    const row = computeOracleDay(
+      makeInputs({
+        priceSlotsD: priceDay('2026-06-29', 96, (i) => buy[i], (i) => sell[i]),
+        priceSlotsCont: priceDay('2026-06-30', 96, (i) => buy[i], (i) => sell[i]),
+        readings: [...simD.readings, ...simCont.readings],
+        achievedCashOre: simD.cashOre(buy, sell),
+      }),
+    );
+    const acc = (row.diagnostics as {
+      accounting: { modelCashOre: number; meterCashOre: number; gapOre: number };
+    }).accounting;
+    expect(acc.meterCashOre).toBeCloseTo(simD.cashOre(buy, sell), 0);
+    expect(acc.gapOre).toBeCloseTo(acc.modelCashOre - acc.meterCashOre, 0);
+    // Slot-mean and boundary-interpolation noise only. A basis mismatch or a sign flip — the
+    // failures this diagnostic exists to catch — would be kr-scale, not öre-scale.
+    expect(Math.abs(acc.gapOre)).toBeLessThan(60);
+  });
+
   it('flags a disarmed day as shadow, not ok', () => {
     const row = computeOracleDay(makeInputs({ armedEvents: armedAllDay(DAY_MS, 0) }));
     expect(row.status).toBe('shadow');

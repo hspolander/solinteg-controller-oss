@@ -419,10 +419,15 @@ export interface DispatchEconomics {
  *
  * `dispatch` may be a prefix of a longer trajectory's slots (e.g. the first-day slice of a
  * 48 h oracle run); only `dispatch.length` slots are valued.
+ *
+ * Only `socAfter` is read, and the parameter says so: the oracle also prices the trajectory the
+ * battery ACTUALLY followed (reconstructed from measured SoC — there are no planned flow
+ * attributions for a real day), and inventing zeroed DispatchSlot fields to satisfy the type
+ * would be a lie about data we don't have.
  */
 export function evaluateDispatch(
   slots: OptimizerSlot[],
-  dispatch: DispatchSlot[],
+  dispatch: Pick<DispatchSlot, 'socAfter'>[],
   startSoc: number,
 ): DispatchEconomics {
   let cashOre = 0;

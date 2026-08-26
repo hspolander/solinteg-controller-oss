@@ -439,13 +439,21 @@ export function computeOracleDay(inputs: OracleDayInputs): OracleDayRow {
   // (Δ = 0 across the gap) — consistent with the coverage flagging above.
   let achievedWearOre = 0;
   let prevSoc = startSoc.soc;
+  /** The trajectory the battery ACTUALLY followed, in the shape evaluateDispatch prices.
+   *  A boundary with no reading repeats the last known SoC, so the Δ across a gap is counted
+   *  once at the next real boundary — identical to the wear walk it shares this loop with. */
+  const achievedTrajectory: { socAfter: number }[] = [];
   for (let i = 1; i <= nD; i++) {
     const b = socAtInstant(soc, dayStartMs + i * SLOT_MS);
     if (b) {
       achievedWearOre += BATTERY_WEAR_COST_ORE_PER_KWH * Math.abs(b.soc - prevSoc);
       prevSoc = b.soc;
     }
+    achievedTrajectory.push({ socAfter: prevSoc });
   }
+
+  // Day D's real trajectory priced on the model's own basis (see diagnostics.accounting below).
+  const achievedModelCashOre = evaluateDispatch(slotsD, achievedTrajectory, startSoc.soc).cashOre;
 
   // Intraday: best possible day D forced to end where the real day ended. The target comes
   // from a real trajectory under the same physics, so it is reachable by construction; guard
@@ -484,6 +492,27 @@ export function computeOracleDay(inputs: OracleDayInputs): OracleDayRow {
     deltaSocKwh: round3(endSoc.soc - startSoc.soc),
     residualKwh: round3(residualKwh),
     residualFrac: pvD + impD > 0 ? round3(residualKwh / (pvD + impD)) : null,
+  };
+
+  // Model-vs-meter accounting gap — the answer to "can the oracle confirmation-bias itself?".
+  // The regret comparison prices the oracle and constrained trajectories with evaluateDispatch
+  // on 15-min slot means, but the achieved side is the meter's own cash, so any arithmetic
+  // divergence between those two bases lands inside regretIntraday and is indistinguishable
+  // there from real, recoverable timing loss. Pricing the trajectory the battery ACTUALLY
+  // followed on the MODEL's basis isolates it: this cash should equal achievedCashOre, and
+  // whatever it doesn't is accounting rather than money.
+  //
+  // Expect this to be systematically POSITIVE here, by roughly balance.residualKwh × the day's
+  // buy/sell spread: the model re-dispatches the raw DC-side pv the meters never fully saw, so
+  // it plays with energy the real day didn't have. Two smaller effects push the same way —
+  // evaluateDispatch scores self-consumption as min(slot-mean solar, slot-mean load), which
+  // overstates it against a reading-cadence meter. Watch your own install's mean over a few
+  // weeks and treat a drift, not the level, as the alarm; if the level is a large fraction of
+  // regretIntraday, that column is measuring arithmetic more than dispatch quality.
+  diagnostics.accounting = {
+    modelCashOre: round1(achievedModelCashOre),
+    meterCashOre: round1(inputs.achievedCashOre),
+    gapOre: round1(achievedModelCashOre - inputs.achievedCashOre),
   };
 
   const degraded =
