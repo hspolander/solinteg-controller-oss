@@ -7,6 +7,7 @@ import {
   baselineCashOre,
   toOptimizerSlots,
   computeOracleDay,
+  windowEnergyBalance,
 } from '../oracle';
 import type { OracleReadingRow, ArmedEventRow, OracleDayInputs } from '../oracle';
 import { BATTERY_KWH, BATTERY_MIN_SOC_KWH, GRID_KW, BATTERY_MAX_KW } from '../optimizer';
@@ -112,6 +113,85 @@ describe('bucketActuals', () => {
     const a = bucketActuals(readings, dstDay, 92);
     expect(a.coverage).toBe(1);
     expect(a.solarKwh.every((k) => Math.abs(k - 1.0) < 1e-6)).toBe(true);
+  });
+});
+
+describe('windowEnergyBalance', () => {
+  // 4 slots (1 h). Helper: constant-rate actuals with a straight-line SoC ramp.
+  const actuals = (pv: number, load: number, imp: number, exp: number) => ({
+    solarKwh: [pv / 4, pv / 4, pv / 4, pv / 4],
+    loadKwh: [load / 4, load / 4, load / 4, load / 4],
+    importKwh: [imp / 4, imp / 4, imp / 4, imp / 4],
+    exportKwh: [exp / 4, exp / 4, exp / 4, exp / 4],
+    coverage: 1,
+    interpolatedSlots: 0,
+    zeroFilledSlots: 0,
+  });
+  const socRamp = (from: number, to: number) =>
+    Array.from({ length: 5 }, (_, i) => ({ t: DAY_MS + i * SLOT_MS, soc: from + ((to - from) * i) / 4 }));
+
+  it('closes a pure DC→AC loss into the solar derate (battery idle)', () => {
+    // pv 10 in, only 9.7 reached the AC bus: load 4 + export 5.7, SoC flat → residual 0.3.
+    const b = windowEnergyBalance(actuals(10, 4, 0, 5.7), socRamp(10, 10), DAY_MS, 4);
+    expect(b.residualKwh).toBeCloseTo(0.3, 6);
+    expect(b.modeledBatteryLossKwh).toBeCloseTo(0, 6);
+    expect(b.unmodeledLossKwh).toBeCloseTo(0.3, 6);
+    expect(b.solarDerate).toBeCloseTo(1 - 0.3 / 10, 6);
+  });
+
+  it('a residual explained by modeled battery losses leaves solar untouched', () => {
+    // Charge 2.45 kWh into the pack from solar at the modeled η: AC side spends 2.45/η = 2.5.
+    // pv 10 → load 4 + export 3.5 + charge 2.5(AC), ΔSoC +2.45 → residual = 0.05 = modeled loss.
+    const b = windowEnergyBalance(actuals(10, 4, 0, 3.5), socRamp(10, 12.45), DAY_MS, 4);
+    expect(b.residualKwh).toBeCloseTo(0.05, 3);
+    expect(b.modeledBatteryLossKwh).toBeCloseTo(2.45 * (1 / ONE_WAY_EFF - 1), 3);
+    expect(b.unmodeledLossKwh as number).toBeCloseTo(0, 2);
+    expect(b.solarDerate).toBeGreaterThan(0.999);
+  });
+
+  it('never inflates solar on a negative residual, and floors a broken day at 0.9', () => {
+    // Negative residual (SoC estimator drift): more energy showed up than pv+imp provided.
+    const neg = windowEnergyBalance(actuals(10, 4, 0, 7), socRamp(10, 10), DAY_MS, 4);
+    expect(neg.residualKwh).toBeCloseTo(-1, 6);
+    expect(neg.solarDerate).toBe(1);
+    // Absurd residual (broken data): clamp at the floor rather than absorbing it.
+    const broken = windowEnergyBalance(actuals(10, 4, 0, 1), socRamp(10, 12), DAY_MS, 4);
+    expect(broken.solarDerate).toBe(0.9);
+  });
+
+  it('reports whether the closure actually closed', () => {
+    // Healthy: the whole unmodeled residual fits inside the derate, so nothing is left over.
+    const ok = windowEnergyBalance(actuals(10, 4, 0, 5.7), socRamp(10, 10), DAY_MS, 4);
+    expect(ok.derateClamped).toBe(false);
+    expect(ok.closureSkippedLowPv).toBe(false);
+    expect(ok.unclosedLossKwh as number).toBeCloseTo(0, 6);
+
+    // Clamped: residual 3 kWh on 10 kWh pv wants a 0.70 derate; the floor absorbs only 1 kWh
+    // of it, so ~1.96 kWh is still unexplained and the day is scored on an open balance.
+    const clamped = windowEnergyBalance(actuals(10, 4, 0, 1), socRamp(10, 12), DAY_MS, 4);
+    expect(clamped.solarDerate).toBe(0.9);
+    expect(clamped.derateClamped).toBe(true);
+    expect(clamped.closureSkippedLowPv).toBe(false);
+    expect(clamped.unclosedLossKwh as number).toBeCloseTo(
+      (clamped.unmodeledLossKwh as number) - 0.1 * 10,
+      6,
+    );
+
+    // Below BALANCE_MIN_PV_KWH nothing is attempted, so all of it is unclosed — and that is a
+    // different cause from the clamp, which is why the two flags are separate.
+    const lowPv = windowEnergyBalance(actuals(0.5, 4, 4, 0), socRamp(10, 10), DAY_MS, 4);
+    expect(lowPv.solarDerate).toBe(1);
+    expect(lowPv.derateClamped).toBe(false);
+    expect(lowPv.closureSkippedLowPv).toBe(true);
+    expect(lowPv.unclosedLossKwh as number).toBeCloseTo(0.5, 6);
+  });
+
+  it('skips sun-free windows and windows without SoC anchors', () => {
+    const dark = windowEnergyBalance(actuals(0.5, 4, 4, 0), socRamp(10, 10), DAY_MS, 4);
+    expect(dark.solarDerate).toBe(1); // pv below BALANCE_MIN_PV_KWH — nothing to scale
+    const noSoc = windowEnergyBalance(actuals(10, 4, 0, 5.7), [], DAY_MS, 4);
+    expect(noSoc.residualKwh).toBeNull();
+    expect(noSoc.solarDerate).toBe(1);
   });
 });
 

@@ -32,6 +32,14 @@
  *
  * A materially NEGATIVE regret is a diagnostic, not noise: it means the model's physics
  * (RT_EFF, caps, wear basis) diverge from the real inverter's — see diagnostics.balance.
+ * The dominant such divergence is closed before scoring: each window's measured energy-balance
+ * residual (DC-side pv_w vs the AC bus, standby, battery losses beyond the modeled η — on the
+ * reference install systematically +1–3 kWh/day) is removed from the solar series the oracle
+ * re-dispatches, net of the battery losses the DP already models, so the oracle plays with the
+ * energy the real day demonstrably had instead of selling phantom kWh the meters never saw
+ * (see windowEnergyBalance; params.pvDerate records the applied factor). Without this the
+ * oracle's re-dispatch sells energy that never existed at the day's best prices, and regret is
+ * inflated by roughly the residual × the day's price spread.
  *
  * Everything is valued through evaluateDispatch (the DP's own arithmetic) with the same
  * buy/sell definitions economics.ts uses, so the comparison can't drift apart in accounting.
@@ -279,6 +287,134 @@ export function socSeries(readings: OracleReadingRow[]): { t: number; soc: numbe
   return pts; // readings arrive ORDER BY timestamp, so this is already sorted
 }
 
+// ── Energy-balance closure ──────────────────────────────────────────────────────
+
+const ONE_WAY_EFF = Math.sqrt(BATTERY_RT_EFF);
+/** Below this much window pv there is nothing meaningful to scale — the leftover
+ *  (standby-sized) residual stays visible in diagnostics.balance instead. */
+const BALANCE_MIN_PV_KWH = 2;
+/** A correction past this is broken input data (BMS SoC recalibration jump, meter fault),
+ *  not physics — refuse to silently absorb it. When it binds, the window is scored with an
+ *  energy balance that does NOT close, so it is reported via WindowBalance.derateClamped /
+ *  unclosedLossKwh rather than left to be inferred from solarDerate (0.9 is also a legal
+ *  value for a genuinely lossy day) — status stays 'ok', deliberately: see the note in
+ *  computeOracleDay's diagnostics.balance. */
+const BALANCE_DERATE_FLOOR = 0.9;
+
+export interface WindowBalance {
+  pvKwh: number;
+  importKwh: number;
+  loadKwh: number;
+  exportKwh: number;
+  deltaSocKwh: number | null;
+  residualKwh: number | null;
+  /** Battery leg losses the DP's own arithmetic already models, computed on the REAL SoC
+   *  trajectory: charge legs at 1/η−1, discharge legs at 1−η (pack-side view of an AC-side
+   *  per-leg η) over the window's slot-boundary SoC deltas. */
+  modeledBatteryLossKwh: number;
+  unmodeledLossKwh: number | null;
+  solarDerate: number;
+  /** Model-unexplained energy the derate did NOT absorb (kWh, ≥ 0). Non-zero means this
+   *  window was scored with an energy balance that does not close, so its regret carries
+   *  that much phantom/missing energy at the day's prices. */
+  unclosedLossKwh: number | null;
+  /** The derate wanted to correct more than BALANCE_DERATE_FLOOR allows and was clamped. */
+  derateClamped: boolean;
+  /** pv below BALANCE_MIN_PV_KWH, so no closure was attempted at all. */
+  closureSkippedLowPv: boolean;
+}
+
+/**
+ * Measure a window's energy balance and the solar derate that closes its MODEL-UNEXPLAINED
+ * share. `residual = pv + import − load − export − ΔSoC` captures every loss the meters saw
+ * (systematically +1–3 kWh/day here, first measured 2026-07-13); feeding the oracle raw
+ * DC-side pv_w (register 11028) hands its re-dispatch that much phantom energy to sell at
+ * each day's best prices, while the achieved side is real meter cash — regret was inflated
+ * by roughly the residual × price spread.
+ *
+ * Only the loss BEYOND the DP's own physics is phantom, though: the DP already charges
+ * battery legs at ONE_WAY_EFF on whatever trajectory it evaluates, so the modeled share of
+ * the real trajectory's battery losses must NOT be closed out of the solar series too —
+ * closing the full residual would over-correct cycling-heavy days by about the same margin
+ * in the other direction. A global fitted derate was rejected for the same reason:
+ * residual/pv ranged 0.9–3.5% across the first ten scored days precisely because the battery
+ * share varies with cycling, so a pv-proportional constant systematically under-corrects the
+ * armed, high-throughput days the 07-23 review most cares about.
+ *
+ * The derate never inflates solar (a negative unmodeled residual is SoC-estimator drift, not
+ * free energy) and never absorbs more than 10% (BALANCE_DERATE_FLOOR — a correction that big
+ * is broken data). Both refusals — the clamp, and skipping windows under BALANCE_MIN_PV_KWH —
+ * leave the window scored on a balance that does not close, so each is reported explicitly
+ * (`derateClamped`, `closureSkippedLowPv`, `unclosedLossKwh`) instead of being inferable only
+ * from the derate value. Missing SoC anchors ⇒ derate 1 and null residual: scoring proceeds
+ * exactly as before this existed.
+ */
+export function windowEnergyBalance(
+  actuals: SlotActuals,
+  soc: { t: number; soc: number }[],
+  windowStartMs: number,
+  slotCount: number,
+): WindowBalance {
+  const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
+  const pvKwh = sum(actuals.solarKwh);
+  const importKwh = sum(actuals.importKwh);
+  const loadKwh = sum(actuals.loadKwh);
+  const exportKwh = sum(actuals.exportKwh);
+
+  const socStart = socAtInstant(soc, windowStartMs);
+  const socEnd = socAtInstant(soc, windowStartMs + slotCount * SLOT_MS);
+
+  // Modeled battery losses over the real trajectory — same boundary walk (and the same
+  // carry-last-value-across-gaps semantics) as the achieved-wear computation below.
+  let chgPackKwh = 0;
+  let disPackKwh = 0;
+  if (socStart && socEnd) {
+    let prev = socStart.soc;
+    for (let i = 1; i <= slotCount; i++) {
+      const b = socAtInstant(soc, windowStartMs + i * SLOT_MS);
+      if (b) {
+        const delta = b.soc - prev;
+        if (delta > 0) chgPackKwh += delta;
+        else disPackKwh += -delta;
+        prev = b.soc;
+      }
+    }
+  }
+  const modeledBatteryLossKwh =
+    chgPackKwh * (1 / ONE_WAY_EFF - 1) + disPackKwh * (1 - ONE_WAY_EFF);
+
+  if (!socStart || !socEnd) {
+    return {
+      pvKwh, importKwh, loadKwh, exportKwh,
+      deltaSocKwh: null, residualKwh: null,
+      modeledBatteryLossKwh, unmodeledLossKwh: null, solarDerate: 1,
+      unclosedLossKwh: null, derateClamped: false, closureSkippedLowPv: false,
+    };
+  }
+
+  const deltaSocKwh = socEnd.soc - socStart.soc;
+  const residualKwh = pvKwh + importKwh - loadKwh - exportKwh - deltaSocKwh;
+  const unmodeledLossKwh = residualKwh - modeledBatteryLossKwh;
+  // The factor that would close the balance exactly, before either guard applies. Keeping it
+  // separate is what makes "the closure was refused" observable instead of inferable — a
+  // clamped or skipped window looks identical to a healthy one in solarDerate alone (0.9 is a
+  // legal value for a genuinely lossy day), and 2026-07-25 was scored 'ok' on a clamped derate
+  // with nothing in the row saying so.
+  const closureSkippedLowPv = pvKwh < BALANCE_MIN_PV_KWH;
+  const wantedDerate = pvKwh > 0 ? 1 - Math.max(0, unmodeledLossKwh) / pvKwh : 1;
+  const solarDerate = closureSkippedLowPv
+    ? 1
+    : Math.max(BALANCE_DERATE_FLOOR, Math.min(1, wantedDerate));
+  const derateClamped = !closureSkippedLowPv && wantedDerate < BALANCE_DERATE_FLOOR;
+
+  return {
+    pvKwh, importKwh, loadKwh, exportKwh,
+    deltaSocKwh, residualKwh, modeledBatteryLossKwh, unmodeledLossKwh, solarDerate,
+    unclosedLossKwh: Math.max(0, Math.max(0, unmodeledLossKwh) - (1 - solarDerate) * pvKwh),
+    derateClamped, closureSkippedLowPv,
+  };
+}
+
 // ── Armed coverage ────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -370,6 +506,15 @@ export function computeOracleDay(inputs: OracleDayInputs): OracleDayRow {
   const startSoc = socAtInstant(soc, dayStartMs);
   const endSoc = socAtInstant(soc, dayEndMs);
   const armed = armedStats(armedEvents, dayStartMs, dayEndMs);
+
+  // Close each window's model-unexplained energy loss into its solar series BEFORE any slot
+  // is built, so the oracle re-dispatches the energy the real day demonstrably had (see
+  // windowEnergyBalance). Raw sums are kept for diagnostics.balance below.
+  const balD = windowEnergyBalance(actualsD, soc, dayStartMs, nD);
+  const balCont = windowEnergyBalance(actualsCont, soc, dayEndMs, priceSlotsCont.length);
+  if (balD.solarDerate !== 1) actualsD.solarKwh = actualsD.solarKwh.map((s) => s * balD.solarDerate);
+  if (balCont.solarDerate !== 1) actualsCont.solarKwh = actualsCont.solarKwh.map((s) => s * balCont.solarDerate);
+  params.pvDerate = Math.round(balD.solarDerate * 10000) / 10000;
 
   const slotsD = toOptimizerSlots(priceSlotsD, actualsD);
   const baselineNetOre = baselineCashOre(slotsD);
@@ -474,24 +619,35 @@ export function computeOracleDay(inputs: OracleDayInputs): OracleDayRow {
     constrainedValueOre !== null ? constrainedValueOre - achievedDayValueOre : null;
   const regretCarryOre = regretIntradayOre !== null ? regretOre - regretIntradayOre : null;
 
-  // Day-D energy-balance residual: pv + import − load − export − ΔSoC. Systematically nonzero
-  // ⇒ the model's physics (DC-side pv_w, RT_EFF, derived load) drift from the real meter —
-  // exactly the case where small negative regrets stop being noise. In kWh and as a fraction
-  // of throughput.
-  const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
-  const pvD = sum(actualsD.solarKwh);
-  const impD = sum(actualsD.importKwh);
-  const loadD = sum(actualsD.loadKwh);
-  const expD = sum(actualsD.exportKwh);
-  const residualKwh = pvD + impD - loadD - expD - (endSoc.soc - startSoc.soc);
+  // Day-D energy balance, RAW (pre-derate) — the measured physics gap this scoring run
+  // closed into the solar series (see windowEnergyBalance). residualKwh stays the raw
+  // observable; unmodeledLossKwh is the share actually absorbed via solarDerate, so a
+  // residual explained by modeled battery losses shows up here as derate ≈ 1, not as a
+  // scoring change.
   diagnostics.balance = {
-    pvKwh: round3(pvD),
-    importKwh: round3(impD),
-    loadKwh: round3(loadD),
-    exportKwh: round3(expD),
-    deltaSocKwh: round3(endSoc.soc - startSoc.soc),
-    residualKwh: round3(residualKwh),
-    residualFrac: pvD + impD > 0 ? round3(residualKwh / (pvD + impD)) : null,
+    pvKwh: round3(balD.pvKwh),
+    importKwh: round3(balD.importKwh),
+    loadKwh: round3(balD.loadKwh),
+    exportKwh: round3(balD.exportKwh),
+    deltaSocKwh: balD.deltaSocKwh === null ? null : round3(balD.deltaSocKwh),
+    residualKwh: balD.residualKwh === null ? null : round3(balD.residualKwh),
+    residualFrac:
+      balD.residualKwh !== null && balD.pvKwh + balD.importKwh > 0
+        ? round3(balD.residualKwh / (balD.pvKwh + balD.importKwh))
+        : null,
+    modeledBatteryLossKwh: round3(balD.modeledBatteryLossKwh),
+    unmodeledLossKwh: balD.unmodeledLossKwh === null ? null : round3(balD.unmodeledLossKwh),
+    solarDerate: Math.round(balD.solarDerate * 10000) / 10000,
+    solarDerateCont: Math.round(balCont.solarDerate * 10000) / 10000,
+    // Whether the closure actually closed. status stays 'ok' when it didn't: 'degraded' would
+    // drop such days out of the headline set, and how often either refusal binds is
+    // install-specific and not worth guessing at. Filter on these before quoting a low-pv
+    // day's regret — solarDerate alone can't tell you, since 0.9 is also a legal value for a
+    // genuinely lossy day.
+    unclosedLossKwh: balD.unclosedLossKwh === null ? null : round3(balD.unclosedLossKwh),
+    derateClamped: balD.derateClamped,
+    closureSkippedLowPv: balD.closureSkippedLowPv,
+    unclosedLossContKwh: balCont.unclosedLossKwh === null ? null : round3(balCont.unclosedLossKwh),
   };
 
   // Model-vs-meter accounting gap — the answer to "can the oracle confirmation-bias itself?".
@@ -502,12 +658,12 @@ export function computeOracleDay(inputs: OracleDayInputs): OracleDayRow {
   // followed on the MODEL's basis isolates it: this cash should equal achievedCashOre, and
   // whatever it doesn't is accounting rather than money.
   //
-  // Expect this to be systematically POSITIVE here, by roughly balance.residualKwh × the day's
-  // buy/sell spread: the model re-dispatches the raw DC-side pv the meters never fully saw, so
-  // it plays with energy the real day didn't have. Two smaller effects push the same way —
-  // evaluateDispatch scores self-consumption as min(slot-mean solar, slot-mean load), which
-  // overstates it against a reading-cadence meter. Watch your own install's mean over a few
-  // weeks and treat a drift, not the level, as the alarm; if the level is a large fraction of
+  // Two biases sit inside this and largely cancel: evaluateDispatch scores self-consumption as
+  // min(slot-mean solar, slot-mean load), which overstates it against a reading-cadence meter
+  // (on the reference install ~0.4 kWh/day, worth ~0.36 kr), while the energy-balance closure
+  // above removes about as much solar back out. Measured there at +0.07 kr/day mean against a
+  // 1.47 kr/day intraday regret, i.e. ~5%. Watch your own install's mean over a few weeks and
+  // treat a DRIFT, not the level, as the alarm; if the level ever becomes a large fraction of
   // regretIntraday, that column is measuring arithmetic more than dispatch quality.
   diagnostics.accounting = {
     modelCashOre: round1(achievedModelCashOre),
