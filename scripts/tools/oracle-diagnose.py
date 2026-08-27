@@ -11,7 +11,7 @@ from zero and the previous review's NULL results (the most reusable part) surviv
 This script is that analysis, committed: one command, output directly comparable to the baselines
 printed inline below.
 
-It reports four things:
+It reports five things:
 
   1. CAPTURE RATIO — regret as a share of the perfect-foresight prize, pooled over the window.
      Regret in kr/day is confounded by price level (corr +0.35 with the day's buy spread over
@@ -23,11 +23,17 @@ It reports four things:
      (`oracle_day_cash − oracle_day_wear − baseline_net`), so both a total-regret and a
      scope-matched intraday-only percentage are printed; they differ by ~1.4 points because
      total regret also carries the cost of the SoC handed to D+1.
-  2. HOUR-OF-DAY CASH — the oracle's day-D grid cash minus what actually happened, by Stockholm
+  2. LOSS CONCENTRATION — the tail, because the pooled ratio above and any per-day mean are
+     both averages and are silent on it. Losses here are not spread evenly: over
+     2026-07-04..08-25, 30% of days carried 55% of the total. An average says whether the
+     dispatcher is competent; only the tail says what the exposure is, and those are different
+     questions with different answers. Note especially that a summer window CANNOT bound the
+     winter tail — see the exposure-ceiling line, which is why this section exists at all.
+  3. HOUR-OF-DAY CASH — the oracle's day-D grid cash minus what actually happened, by Stockholm
      hour. This is what shows the shape of the gap (which hours it lives in) rather than its size.
-  3. HOUR-OF-DAY SoC — oracle trajectory minus measured trajectory, same buckets. Says whether
+  4. HOUR-OF-DAY SoC — oracle trajectory minus measured trajectory, same buckets. Says whether
      the oracle was holding or spending relative to reality when it earned the difference.
-  4. CORRELATIONS — intraday regret against the candidate explanations, so a hypothesis gets
+  5. CORRELATIONS — intraday regret against the candidate explanations, so a hypothesis gets
      falsified in one run instead of over an afternoon. The 2026-08-24 baseline killed four:
      battery saturation, day-ahead solar error, load error, and (weakly) start SoC. Print your
      own numbers next to those before believing a new story about the same data.
@@ -58,7 +64,7 @@ Usage (on the host, or against a pulled copy of telemetry.db — if the deployme
 not readable by your login, dump the columns these queries select and rebuild a local copy
 rather than loosening permissions on the live database):
   python3 scripts/tools/oracle-diagnose.py [--db PATH] [--from 2026-07-20] [--to 2026-08-22]
-      [--min-prize 50] [--battery-kwh 25.6] [--min-days 14]
+      [--min-prize 50] [--battery-kwh 25.6] [--min-days 14] [--tail-threshold 2.0]
 """
 import argparse
 import json
@@ -88,6 +94,11 @@ BASELINE = {
     "captured_pct": 91.6,        # on TOTAL regret; 93.0% on intraday alone (see the note below)
     "captured_intraday_pct": 93.0,
     "regret_kr_mean": 1.76,
+    # Tail, not average — see section 2. These are the numbers an average cannot carry, measured
+    # over the 51-day 2026-07-04..08-23 window rather than the 34-day one above (the tail needs
+    # every day it can get, while the capture ratio is stable either way: 91.2% vs 91.6%).
+    "worst_day_kr": 4.83,          # 2026-08-17, on a day whose whole prize was 11.8 kr
+    "top_decile_share_pct": 25.0,  # worst 5 of 51 days = 21.5 of 87.2 kr
     "corr": {
         "hours at >=95% SoC": -0.08,
         "|day-ahead solar err| kWh": +0.02,
@@ -212,6 +223,9 @@ def main() -> int:
                     help=f"capacity for the 'battery full' threshold "
                          f"(default $SOLINTEG_BATTERY_KWH, else {DEFAULT_BATTERY_KWH})")
     ap.add_argument("--min-days", type=int, default=14, help="minimum usable days before reporting")
+    ap.add_argument("--tail-threshold", type=float, default=2.0,
+                    help="kr: count/sum days costing more than this in the loss-concentration "
+                         "section (default 2.0, sized for summer spreads — raise it in winter)")
     args = ap.parse_args()
     battery_kwh = args.battery_kwh or float(
         os.environ.get("SOLINTEG_BATTERY_KWH", DEFAULT_BATTERY_KWH))
@@ -273,7 +287,52 @@ def main() -> int:
     print(f"   regret kr/day: mean {st.mean(regrets):.2f}  median {st.median(regrets):.2f}"
           f"  [baseline mean {BASELINE['regret_kr_mean']:.2f}]")
 
-    # ── 2 & 3. hour-of-day cash and SoC ──────────────────────────────────────────────────────
+    # ── 2. loss concentration ────────────────────────────────────────────────────────────────
+    # Everything above this point is an average, and averages are the wrong summary for a loss
+    # distribution: they answer "are we competent" and say nothing about "what can one bad day
+    # cost". Both matter, and on this data they give different answers.
+    by_loss = sorted(kept, key=lambda kp: -(kp[0]["regret_ore"] or 0))
+    total_loss = sum(max(0, d["regret_ore"]) for d, _ in kept) / 100
+    top_n = max(1, round(len(kept) * 0.1))
+    top_sum = sum(max(0, d["regret_ore"]) for d, _ in by_loss[:top_n]) / 100
+    over = [(d, p) for d, p in kept if (d["regret_ore"] or 0) > args.tail_threshold * 100]
+    over_sum = sum(d["regret_ore"] for d, _ in over) / 100
+
+    print("\n2. LOSS CONCENTRATION — what the averages above hide")
+    print(f"   total lost {total_loss:.1f} kr over {len(kept)} days")
+    print(f"   worst {top_n} days (top 10%) account for {top_sum:.1f} kr = "
+          f"{100 * top_sum / total_loss:.0f}% of it"
+          f"   [2026-08-25 baseline: {BASELINE['top_decile_share_pct']:.0f}%]")
+    print(f"   {len(over)} of {len(kept)} days cost more than {args.tail_threshold:.1f} kr, "
+          f"totalling {over_sum:.1f} kr ({100 * over_sum / total_loss:.0f}%)")
+    print("   worst five:")
+    for d, p in by_loss[:5]:
+        print(f"     {d['date']}  {d['regret_ore']/100:6.2f} kr   intraday "
+              f"{(d['regret_intraday_ore'] or 0)/100:5.2f}  carry "
+              f"{(d['regret_ore'] - (d['regret_intraday_ore'] or 0))/100:5.2f}"
+              f"   (prize {p/100:.1f} kr)")
+    print(f"   [baseline worst single day: {BASELINE['worst_day_kr']:.2f} kr]")
+
+    # The number a summer window cannot give you. Carry regret is roughly (energy held wrongly) ×
+    # (how badly it was mis-valued per kWh); the first term is capped by the pack, the second by
+    # the day's price spread. So the WORST CASE scales with spread, and a mild-spread window's
+    # own tail says nothing about a volatile one's. This is deliberately a crude arithmetic
+    # bound, NOT a forecast and not something observed — it exists to stop "worst observed was
+    # small" being read as "our exposure is small".
+    spreads = []
+    for d, _ in kept:
+        buys = [s["buyPrice"] for s in day_ahead.get(d["date"], [])
+                if s["startTime"].startswith(d["date"])]
+        if buys:
+            spreads.append(max(buys) - min(buys))
+    if spreads:
+        usable = battery_kwh * 0.92  # above an 8% floor; see SOLINTEG_SOC_FLOOR_PCT
+        print(f"   exposure ceiling (crude): a fully mis-valued carry at this window's worst "
+              f"spread\n     ({max(spreads):.0f} öre/kWh) would cost ~{usable * max(spreads) / 100:.0f} kr "
+              f"in ONE day. Widest observed spread scales this;\n     a winter window will "
+              f"produce a much larger number than any summer tail shows.")
+
+    # ── 3 & 4. hour-of-day cash and SoC ──────────────────────────────────────────────────────
     cash = defaultdict(lambda: [0.0, 0.0])  # local hour -> [oracle kr, actual kr]
     socd = defaultdict(lambda: [0.0, 0])    # local hour -> [sum(oracle - actual) kWh, n]
     for d, _ in kept:
@@ -303,7 +362,7 @@ def main() -> int:
                 sd[1] += 1
 
     n = len(kept)
-    print("\n2. HOUR-OF-DAY day-D grid cash, mean kr/day (oracle - actual: where the gap lives)")
+    print("\n3. HOUR-OF-DAY day-D grid cash, mean kr/day (oracle - actual: where the gap lives)")
     print(f"   {'hour':6}{'oracle':>9}{'actual':>9}{'delta':>9}")
     tot = [0.0, 0.0]
     for h in sorted(cash):
@@ -314,14 +373,14 @@ def main() -> int:
     print(f"   TOTAL{tot[0]:9.2f}{tot[1]:9.2f}{tot[0]-tot[1]:+9.2f}"
           "   (the carry credit repays part of this — see regret_carry_ore)")
 
-    print("\n3. HOUR-OF-DAY SoC, mean kWh (oracle - actual: + = oracle held more, - = spent more)")
+    print("\n4. HOUR-OF-DAY SoC, mean kWh (oracle - actual: + = oracle held more, - = spent more)")
     for h in sorted(socd):
         if not socd[h][1]:
             continue
         v = socd[h][0] / socd[h][1]
         print(f"   {h:02d}:00  {v:+6.2f}  {('+' if v >= 0 else '-') * min(30, int(abs(v) * 6))}")
 
-    # ── 4. correlations ──────────────────────────────────────────────────────────────────────
+    # ── 5. correlations ──────────────────────────────────────────────────────────────────────
     names = ["hours at >=95% SoC", "|day-ahead solar err| kWh", "|day-ahead load err| kWh",
              "buy spread (öre)", "midday export kWh (11-17h)", "start SoC kWh"]
     feats = {k: [] for k in names}
@@ -357,7 +416,7 @@ def main() -> int:
         feats["midday export kWh (11-17h)"].append(mid_exp)
         feats["start SoC kWh"].append(d["start_soc_kwh"] or 0.0)
 
-    print(f"\n4. WHAT EXPLAINS INTRADAY REGRET? (n={len(y)} days; |r| < 0.4 here means "
+    print(f"\n5. WHAT EXPLAINS INTRADAY REGRET? (n={len(y)} days; |r| < 0.4 here means "
           '"not the explanation")')
     for name in names:
         r = corr(feats[name], y)
