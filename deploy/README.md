@@ -288,8 +288,16 @@ pulling the backups directory over Tailscale, e.g.:
 rsync -av <you>@<your-node>.<your-tailnet>.ts.net:/opt/solinteg/backups/ ./solinteg-backups/
 ```
 
-Snapshots are gzipped (`telemetry-*.db.gz`, since 2026-09-03) — telemetry rows compress to about
-a quarter of their size. To restore one: `gunzip -c telemetry-<stamp>.db.gz > telemetry.db`.
+Snapshots are gzipped (`telemetry-*.db.gz`, since 2026-09-03). Measured on the reference
+deployment 2026-09-04: a 364 MB `telemetry.db` gzips to 43 MB — **11.9%, an 8.4x reduction**. To
+restore one: `gunzip -c telemetry-<stamp>.db.gz > telemetry.db`.
+
+**Size the retention against your own DB, not against this figure.** An earlier version of this
+guide claimed nightly backups "run tens of MB … so 10 GB is years of headroom". At 364 MB per
+snapshot, 21 kept is **6.4 GB — two thirds of Backblaze's free tier before a single old version
+accumulates**, growing 121 MB/day. Compressed, the same 21 come to ~0.9 GB. The B2 cap the
+reference deployment hit had two independent causes and this was one of them; the hidden-version
+bug below was the other.
 
 **No other always-on machine? `solinteg-backup-offsite.timer` mirrors to a cloud remote
 instead**, via `rclone` — free and automated, no second machine needed. Backblaze B2's free tier
