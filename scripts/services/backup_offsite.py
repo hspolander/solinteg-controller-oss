@@ -14,8 +14,24 @@ systemd's EnvironmentFile=. E.g. for a remote named "b2" referenced as RCLONE_OF
   RCLONE_CONFIG_B2_ACCOUNT=<application key id>
   RCLONE_CONFIG_B2_KEY=<application key>
 
-Uses `rclone sync` (not `copy`), so the remote mirrors BACKUP_DIR's own rotation — nothing
-accumulates offsite beyond what's already kept locally.
+Uses `rclone sync` (not `copy`), so the remote mirrors BACKUP_DIR's own rotation.
+
+ON BACKBLAZE B2 THAT IS NOT ENOUGH BY ITSELF, and this file used to claim otherwise. B2 buckets
+are versioned, and rclone's B2 backend HIDES a deleted file rather than removing it — the bytes
+stay, and stay billable, forever. So the nightly rotation looked like a steady 21 files while the
+bucket actually grew by one whole snapshot every night. The reference deployment hit 100 % of the
+free 10 GB storage cap on 2026-09-03 this way, with a bucket that listed 21 files.
+
+Two things are needed, and only together:
+
+  1. `--b2-hard-delete` below, so rclone deletes versions instead of hiding them. Stops the
+     growth, but does nothing about versions already accumulated.
+  2. A LIFECYCLE RULE on the bucket — "Keep only the last version of the file" in the B2
+     console. This is what actually reclaims the backlog, and it cannot be set from here: the
+     credentials live in solinteg.env and are root-only by design. See deploy/README.md §12d.
+
+The flag is applied only when the destination really is a B2 remote, so this file stays honest
+for the other backends rclone supports.
 
 Environment:
   BACKUP_DIR           source directory (default /opt/solinteg/backups)
@@ -37,6 +53,19 @@ RCLONE_OFFSITE_DEST = os.environ.get("RCLONE_OFFSITE_DEST", "")
 RCLONE_BIN = os.environ.get("RCLONE_BIN", "rclone")
 
 
+def is_b2_dest(dest: str) -> bool:
+    """True when `dest` names an rclone remote configured as type b2.
+
+    The remote's type comes from the same RCLONE_CONFIG_<NAME>_TYPE variable rclone itself reads,
+    so this cannot disagree with what rclone will actually do. A bare local path (no colon, or a
+    remote with no configured type) is not B2.
+    """
+    remote, _, _ = dest.partition(":")
+    if not remote or ":" not in dest:
+        return False
+    return os.environ.get(f"RCLONE_CONFIG_{remote.upper()}_TYPE", "").strip().lower() == "b2"
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -44,9 +73,13 @@ def main() -> int:
         log.warning("RCLONE_OFFSITE_DEST not set — skipping offsite sync")
         return 0
 
+    # See the module docstring: without this, every rotated-out snapshot lives on as a hidden
+    # version and the bucket grows without bound.
+    flags = ["--b2-hard-delete"] if is_b2_dest(RCLONE_OFFSITE_DEST) else []
+
     try:
         result = subprocess.run(
-            [RCLONE_BIN, "sync", BACKUP_DIR, RCLONE_OFFSITE_DEST],
+            [RCLONE_BIN, "sync", *flags, BACKUP_DIR, RCLONE_OFFSITE_DEST],
             capture_output=True, text=True, timeout=600,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -63,7 +96,10 @@ def main() -> int:
         )
         return 1
 
-    log.info("offsite sync ok: %s -> %s", BACKUP_DIR, RCLONE_OFFSITE_DEST)
+    log.info(
+        "offsite sync ok: %s -> %s%s",
+        BACKUP_DIR, RCLONE_OFFSITE_DEST, " (hard-delete)" if flags else "",
+    )
     return 0
 
 

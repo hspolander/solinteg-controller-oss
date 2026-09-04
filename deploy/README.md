@@ -279,7 +279,7 @@ sudo cp deploy/solinteg-backup.service deploy/solinteg-backup.timer /etc/systemd
 sudo systemctl daemon-reload
 sudo systemctl enable --now solinteg-backup.timer
 sudo systemctl start solinteg-backup.service   # fire once now to test
-ls -la /opt/solinteg/backups                   # should show telemetry-*.db + solinteg.env-*.bak
+ls -la /opt/solinteg/backups                   # should show telemetry-*.db.gz + solinteg.env-*.bak
 ```
 This is LOCAL-only - it protects against DB corruption or a bad query, not a dead disk. If you
 have another always-on machine (a NAS, another PC), the simplest offsite option is periodically
@@ -288,11 +288,20 @@ pulling the backups directory over Tailscale, e.g.:
 rsync -av <you>@<your-node>.<your-tailnet>.ts.net:/opt/solinteg/backups/ ./solinteg-backups/
 ```
 
+Snapshots are gzipped (`telemetry-*.db.gz`, since 2026-09-03) — telemetry rows compress to about
+a quarter of their size. To restore one: `gunzip -c telemetry-<stamp>.db.gz > telemetry.db`.
+
 **No other always-on machine? `solinteg-backup-offsite.timer` mirrors to a cloud remote
 instead**, via `rclone` — free and automated, no second machine needed. Backblaze B2's free tier
-(10 GB storage, 1 GB/day download) is the recommended backend: nightly backups here run tens of
-MB with 21 kept locally, so 10 GB is years of headroom, and its auth is a plain key ID + key (no
-interactive OAuth flow, unlike Google Drive — important since this runs headless).
+(10 GB storage, 1 GB/day download) is the recommended backend, and its auth is a plain key ID +
+key (no interactive OAuth flow, unlike Google Drive — important since this runs headless).
+
+> **B2 needs a lifecycle rule or it fills up regardless of your retention.** This is step 5 below
+> and it is not optional. B2 buckets are versioned, and rclone's B2 backend *hides* a deleted file
+> rather than removing it — so nightly rotation propagates a delete that B2 keeps charging for.
+> The bucket lists 21 files while actually holding every snapshot ever taken. The reference
+> deployment hit 100% of the 10 GB cap this way on 2026-09-03, and the earlier claim here that
+> "10 GB is years of headroom" was wrong for exactly that reason.
 
 Setup:
 1. Create a free Backblaze B2 account, a bucket, and an "application key" scoped to that bucket
@@ -316,21 +325,37 @@ Setup:
    sudo systemctl start solinteg-backup-offsite.service   # fire once now to test
    rclone ls b2:your-bucket-name                          # confirm files landed
    ```
+5. **Set a bucket lifecycle rule — do not skip this.** In the B2 console, open the bucket →
+   **Lifecycle Settings** → **"Keep only the last version of the file."** Without it, every
+   rotated-out snapshot survives as a hidden version and the bucket grows by one snapshot per
+   night forever. Setting the rule is also what *reclaims* an existing backlog, so if you are
+   reading this because you already hit the cap, this is the step that fixes it. Check whether
+   Object Lock is enabled while you are there — if it is, old versions cannot be removed until
+   their retention expires.
+
 It runs at 03:35, after the local backup (03:15) — `rclone sync`, so the remote mirrors
-`BACKUP_DIR`'s own rotation rather than accumulating forever. Alerts via the existing ntfy setup
-on failure (`notify.py`, same as every other unit here). Leave `RCLONE_OFFSITE_DEST` unset to
-skip this layer entirely; the local-only backup still runs either way.
+`BACKUP_DIR`'s own rotation. On a B2 destination the sync also passes `--b2-hard-delete`, so
+deletes are real deletes rather than hides; that stops future accumulation but does nothing about
+versions already there, which is what the lifecycle rule above is for. The flag is applied only
+when `RCLONE_CONFIG_<REMOTE>_TYPE` is `b2`, so other backends are unaffected. Alerts via the
+existing ntfy setup on failure (`notify.py`, same as every other unit here). Leave
+`RCLONE_OFFSITE_DEST` unset to skip this layer entirely; the local-only backup still runs either
+way.
 
 **Restore from the offsite copy** (if the machine itself is gone, not just its disk):
 ```bash
 rclone copy b2:your-bucket-name ./solinteg-backups-restore/
-# then follow the local restore steps below against the newest telemetry-*.db in that folder
+# then follow the local restore steps below against the newest telemetry-*.db.gz in that folder
 ```
 
 **Restore** (only ever tested manually, do this once to be sure it actually works):
 ```bash
 sudo systemctl stop solinteg-web solinteg-poller solinteg-dispatch solinteg-weather
-sudo -u solinteg cp /opt/solinteg/backups/telemetry-<stamp>.db /opt/solinteg/telemetry.db
+# Snapshots are gzipped since 2026-09-03. gunzip -c writes to stdout and leaves the backup
+# itself intact, so a botched restore does not also cost you the snapshot.
+sudo -u solinteg sh -c 'gunzip -c /opt/solinteg/backups/telemetry-<stamp>.db.gz > /opt/solinteg/telemetry.db'
+# For a pre-2026-09-03 snapshot with no .gz suffix, plain cp as before:
+#   sudo -u solinteg cp /opt/solinteg/backups/telemetry-<stamp>.db /opt/solinteg/telemetry.db
 sudo systemctl start solinteg-poller solinteg-web solinteg-weather solinteg-dispatch
 ```
 
