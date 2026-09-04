@@ -166,5 +166,68 @@ class IsB2DestTests(unittest.TestCase):
         self.assertTrue(self.check("b2:bucket", {"RCLONE_CONFIG_B2_TYPE": " B2 "}))
 
 
+class SyncDeletesGuardTests(unittest.TestCase):
+    """The empty-source refusal.
+
+    `rclone sync` makes the destination match the source. A source with no snapshots in it is
+    therefore an instruction to delete every offsite copy — and it would fire in exactly the
+    situation where the offsite copy is the last one standing (a wiped or unmounted BACKUP_DIR,
+    or a backup.py that has been failing). The guard has to run BEFORE rclone, which is what
+    these assert: not just the return code, but that rclone was never invoked at all.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+
+    def snapshot(self, name):
+        Path(self.dir, name).write_bytes(b"x")
+
+    def run_main(self, dest="b2:my-bucket", *, returncode=0):
+        run = mock.Mock(return_value=mock.Mock(returncode=returncode, stderr="boom"))
+        with mock.patch.object(backup_offsite, "BACKUP_DIR", self.dir),              mock.patch.object(backup_offsite, "RCLONE_OFFSITE_DEST", dest),              mock.patch.dict(os.environ, {"RCLONE_CONFIG_B2_TYPE": "b2"}),              mock.patch.object(backup_offsite.subprocess, "run", run),              mock.patch.object(backup_offsite.notify, "send") as send:
+            return backup_offsite.main(), run, send
+
+    def test_empty_directory_is_refused_before_rclone_runs(self):
+        code, run, send = self.run_main()
+        self.assertEqual(code, 1)
+        run.assert_not_called()
+        send.assert_called_once()
+
+    def test_a_directory_of_only_env_backups_is_still_refused(self):
+        # The env copies are not snapshots. If rotation has taken every telemetry-* away, the
+        # remaining .bak files must not make this look like a healthy source.
+        Path(self.dir, "solinteg.env-20260904-031503.bak").write_bytes(b"x")
+        code, run, _ = self.run_main()
+        self.assertEqual(code, 1)
+        run.assert_not_called()
+
+    def test_one_snapshot_is_enough_to_proceed(self):
+        self.snapshot("telemetry-20260904-031503.db.gz")
+        code, run, send = self.run_main()
+        self.assertEqual(code, 0)
+        run.assert_called_once()
+        send.assert_not_called()
+
+    def test_an_uncompressed_legacy_snapshot_also_counts(self):
+        self.snapshot("telemetry-20260817-031509.db")
+        code, run, _ = self.run_main()
+        self.assertEqual(code, 0)
+        run.assert_called_once()
+
+    def test_bucket_root_is_warned_about_but_not_refused(self):
+        # A warning rather than a refusal so that upgrading cannot break a deployment that is
+        # already syncing to a bucket root. New setups should sync into a prefix.
+        self.assertTrue(backup_offsite.warn_if_bucket_root("b2:my-bucket"))
+        self.assertTrue(backup_offsite.warn_if_bucket_root("b2:my-bucket/"))
+        self.assertFalse(backup_offsite.warn_if_bucket_root("b2:my-bucket/solinteg"))
+        self.assertFalse(backup_offsite.warn_if_bucket_root("/opt/solinteg/backups"))
+        self.snapshot("telemetry-20260904-031503.db.gz")
+        code, run, _ = self.run_main()
+        self.assertEqual(code, 0)
+        run.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

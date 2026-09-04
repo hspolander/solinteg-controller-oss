@@ -311,9 +311,21 @@ key (no interactive OAuth flow, unlike Google Drive — important since this run
 > deployment hit 100% of the 10 GB cap this way on 2026-09-03, and the earlier claim here that
 > "10 GB is years of headroom" was wrong for exactly that reason.
 
+> **Give this its own bucket, and prefer a path inside it.** `rclone sync` makes the destination
+> match the source, so anything else stored at the destination is deleted as "extraneous" on the
+> next nightly run — permanently, given `--b2-hard-delete`, and both jobs would report success.
+> If `RCLONE_OFFSITE_DEST` is a bucket **root**, that bucket belongs to this deployment alone;
+> another application wanting offsite backups needs a bucket of its own (B2's free tier is per
+> account, not per bucket), or this destination has to move under a prefix first
+> (`b2:your-bucket/solinteg`). `backup_offsite.py` warns about a bucket root nightly rather than
+> refusing, so an existing setup keeps working — and it **refuses to sync when `BACKUP_DIR` holds
+> no snapshots**, because syncing from an empty source would faithfully delete every offsite copy
+> at the exact moment the local ones are already gone.
+
 Setup:
 1. Create a free Backblaze B2 account, a bucket, and an "application key" scoped to that bucket
-   (backblaze.com — a few minutes, no card required for the free tier).
+   (backblaze.com — a few minutes, no card required for the free tier). One bucket per
+   deployment, per the warning above.
 2. `sudo apt install rclone`
 3. Add to `/opt/solinteg/solinteg.env` (see the commented-out example block there):
    ```
