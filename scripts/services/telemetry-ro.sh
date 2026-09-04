@@ -13,7 +13,15 @@ set -euo pipefail
 
 DB=/opt/solinteg/telemetry.db
 HEARTBEAT=/opt/solinteg/dispatch-heartbeat.json
-ALLOWED_UNITS="solinteg-dispatch solinteg-poller solinteg-weather solinteg-web solinteg-watchdog solinteg-healthcheck solinteg-heartbeat-ping solinteg-oracle"
+# The backup pair was added 2026-09-04. Their journals turned out to be the only way to see why
+# an offsite sync was failing (a Backblaze storage cap), and without them the diagnosis needed a
+# password prompt every time — for the one pair of units whose entire job is silent overnight
+# work, so nobody is watching them live. `systemctl show` needs no privileges and reveals the
+# exit status, but not the error.
+#
+# Deliberately still absent: solinteg-telemetry and solinteg-boot-notify — low-signal, add them
+# if they ever matter to you. Keeping this list to units you actually read is the point.
+ALLOWED_UNITS="solinteg-dispatch solinteg-poller solinteg-weather solinteg-web solinteg-watchdog solinteg-healthcheck solinteg-heartbeat-ping solinteg-oracle solinteg-backup solinteg-backup-offsite"
 
 usage() {
   echo "usage: $(basename "$0") sql <SELECT ...>" >&2
