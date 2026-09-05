@@ -33,7 +33,7 @@ export interface OptimizerSlot {
   // 'live' (added 2026-07-18) means consumptionKwh came from the trailing per-hour profile
   // measured from the house's own readings (lib/load.ts slotConsumptionFromLive) — the best
   // available estimator, so errors there are genuine household unpredictability.
-  solarSource?: 'forecast' | 'typical';
+  solarSource?: 'forecast' | 'stale' | 'typical';
   loadSource?: 'modeled' | 'baseline' | 'live';
 }
 

@@ -39,9 +39,15 @@ export function buildOptimizerSlots(
   profiles: Record<number, number[]>,
   tempByDate?: Record<string, number> | null,
   liveLoad?: TrailingLoadProfile | null,
+  /** True when `forecast` came off disk (lib/solar-forecast-cache.ts) because every live source
+   *  was down. Re-tags forecast-backed slots as 'stale' — same numbers, weaker provenance — so
+   *  "degraded but still weather-aware" is distinguishable from both healthy and blind. */
+  forecastFromDisk = false,
 ): OptimizerSlot[] {
   return data.prices.map((slot) => {
-    const { kwh: solarKwh, source: solarSource } = slotSolarKwh(slot.startTime, forecast, profiles);
+    const { kwh: solarKwh, source: rawSolarSource } = slotSolarKwh(slot.startTime, forecast, profiles);
+    const solarSource =
+      forecastFromDisk && rawSolarSource === 'forecast' ? ('stale' as const) : rawSolarSource;
     const date = slot.startTime.slice(0, 10);
     const loadSource = liveLoad ? 'live' : tempByDate?.[date] != null ? 'modeled' : 'baseline';
     return {

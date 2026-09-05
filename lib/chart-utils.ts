@@ -94,7 +94,7 @@ export interface ChartPoint {
   socPct: number | null; // planned battery SoC % after this slot (null when there is no plan)
   actualSocPct: number | null; // real measured SoC %, averaged into this slot (null: future, or no readings)
   solarKwh: number;
-  solarSource: 'forecast' | 'typical';
+  solarSource: 'forecast' | 'stale' | 'typical';
   action: Action;
   decision: BandKind | null; // the slot's deliberate decision (classifyBand), for the tooltip
   // Planned per-slot battery flows (kWh/15 min), for the tooltip's dispatch quantities —

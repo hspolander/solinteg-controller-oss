@@ -3,6 +3,7 @@ import { fetchPricesUncached, currentSlotIndexInPrices } from './prices';
 import type { PriceData } from './prices';
 import { fetchSolarForecast, fetchDailyMeanTemp } from './forecast';
 import { fetchSolarForecastDirect, fetchDailyMeanTempDirect } from './metno-thredds';
+import { readFreshSolarForecast, saveSolarForecast } from './solar-forecast-cache';
 import { buildSolarProfiles, buildOptimizerSlots } from './pipeline';
 import { optimizeDispatch } from './optimizer';
 import type { DispatchSlot } from './optimizer';
@@ -84,6 +85,11 @@ export async function producePlan(): Promise<PlanResult> {
   // SoC and writes telemetry. It can never be part of a prerendered shell.
   await connection();
 
+  // Set by the fallback chain below when the forecast came off disk rather than off the wire.
+  // Threaded into the slots as `solarSource: 'stale'` so a degraded plan is visible in telemetry
+  // instead of passing for a healthy one — a fallback nothing records is a fallback that can rot
+  // unnoticed until the day it is needed.
+  let solarForecastFromDisk = false;
   const [data, solarForecast, tempByDate, inverterData] = await Promise.all([
     // A prices outage must not take down the whole page: live status and earnings don't
     // need spot prices. The chart/optimizer sections degrade to a notice instead.
@@ -104,9 +110,16 @@ export async function producePlan(): Promise<PlanResult> {
         console.error('trying direct MET Norway fallback');
         return fetchSolarForecastDirect();
       })
-      .catch((err) => {
-        console.error('falling back to seasonal-average solar profile:', err);
-        return null;
+      .catch(async (err) => {
+        // Last resort before climatology: a forecast WE persisted earlier
+        // (lib/solar-forecast-cache.ts). Hours-old real weather beats a decades-long monthly
+        // average on any day that is not average, and the days this path opens on are never
+        // average ones. Model-agnostic — it replays whatever the primary last returned.
+        // Returns null when there is no fresh-enough file, which is the true climatology case.
+        console.error('both live solar sources failed, trying the persisted last-good forecast:', err);
+        const persisted = await readFreshSolarForecast();
+        if (persisted) solarForecastFromDisk = true;
+        return persisted;
       }),
     fetchDailyMeanTemp()
       .catch((err) => {
@@ -122,6 +135,11 @@ export async function producePlan(): Promise<PlanResult> {
     readLiveInverterData(),
   ]);
 
+  // Persist a live forecast so a later outage has something better than climatology to reach
+  // for. Never re-persist one that came off disk — that would refresh its own timestamp and let
+  // a single stale file live forever.
+  if (solarForecast && !solarForecastFromDisk) await saveSolarForecast(solarForecast);
+
   const startSoc = socKwhOrDefault(inverterData);
   const socIsLive = inverterData != null;
   let solarProfiles: Record<number, number[]> = {};
@@ -132,7 +150,14 @@ export async function producePlan(): Promise<PlanResult> {
     // Live trailing load profile (null off-NUC or on thin data → static model fallback).
     // Read here, not inside buildOptimizerSlots, to keep that function pure/testable.
     const liveLoad = readTrailingLoadProfile(LIVE_LOAD_PROFILE_DAYS);
-    const allSlots = buildOptimizerSlots(data, solarForecast, solarProfiles, tempByDate, liveLoad);
+    const allSlots = buildOptimizerSlots(
+      data,
+      solarForecast,
+      solarProfiles,
+      tempByDate,
+      liveLoad,
+      solarForecastFromDisk,
+    );
 
     // Telemetry (best-effort, no-op unless TELEMETRY_DB_PATH is set). producePlan() awaits
     // connection() at its top, so this runs at request time, never during `next build`.

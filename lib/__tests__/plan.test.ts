@@ -34,6 +34,10 @@ vi.mock('../metno-thredds', () => ({
   fetchSolarForecastDirect: vi.fn(),
   fetchDailyMeanTempDirect: vi.fn(),
 }));
+vi.mock('../solar-forecast-cache', () => ({
+  readFreshSolarForecast: vi.fn(),
+  saveSolarForecast: vi.fn(),
+}));
 vi.mock('../pipeline', () => ({
   buildSolarProfiles: vi.fn(),
   buildOptimizerSlots: vi.fn(),
@@ -54,6 +58,7 @@ vi.mock('../telemetry', () => ({
 import { fetchPricesUncached, currentSlotIndexInPrices } from '../prices';
 import { fetchSolarForecast, fetchDailyMeanTemp } from '../forecast';
 import { fetchSolarForecastDirect, fetchDailyMeanTempDirect } from '../metno-thredds';
+import { readFreshSolarForecast, saveSolarForecast } from '../solar-forecast-cache';
 import { buildSolarProfiles, buildOptimizerSlots } from '../pipeline';
 import { optimizeDispatch } from '../optimizer';
 import { readLiveInverterData, socKwhOrDefault } from '../inverter';
@@ -127,6 +132,8 @@ beforeEach(() => {
   vi.mocked(fetchDailyMeanTempDirect).mockReset().mockResolvedValue({});
   vi.mocked(buildSolarProfiles).mockReset().mockReturnValue(PROFILES);
   vi.mocked(buildOptimizerSlots).mockReset().mockReturnValue(ALL_SLOTS);
+  vi.mocked(readFreshSolarForecast).mockReset().mockResolvedValue(null);
+  vi.mocked(saveSolarForecast).mockReset().mockResolvedValue(undefined);
   vi.mocked(optimizeDispatch).mockReset().mockReturnValue(DISPATCH_FIXTURE);
   vi.mocked(readLiveInverterData).mockReset().mockResolvedValue(INVERTER_DATA);
   vi.mocked(socKwhOrDefault).mockReset().mockReturnValue(7.5);
@@ -149,7 +156,9 @@ describe('producePlan — happy path wiring', () => {
     expect(result.inverterData).toBe(INVERTER_DATA);
     expect(result.dispatchSchedule).toBe(DISPATCH_FIXTURE);
 
-    expect(buildOptimizerSlots).toHaveBeenCalledWith(PRICE_DATA, FORECAST, PROFILES, TEMP_BY_DATE, LIVE_LOAD);
+    expect(buildOptimizerSlots).toHaveBeenCalledWith(
+      PRICE_DATA, FORECAST, PROFILES, TEMP_BY_DATE, LIVE_LOAD, false,
+    );
     expect(readTrailingLoadProfile).toHaveBeenCalledWith(LIVE_LOAD_PROFILE_DAYS);
 
     // The single most important wiring assertion: a typo'd option name here would silently
@@ -251,6 +260,62 @@ describe('producePlan — solar forecast fallback chain (SOLAR_FORECAST_MODEL=me
   });
 });
 
+describe('producePlan — persisted last-good solar forecast', () => {
+  const STALE_FORECAST = { '2026-01-15': new Array(96).fill(0.4) };
+
+  it('persists a live forecast so a later outage has something better than climatology', async () => {
+    await producePlan();
+    expect(saveSolarForecast).toHaveBeenCalledWith(FORECAST);
+  });
+
+  it('uses the persisted forecast when every live source is down, and tags the slots stale', async () => {
+    const errSpy = silenceConsoleError();
+    vi.mocked(fetchSolarForecast).mockRejectedValue(new Error('open-meteo 502'));
+    vi.mocked(fetchSolarForecastDirect).mockRejectedValue(new Error('met.no thredds fetch failed: 400'));
+    vi.mocked(readFreshSolarForecast).mockResolvedValue(STALE_FORECAST);
+
+    const result = await producePlan();
+
+    // Hours-old real weather, not a decades-long monthly average — and flagged as such, so a
+    // degraded plan is visible in telemetry rather than passing for a healthy one.
+    expect(buildOptimizerSlots).toHaveBeenCalledWith(
+      PRICE_DATA, STALE_FORECAST, PROFILES, TEMP_BY_DATE, LIVE_LOAD, true,
+    );
+    expect(result.solarForecast).toBe(STALE_FORECAST);
+    errSpy.mockRestore();
+  });
+
+  it('never re-persists a forecast that came off disk (that would refresh its own timestamp)', async () => {
+    const errSpy = silenceConsoleError();
+    vi.mocked(fetchSolarForecast).mockRejectedValue(new Error('open-meteo 502'));
+    vi.mocked(fetchSolarForecastDirect).mockRejectedValue(new Error('thredds 400'));
+    vi.mocked(readFreshSolarForecast).mockResolvedValue(STALE_FORECAST);
+
+    await producePlan();
+
+    // Without this, one stale file would keep re-stamping itself and never age out.
+    expect(saveSolarForecast).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it('falls through to climatology when there is no fresh-enough persisted forecast', async () => {
+    const errSpy = silenceConsoleError();
+    vi.mocked(fetchSolarForecast).mockRejectedValue(new Error('open-meteo 502'));
+    vi.mocked(fetchSolarForecastDirect).mockRejectedValue(new Error('thredds 400'));
+    vi.mocked(readFreshSolarForecast).mockResolvedValue(null);
+
+    const result = await producePlan();
+
+    // null forecast -> slotSolarKwh tags every slot 'typical'; NOT flagged stale, because
+    // "flying blind" and "degraded but weather-aware" must stay distinguishable.
+    expect(buildOptimizerSlots).toHaveBeenCalledWith(
+      PRICE_DATA, null, PROFILES, TEMP_BY_DATE, LIVE_LOAD, false,
+    );
+    expect(result.solarForecast).toBeNull();
+    errSpy.mockRestore();
+  });
+});
+
 describe('producePlan — temperature forecast fallback chain (SOLAR_FORECAST_MODEL=metno_nordic)', () => {
   it('falls back to a direct MET Norway fetch when Open-Meteo fails', async () => {
     const errSpy = silenceConsoleError();
@@ -259,7 +324,9 @@ describe('producePlan — temperature forecast fallback chain (SOLAR_FORECAST_MO
 
     await producePlan();
 
-    expect(buildOptimizerSlots).toHaveBeenCalledWith(PRICE_DATA, FORECAST, PROFILES, { '2026-01-15': -5 }, LIVE_LOAD);
+    expect(buildOptimizerSlots).toHaveBeenCalledWith(
+      PRICE_DATA, FORECAST, PROFILES, { '2026-01-15': -5 }, LIVE_LOAD, false,
+    );
     errSpy.mockRestore();
   });
 
@@ -270,7 +337,9 @@ describe('producePlan — temperature forecast fallback chain (SOLAR_FORECAST_MO
 
     const result = await producePlan();
 
-    expect(buildOptimizerSlots).toHaveBeenCalledWith(PRICE_DATA, FORECAST, PROFILES, null, LIVE_LOAD);
+    expect(buildOptimizerSlots).toHaveBeenCalledWith(
+      PRICE_DATA, FORECAST, PROFILES, null, LIVE_LOAD, false,
+    );
     expect(result.dispatchSchedule).toBe(DISPATCH_FIXTURE);
     errSpy.mockRestore();
   });

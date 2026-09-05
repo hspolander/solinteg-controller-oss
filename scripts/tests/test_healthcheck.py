@@ -25,6 +25,7 @@ it can be wrong is a way of staying quiet about something real.
 
 Run: python3 -m unittest scripts.tests.test_healthcheck -v   (from the repo root)
 """
+import json
 import os
 import sqlite3
 import sys
@@ -430,6 +431,92 @@ class AlertStateMachineTests(unittest.TestCase):
         state = self.run_main([])
         self.assertNotIn("control_errors", state)
         self.assertEqual(self.sent, [])
+
+
+class SolarSourceDegradedTests(unittest.TestCase):
+    """check_solar_source_degraded — is the plan still made from real weather?
+
+    Added after finding the direct MET Norway tier had been dead for weeks without anything
+    noticing (raw brackets in the OPeNDAP query -> 400 on every run). The point of this
+    check is that a fallback which only runs when the primary fails has no liveness signal of
+    its own, so the degradation has to be read off the plan itself.
+    """
+
+    @staticmethod
+    def _db(sources, logged_at=NOW):
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE optimizer_runs (logged_at TEXT, inputs_json TEXT)")
+        slots = [{"startTime": f"2026-08-06T{i // 4:02d}:00:00", "solarSource": src}
+                 for i, src in enumerate(sources)]
+        con.execute("INSERT INTO optimizer_runs VALUES (?, ?)",
+                    (logged_at.isoformat(), json.dumps(slots)))
+        return con
+
+    def test_all_climatology_alerts_high(self):
+        issue = hc.check_solar_source_degraded(self._db(["typical"] * 24), NOW)
+        self.assertIsNotNone(issue)
+        key, priority, _title, message, fingerprint = issue
+        self.assertEqual(key, "solar_source_climatology")
+        self.assertEqual(priority, hc.notify.PRIORITY_HIGH)
+        self.assertEqual(fingerprint, "typical")
+        self.assertIn("24/24", message)
+
+    def test_persisted_forecast_is_informational_not_urgent(self):
+        # The mitigation working is worth knowing about, not worth an urgent push.
+        issue = hc.check_solar_source_degraded(self._db(["stale"] * 24), NOW)
+        self.assertIsNotNone(issue)
+        _key, priority, _title, _message, fingerprint = issue
+        self.assertEqual(priority, hc.notify.PRIORITY_LOW)
+        self.assertEqual(fingerprint, "stale")
+
+    def test_stale_and_typical_share_a_key_so_the_fingerprint_breaks_the_cooldown(self):
+        # A slide from "degraded" to "blind" must re-alert rather than read as the same
+        # ongoing issue — that is exactly what the fingerprint mechanism is for.
+        stale = hc.check_solar_source_degraded(self._db(["stale"] * 24), NOW)
+        typical = hc.check_solar_source_degraded(self._db(["typical"] * 24), NOW)
+        self.assertEqual(stale[0], typical[0])
+        self.assertNotEqual(stale[4], typical[4])
+
+    def test_healthy_plan_is_silent(self):
+        self.assertIsNone(hc.check_solar_source_degraded(self._db(["forecast"] * 24), NOW))
+
+    def test_one_typical_slot_at_the_horizon_edge_is_not_an_alert(self):
+        # Slots past the weather horizon are legitimately climatological; alerting on any single
+        # one would make this check useless within a day.
+        sources = ["forecast"] * 23 + ["typical"]
+        self.assertIsNone(hc.check_solar_source_degraded(self._db(sources), NOW))
+
+    def test_only_the_near_term_is_judged(self):
+        # A run whose FIRST 6 h are healthy is healthy, however climatological its far end is.
+        sources = ["forecast"] * 24 + ["typical"] * 72
+        self.assertIsNone(hc.check_solar_source_degraded(self._db(sources), NOW))
+
+    def test_an_old_run_is_left_to_check_todays_plan(self):
+        # Don't double-report: a stale plan is already somebody else's alert.
+        old = NOW - timedelta(hours=3)
+        self.assertIsNone(hc.check_solar_source_degraded(self._db(["typical"] * 24, old), NOW))
+
+    def test_no_runs_at_all_is_silent(self):
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE optimizer_runs (logged_at TEXT, inputs_json TEXT)")
+        self.assertIsNone(hc.check_solar_source_degraded(con, NOW))
+
+    def test_missing_table_does_not_crash(self):
+        self.assertIsNone(hc.check_solar_source_degraded(sqlite3.connect(":memory:"), NOW))
+
+    def test_malformed_inputs_json_does_not_crash(self):
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE optimizer_runs (logged_at TEXT, inputs_json TEXT)")
+        con.execute("INSERT INTO optimizer_runs VALUES (?, ?)", (NOW.isoformat(), "{not json"))
+        self.assertIsNone(hc.check_solar_source_degraded(con, NOW))
+
+    def test_slots_without_a_source_field_do_not_crash(self):
+        # Rows written before solarSource existed must degrade to silence, not a traceback.
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE optimizer_runs (logged_at TEXT, inputs_json TEXT)")
+        con.execute("INSERT INTO optimizer_runs VALUES (?, ?)",
+                    (NOW.isoformat(), json.dumps([{"startTime": "x"}] * 24)))
+        self.assertIsNone(hc.check_solar_source_degraded(con, NOW))
 
 
 if __name__ == "__main__":

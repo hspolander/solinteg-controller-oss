@@ -62,6 +62,7 @@ Environment (beyond notify.py's own NTFY_*):
   DISK_FREE_MIN_PCT            minimum free space on / before alerting (default 10) - a full
                                 disk breaks telemetry writes and the nightly backup alike
 """
+import json
 import logging
 import os
 import shutil
@@ -89,6 +90,12 @@ WEATHER_STALE_S = int(os.environ.get("WEATHER_STALE_S", "1800"))
 CONTROL_ERROR_WINDOW_S = int(os.environ.get("CONTROL_ERROR_WINDOW_S", "900"))
 DISK_FREE_MIN_PCT = float(os.environ.get("DISK_FREE_MIN_PCT", "10"))
 PLAN_GRACE_AFTER_MIDNIGHT_S = int(os.environ.get("PLAN_GRACE_AFTER_MIDNIGHT_S", "1800"))
+# How far into the plan's own horizon to judge the solar source. Slots past the weather
+# horizon are legitimately climatological, so only the near term says anything about health.
+# 24 slots = 6 h.
+SOLAR_SOURCE_LOOKAHEAD_SLOTS = int(os.environ.get("SOLAR_SOURCE_LOOKAHEAD_SLOTS", "24"))
+# Only judge a run that is actually current; an old one means a different check's problem.
+SOLAR_SOURCE_MAX_RUN_AGE_S = int(os.environ.get("SOLAR_SOURCE_MAX_RUN_AGE_S", "3600"))
 ORACLE_REVIEW_MIN_DAYS = int(os.environ.get("ORACLE_REVIEW_MIN_DAYS", "16"))
 # Default 0 = OFF, deliberately: this is a "go run this probe" nag, and the question it scouts
 # for has already been answered once on the reference deployment (see MODBUS.md). Opt in by
@@ -125,6 +132,15 @@ def safe_scalar(con: sqlite3.Connection, sql: str, params=()):
         return None
 
 
+def safe_row(con: sqlite3.Connection, sql: str, params=()):
+    """The whole first row, or None on no rows OR any query error — safe_scalar's sibling for
+    checks that need more than one column and must not crash on a not-yet-created table."""
+    try:
+        return con.execute(sql, params).fetchone()
+    except sqlite3.Error:
+        return None
+
+
 def check_poller_stale(con: sqlite3.Connection, now: datetime):
     latest = safe_scalar(con, "SELECT MAX(timestamp) FROM readings")
     if latest is None:
@@ -149,6 +165,79 @@ def check_weather_stale(con: sqlite3.Connection, now: datetime):
                 f"Last weather reading was {age:.0f}s ago. Non-urgent — the solar forecast "
                 f"just falls back to climatology until this recovers. Check solinteg-weather "
                 f"and the Ecowitt station/cloud API.")
+    return None
+
+
+def check_solar_source_degraded(con: sqlite3.Connection, now: datetime):
+    """Is the plan still being made from real weather?
+
+    The dispatcher has three solar tiers: Open-Meteo, MET Norway's Thredds server direct (when
+    SOLAR_FORECAST_MODEL is metno_nordic), and a forecast persisted from an earlier success
+    (lib/solar-forecast-cache.ts). Only when all of them are unavailable does it fall back to
+    seasonal-average climatology — a decades-long monthly mean.
+
+    This check exists because that degradation is otherwise invisible. On the reference
+    deployment the direct MET Norway tier turned out to have been returning 400 for weeks (raw
+    brackets in the OPeNDAP query) and nothing noticed, because a fallback that only runs when
+    the primary fails has no liveness signal of its own. The manual review that would have
+    caught it existed, and had not been run in six weeks.
+
+    Why climatology is worth an alert rather than a shrug: it is an AVERAGE day, and days are
+    not average. Measured on that deployment over 26 late-summer days, mean daily error was
+    13.3 kWh against the live forecast's 8.0 — only 1.7x worse, which is the wrong way to read
+    it. On unremarkable days it was near-exact; on a heavily overcast day it said 47.3 kWh where
+    10.1 arrived. About one day in six was off by 20 kWh or more, and all of those were dark
+    days — exactly when a plan needs to buy overnight and hold charge instead of banking on a
+    refill that never comes.
+
+    Reported as one issue with a fingerprint, so a slide from 'stale' to 'typical' breaks
+    through the cooldown instead of looking like the same ongoing problem.
+    """
+    row = safe_row(con, "SELECT logged_at, inputs_json FROM optimizer_runs "
+                        "ORDER BY logged_at DESC LIMIT 1")
+    if row is None:
+        return None  # no plan at all is check_todays_plan's business, not this one
+    logged_at, inputs_json = row
+    try:
+        age = (now - datetime.fromisoformat(logged_at)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if age > SOLAR_SOURCE_MAX_RUN_AGE_S:
+        return None  # a stale plan is check_todays_plan's alert; don't double-report it here
+    try:
+        slots = json.loads(inputs_json)[:SOLAR_SOURCE_LOOKAHEAD_SLOTS]
+    except (ValueError, TypeError):
+        return None
+    if not slots:
+        return None
+
+    sources = [s.get("solarSource") for s in slots if isinstance(s, dict)]
+    if not sources:
+        return None
+    # Judge on the majority rather than any single slot: one 'typical' at the horizon edge is
+    # normal bookkeeping, a near-term run made mostly of them is the dispatcher flying blind.
+    typical = sources.count("typical")
+    stale = sources.count("stale")
+    hours = len(sources) / 4
+
+    if typical > len(sources) / 2:
+        return ("solar_source_climatology", notify.PRIORITY_HIGH,
+                "Solinteg: planning from climatology, not weather",
+                f"{typical}/{len(sources)} of the next {hours:.0f}h of plan slots are using the "
+                f"seasonal-average solar profile — every live tier and the persisted last-good "
+                f"forecast are unavailable. The plan is being made from a decades-long monthly "
+                f"mean, which is near-exact on an average day and badly wrong on a dark one. "
+                f"Check the web service log for 'falling back to seasonal-average'.", "typical")
+
+    if stale > len(sources) / 2:
+        return ("solar_source_climatology", notify.PRIORITY_LOW,
+                "Solinteg: solar forecast is running off the persisted copy",
+                f"{stale}/{len(sources)} of the next {hours:.0f}h of plan slots come from the "
+                f"last-good forecast on disk — the live weather sources are down, but the saved "
+                f"forecast is still fresh enough to plan on, so this is the fallback working "
+                f"rather than failing. It expires (see SOLAR_FORECAST_CACHE_MAX_AGE_H), and "
+                f"climatology is next. Worth a look before then.", "stale")
+
     return None
 
 
@@ -389,6 +478,7 @@ def run_checks(con: sqlite3.Connection, now: datetime):
         check_poller_stale(con, now),
         check_weather_stale(con, now),
         check_todays_plan(con, today, now),
+        check_solar_source_degraded(con, now),
         check_control_errors(con, now),
         check_disk_space(),
     ]
