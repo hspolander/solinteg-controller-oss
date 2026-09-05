@@ -106,6 +106,25 @@ describe('fetchSolarForecastDirect', () => {
     expect(calledUrls.some((u) => u.includes('T18Z'))).toBe(true);
   });
 
+  it('percent-encodes the subset brackets — a raw [ or ] is a 400 from met.no', async () => {
+    // Regression: thredds.met.no is fronted by Tomcat, which rejects a raw `[`/`]` anywhere in
+    // the request target ("Invalid character found in the request target ... RFC 7230 and RFC
+    // 3986"). Every run in the walk-back then fails identically, so the whole fallback goes dead
+    // and the chain drops to the seasonal climatology — silently, because this path only runs
+    // once the primary source has already failed.
+    vi.setSystemTime(new Date('2026-01-15T02:00:00Z'));
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      text: async () => opendapAscii([0, 3600 * 100], [270, 271]),
+    } as Response);
+
+    await fetchSolarForecastDirect();
+
+    const url = String(vi.mocked(fetch).mock.calls[0][0]);
+    expect(url).not.toMatch(/[[\]]/);
+    expect(url).toContain('%5B0:1:43%5D');
+  });
+
   it('throws after exhausting every lookback attempt', async () => {
     vi.setSystemTime(new Date('2026-01-15T02:00:00Z'));
     vi.mocked(fetch).mockRejectedValue(new Error('met.no unreachable'));

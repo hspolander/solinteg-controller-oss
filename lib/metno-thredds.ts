@@ -117,9 +117,17 @@ async function fetchPointSeries(
   iy: number,
 ): Promise<{ shortwaveCumulative: number[]; tempKelvin: number[] }> {
   const range = `0:1:${FORECAST_HOURS - 1}`;
-  const url =
-    `${runFileUrl(runTime)}.ascii?` +
-    `${SHORTWAVE_VAR}[${range}][${iy}][${ix}],${TEMP_VAR}[${range}][${iy}][${ix}]`;
+  // The subset brackets MUST be percent-encoded. thredds.met.no is fronted by Tomcat, which
+  // rejects a raw `[`/`]` anywhere in the request target with a 400 "Invalid character found in
+  // the request target ... The valid characters are defined in RFC 7230 and RFC 3986". That
+  // enforcement arrived after this client was first written against the service in July 2026.
+  // The failure mode is worth understanding before you touch this: every run in the walk-back
+  // 400s identically and instantly, and fetchLatestRun throws the OLDEST attempt's error, so the
+  // log names a run from 24 h earlier and reads like "met.no has not published yet" rather than
+  // like a bug here. Since this whole path only runs when the primary source has already failed,
+  // a break here can sit unnoticed until the day you actually need it.
+  const selector = (v: string) => `${v}%5B${range}%5D%5B${iy}%5D%5B${ix}%5D`;
+  const url = `${runFileUrl(runTime)}.ascii?${selector(SHORTWAVE_VAR)},${selector(TEMP_VAR)}`;
   const res = await fetch(url, {
     headers: { 'User-Agent': THREDDS_USER_AGENT },
     signal: AbortSignal.timeout(THREDDS_FETCH_TIMEOUT_MS),
