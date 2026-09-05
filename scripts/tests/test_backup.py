@@ -216,6 +216,26 @@ class SyncDeletesGuardTests(unittest.TestCase):
         self.assertEqual(code, 0)
         run.assert_called_once()
 
+    def test_delete_before_is_off_by_default(self):
+        # It opens a window where a file exists at the destination in neither its old nor its new
+        # form. That is a deliberate recovery action, never a standing setting.
+        self.snapshot("telemetry-20260904-031503.db.gz")
+        code, run, _ = self.run_main()
+        self.assertEqual(code, 0)
+        self.assertNotIn("--delete-before", run.call_args[0][0])
+
+    def test_delete_before_is_passed_when_the_recovery_lever_is_set(self):
+        # The escape hatch from the over-cap deadlock: rclone refuses to delete at the destination
+        # when a run had transfer errors, and over the cap every upload IS an error — so the
+        # deletions that would free space are exactly the ones it will not do.
+        self.snapshot("telemetry-20260904-031503.db.gz")
+        with mock.patch.object(backup_offsite, "DELETE_BEFORE", True):
+            code, run, _ = self.run_main()
+        self.assertEqual(code, 0)
+        argv = run.call_args[0][0]
+        self.assertIn("--delete-before", argv)
+        self.assertIn("--b2-hard-delete", argv)
+
     def test_bucket_root_is_warned_about_but_not_refused(self):
         # A warning rather than a refusal so that upgrading cannot break a deployment that is
         # already syncing to a bucket root. New setups should sync into a prefix.

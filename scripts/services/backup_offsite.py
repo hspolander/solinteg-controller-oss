@@ -48,12 +48,42 @@ Two things are needed, and only together:
 The flag is applied only when the destination really is a B2 remote, so this file stays honest
 for the other backends rclone supports.
 
+THE OVER-CAP DEADLOCK, and RCLONE_DELETE_BEFORE
+-----------------------------------------------
+Once the destination is over its storage cap, this sync cannot dig itself out, and that is worth
+understanding before assuming a shrinking local directory will fix a full bucket on its own.
+`rclone sync` deletes at the destination only if the run was otherwise clean — over the cap,
+every upload returns 403 and rclone reports `not deleting files as there were IO errors`. So the
+deletions that would free space are precisely the ones it refuses to perform. Rotation, retention
+changes and compression all become invisible to the remote: the bucket stays full, every night,
+and the failure notification says the same thing each time. The reference deployment sat in this
+state for two days after its cap alert, with a bucket still listing the pre-compression filenames
+while every new .gz upload was rejected — the giveaway is a remote whose current files are the
+OLD naming scheme.
+
+`RCLONE_DELETE_BEFORE=1` breaks it by passing `--delete-before`, so obsolete remote files are
+removed first and the uploads then have room. It is deliberately NOT the default: it opens a
+window in which a file exists in neither its old nor its new form at the destination, and if the
+upload then fails the offsite copy is thinner than it was. That is an acceptable trade only when
+the LOCAL copies are known good, which makes it a deliberate, one-off recovery action rather than
+a setting. Run it as a one-off without editing solinteg.env:
+
+    sudo systemd-run --collect --wait --pipe --uid=solinteg \
+      -p EnvironmentFile=/opt/solinteg/solinteg.env -E RCLONE_DELETE_BEFORE=1 \
+      /opt/solinteg/app/.venv/bin/python /opt/solinteg/app/scripts/services/backup_offsite.py
+
+(The credentials stay in the env file; only the flag is on the command line.) Pair it with
+scripts/tools/compress-backup-backlog.sh, which is usually the reason the remote has obsolete
+files to delete in the first place.
+
 Environment:
   BACKUP_DIR           source directory (default /opt/solinteg/backups)
   RCLONE_OFFSITE_DEST  rclone destination, e.g. "b2:your-bucket-name" (required; skips with a
                        warning, not a failure, if unset — mirrors NTFY_TOPIC/HEALTHCHECKS_PING_URL's
                        "optional layer" convention)
   RCLONE_BIN           path to the rclone binary (default "rclone")
+  RCLONE_DELETE_BEFORE "1" to delete at the destination before uploading — recovery only, see
+                       above. Unset by default and must not be left set.
 """
 import logging
 import os
@@ -67,6 +97,9 @@ log = logging.getLogger("solinteg.backup_offsite")
 BACKUP_DIR = os.environ.get("BACKUP_DIR", "/opt/solinteg/backups")
 RCLONE_OFFSITE_DEST = os.environ.get("RCLONE_OFFSITE_DEST", "")
 RCLONE_BIN = os.environ.get("RCLONE_BIN", "rclone")
+
+# RECOVERY LEVER, off by default. See the module docstring's "the over-cap deadlock" section.
+DELETE_BEFORE = os.environ.get("RCLONE_DELETE_BEFORE", "").strip().lower() in ("1", "true", "yes")
 
 # What a snapshot looks like, for the "is there anything to mirror" check below. Same pattern
 # backup.py rotates on, so the two cannot disagree about what counts.
@@ -144,6 +177,12 @@ def main() -> int:
     # See the module docstring: without this, every rotated-out snapshot lives on as a hidden
     # version and the bucket grows without bound.
     flags = ["--b2-hard-delete"] if is_b2_dest(RCLONE_OFFSITE_DEST) else []
+    if DELETE_BEFORE:
+        flags.append("--delete-before")
+        log.warning(
+            "RCLONE_DELETE_BEFORE is set — deleting at the destination BEFORE uploading. "
+            "Recovery mode; do not leave this set in solinteg.env."
+        )
 
     try:
         result = subprocess.run(

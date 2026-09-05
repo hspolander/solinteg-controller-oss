@@ -362,6 +362,34 @@ existing ntfy setup on failure (`notify.py`, same as every other unit here). Lea
 `RCLONE_OFFSITE_DEST` unset to skip this layer entirely; the local-only backup still runs either
 way.
 
+**If you are already over the cap, the sync cannot recover on its own.** This is a genuine
+deadlock and it costs a day to work out from first principles, so: `rclone sync` performs its
+deletions only if the run was otherwise clean. Over the cap every upload returns 403, so rclone
+logs `not deleting files as there were IO errors` and skips exactly the deletions that would free
+space. Rotation, a smaller `BACKUP_KEEP`, and compression all become invisible to the remote — the
+bucket stays full, the same alert arrives every night, and the giveaway is a bucket whose current
+files still show the *old* naming scheme while nothing new ever appears. Two steps break it:
+
+```bash
+# 1. Convert any pre-2026-09-03 uncompressed snapshots in one pass, instead of one per night
+#    as rotation reaches them. ~367 MB -> ~43 MB each; verifies each .gz (gzip -t CRC + a length
+#    check) before removing the original, and skips anything written in the last ten minutes.
+sudo -u solinteg bash /opt/solinteg/app/scripts/tools/compress-backup-backlog.sh --dry-run
+sudo -u solinteg bash /opt/solinteg/app/scripts/tools/compress-backup-backlog.sh
+
+# 2. One run that DELETES BEFORE it uploads, so the obsolete remote files go first and the
+#    uploads have room. Credentials stay in the env file; only the flag is on the command line.
+sudo systemd-run --collect --wait --pipe --uid=solinteg \
+  -p EnvironmentFile=/opt/solinteg/solinteg.env -E RCLONE_DELETE_BEFORE=1 \
+  /opt/solinteg/app/.venv/bin/python /opt/solinteg/app/scripts/services/backup_offsite.py
+```
+
+`RCLONE_DELETE_BEFORE` is deliberately not the default and must not be left set: it opens a window
+where a file exists at the destination in neither its old nor its new form, which is only an
+acceptable trade because step 1 leaves the local copies verified. On the reference deployment this
+pair took the bucket from 6.3 GB to well under 1 GB in one 26-second run, after two nights of
+identical failures.
+
 **Restore from the offsite copy** (if the machine itself is gone, not just its disk):
 ```bash
 rclone copy b2:your-bucket-name ./solinteg-backups-restore/
