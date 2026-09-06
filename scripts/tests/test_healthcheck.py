@@ -25,12 +25,15 @@ it can be wrong is a way of staying quiet about something real.
 
 Run: python3 -m unittest scripts.tests.test_healthcheck -v   (from the repo root)
 """
+import io
 import json
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -353,7 +356,12 @@ class AlertStateMachineTests(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         # One-shot notices are milestones on a different code path — silence them here.
-        for fn in ("oracle_review_ready", "probe_conditions_ready"):
+        # check_weather_fallback_dead joins the one-shots for a different reason: main()
+        # calls it, and it would otherwise make a real HTTP request out of these tests. It has
+        # its own class below; what main() owes it here is only that the resolve sweep leaves
+        # its bookkeeping key alone.
+        for fn in ("oracle_review_ready", "probe_conditions_ready",
+                   "check_weather_fallback_dead"):
             p = mock.patch.object(hc, fn, return_value=None)
             p.start()
             self.addCleanup(p.stop)
@@ -425,6 +433,15 @@ class AlertStateMachineTests(unittest.TestCase):
         state = self.run_main([("disk_low", 4, "t", "m")])
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(state["disk_low"]["fingerprint"], "4")
+
+    def test_a_probe_bookkeeping_key_survives_the_sweep(self):
+        """probe: keys have no last_seen, so the malformed-entry path below would delete them —
+        and deleting check_weather_fallback_dead's entry means a daily rate limiter that resets
+        every 5 minutes, i.e. ~288 NetCDF subsets a day out of thredds.met.no."""
+        hc.save_state({"probe:weather_fallback": {"last_probe": NOW.isoformat(), "ok": True}})
+        state = self.run_main([])
+        self.assertIn("probe:weather_fallback", state)
+        self.assertEqual(self.sent, [])  # and it is not mistaken for a resolved issue
 
     def test_a_malformed_entry_is_dropped_rather_than_wedging_the_sweep(self):
         self.write_state(fingerprint="benign")  # no last_seen, no last_alert
@@ -517,6 +534,210 @@ class SolarSourceDegradedTests(unittest.TestCase):
         con.execute("INSERT INTO optimizer_runs VALUES (?, ?)",
                     (NOW.isoformat(), json.dumps([{"startTime": "x"}] * 24)))
         self.assertIsNone(hc.check_solar_source_degraded(con, NOW))
+
+
+class FakeHttpResponse:
+    """Context-managed stand-in for what urlopen() returns — enough for read()+json.loads."""
+
+    def __init__(self, payload):
+        self._data = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def read(self):
+        return self._data
+
+
+def fake_urlopen(payload):
+    def _open(_req, timeout=None):
+        return FakeHttpResponse(payload)
+    return _open
+
+
+def raising_urlopen(exc):
+    def _open(_req, timeout=None):
+        raise exc
+    return _open
+
+
+class WeatherFallbackTransportTests(unittest.TestCase):
+    """probe_weather_fallback — what each failure shape gets CALLED.
+
+    The three verdict names carry consequences, which is why they are pinned here: 'failed'
+    spends the day's probe budget and raises an alert, 'unreachable' does neither. Confuse the
+    two and you either blame the weather tier for the web app being down, or retry a 4 GB
+    NetCDF subset every five minutes against a server whose operator asked you not to.
+    """
+
+    def test_a_200_reports_the_run_it_reached(self):
+        with mock.patch.object(urllib.request, "urlopen",
+                               fake_urlopen({"ok": True, "run": "2026-01-15T06:00:00.000Z",
+                                             "hours": 44})):
+            verdict, detail = hc.probe_weather_fallback()
+        self.assertEqual(verdict, "ok")
+        self.assertIn("2026-01-15T06:00:00.000Z", detail)
+
+    def test_the_routes_own_error_text_becomes_the_detail(self):
+        """The failure shape that motivated this: every run in the walk-back
+        returning the same status, reported through the route."""
+        body = io.BytesIO(json.dumps({"ok": False,
+                                      "error": "met.no thredds fetch failed: 400"}).encode())
+        exc = urllib.error.HTTPError(hc.WEATHER_FALLBACK_URL, 503, "Service Unavailable", {}, body)
+        with mock.patch.object(urllib.request, "urlopen", raising_urlopen(exc)):
+            verdict, detail = hc.probe_weather_fallback()
+        self.assertEqual(verdict, "failed")
+        self.assertEqual(detail, "met.no thredds fetch failed: 400")
+
+    def test_a_404_is_a_finding_not_a_transport_error(self):
+        """This is what "deployed against an app that predates the route" looks like."""
+        exc = urllib.error.HTTPError(hc.WEATHER_FALLBACK_URL, 404, "Not Found", {}, None)
+        with mock.patch.object(urllib.request, "urlopen", raising_urlopen(exc)):
+            verdict, detail = hc.probe_weather_fallback()
+        self.assertEqual(verdict, "failed")
+        self.assertIn("404", detail)
+
+    def test_a_refused_connection_is_unreachable_not_a_dead_tier(self):
+        exc = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+        with mock.patch.object(urllib.request, "urlopen", raising_urlopen(exc)):
+            verdict, detail = hc.probe_weather_fallback()
+        self.assertEqual(verdict, "unreachable")
+        self.assertIn("Refused", detail)
+
+    def test_a_timeout_counts_as_a_real_probe(self):
+        """The route fired, so the upstream request went out — the budget is spent either way,
+        and "no answer inside the budget" is a verdict on the tier, not on the transport."""
+        with mock.patch.object(urllib.request, "urlopen",
+                               raising_urlopen(urllib.error.URLError(TimeoutError("timed out")))):
+            verdict, detail = hc.probe_weather_fallback()
+        self.assertEqual(verdict, "failed")
+        self.assertIn("within", detail)
+
+    def test_an_unexpected_exception_type_does_not_escape(self):
+        """http.client's BadStatusLine/IncompleteRead are HTTPException, not OSError, so they
+        would sail past the named handlers — and an exception escaping this check aborts main()
+        before it sends any alert at all, which is the failure mode the whole file is written
+        against."""
+        import http.client
+        with mock.patch.object(urllib.request, "urlopen",
+                               raising_urlopen(http.client.BadStatusLine("garbage"))):
+            verdict, detail = hc.probe_weather_fallback()
+        self.assertEqual(verdict, "failed")
+        self.assertIn("BadStatusLine", detail)
+
+    def test_a_non_json_body_is_a_failure_not_a_crash(self):
+        class Garbage(FakeHttpResponse):
+            def __init__(self):
+                self._data = b"<html>nope</html>"
+        with mock.patch.object(urllib.request, "urlopen",
+                               lambda _req, timeout=None: Garbage()):
+            verdict, _detail = hc.probe_weather_fallback()
+        self.assertEqual(verdict, "failed")
+
+
+class WeatherFallbackCheckTests(unittest.TestCase):
+    """check_weather_fallback_dead — the rate limiter and the remembered verdict.
+
+    The check that watches the second weather tier is the only one here that
+    has to MAKE its own signal, so the two things worth pinning are both about restraint: it
+    probes at most once per interval, and it keeps reporting a dead tier on the runs in between
+    (rather than going quiet and letting the resolve sweep declare victory every few hours).
+    """
+
+    KEY = "probe:weather_fallback"
+    ERROR = "met.no thredds fetch failed: 400"
+
+    def setUp(self):
+        p = mock.patch.object(hc, "WEATHER_FALLBACK_PROBE_INTERVAL_H", 24.0)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def run_check(self, state, verdict, detail=ERROR, now=NOW):
+        """-> (issue, how many times the network probe was actually attempted)."""
+        with mock.patch.object(hc, "probe_weather_fallback",
+                               return_value=(verdict, detail)) as probe:
+            issue = hc.check_weather_fallback_dead(state, now)
+        return issue, probe.call_count
+
+    def test_a_failed_probe_alerts_low_and_fingerprints_on_the_error(self):
+        state = {}
+        issue, calls = self.run_check(state, "failed")
+        self.assertEqual(calls, 1)
+        key, severity, title, message, fingerprint = issue
+        self.assertEqual(key, "weather_fallback_dead")
+        self.assertEqual(severity, hc.notify.PRIORITY_LOW)  # redundancy lost, nothing is down
+        self.assertEqual(fingerprint, self.ERROR)  # a 400 (our bug) vs a timeout (their day)
+        self.assertIn("400", message)
+        self.assertIn("not answered once", message)  # no last_ok on record yet
+        self.assertFalse(state[self.KEY]["ok"])
+
+    def test_a_404_says_the_route_is_missing_rather_than_the_tier(self):
+        """The half-finished-deploy case: healthcheck.py updated, web app not rebuilt. Waking
+        someone with "the second weather source is dead" would send them to debug met.no."""
+        state = {}
+        issue, _calls = self.run_check(state, "failed", detail="HTTP 404")
+        self.assertIn("route missing", issue[3])
+
+    def test_a_dead_tier_keeps_being_reported_without_re_probing(self):
+        """The flap guard: if this went quiet between probes, RESOLVE_QUIET_S (3 h) would
+        declare it fixed and the next day's probe would push it as brand new — the alert-flap
+        regression this file's dedup rules exist to prevent, reintroduced by a check that only
+        speaks once a day."""
+        state = {}
+        self.run_check(state, "failed")
+        issue, calls = self.run_check(state, "failed", now=NOW + timedelta(hours=1))
+        self.assertEqual(calls, 0)  # nothing sent to met.no
+        self.assertIsNotNone(issue)  # ...and yet the issue is still present
+
+    def test_a_successful_probe_clears_it(self):
+        state = {self.KEY: {"last_probe": (NOW - timedelta(days=2)).isoformat(),
+                            "ok": False, "error": self.ERROR}}
+        issue, calls = self.run_check(state, "ok", detail="run 2026-01-15T06:00:00Z, 44 hours")
+        self.assertEqual(calls, 1)
+        self.assertIsNone(issue)
+        self.assertTrue(state[self.KEY]["ok"])
+        self.assertEqual(state[self.KEY]["last_ok"], NOW.isoformat())
+        self.assertNotIn("error", state[self.KEY])
+
+    def test_the_interval_is_respected_then_elapses(self):
+        state = {}
+        self.run_check(state, "ok")
+        _issue, calls = self.run_check(state, "ok", now=NOW + timedelta(hours=23, minutes=59))
+        self.assertEqual(calls, 0)
+        _issue, calls = self.run_check(state, "ok", now=NOW + timedelta(hours=24))
+        self.assertEqual(calls, 1)
+
+    def test_an_unreachable_web_app_does_not_spend_the_budget(self):
+        """Nothing left the box, so it was not a probe. Retrying on the next 5-minute tick is
+        free, and a web app that is genuinely down is check_todays_plan's alert to raise."""
+        state = {}
+        issue, calls = self.run_check(state, "unreachable", detail="ConnectionRefusedError: no")
+        self.assertEqual(calls, 1)
+        self.assertIsNone(issue)
+        self.assertNotIn(self.KEY, state)  # no stamp: the very next run tries again
+
+    def test_an_unreachable_run_leaves_an_earlier_verdict_standing(self):
+        old = (NOW - timedelta(days=2)).isoformat()
+        state = {self.KEY: {"last_probe": old, "ok": False, "error": self.ERROR}}
+        issue, _calls = self.run_check(state, "unreachable", detail="ConnectionRefusedError: no")
+        self.assertIsNotNone(issue)  # the tier was dead at the last real probe; still is
+        self.assertEqual(state[self.KEY]["last_probe"], old)  # and the budget is unspent
+
+    def test_zero_interval_disables_the_whole_check(self):
+        state = {}
+        with mock.patch.object(hc, "WEATHER_FALLBACK_PROBE_INTERVAL_H", 0.0):
+            issue, calls = self.run_check(state, "failed")
+        self.assertIsNone(issue)
+        self.assertEqual(calls, 0)
+        self.assertEqual(state, {})
+
+    def test_a_malformed_stamp_probes_rather_than_wedging(self):
+        state = {self.KEY: {"last_probe": "not a timestamp"}}
+        _issue, calls = self.run_check(state, "ok")
+        self.assertEqual(calls, 1)
 
 
 if __name__ == "__main__":

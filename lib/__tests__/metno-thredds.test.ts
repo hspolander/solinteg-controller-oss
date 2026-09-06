@@ -11,7 +11,12 @@ import { solarCalibrationByMonth } from '../consumption-data';
 // deployment's own (in-domain) coordinates, so that branch is never exercised.
 vi.mock('next/cache', () => ({ cacheLife: vi.fn() }));
 
-import { fetchSolarForecastDirect, fetchDailyMeanTempDirect } from '../metno-thredds';
+import {
+  fetchSolarForecastDirect,
+  fetchDailyMeanTempDirect,
+  probeMetNordicDirect,
+} from '../metno-thredds';
+import { cacheLife } from 'next/cache';
 
 const SHORTWAVE_VAR = 'integral_of_surface_downwelling_shortwave_flux_in_air_wrt_time';
 const TEMP_VAR = 'air_temperature_2m';
@@ -145,6 +150,55 @@ describe('fetchDailyMeanTempDirect', () => {
 
     const result = await fetchDailyMeanTempDirect();
     expect(result['2026-01-15']).toBeCloseTo(1.0, 1); // mean of 0.0°C and 2.0°C
+  });
+});
+
+describe('probeMetNordicDirect', () => {
+  // The liveness probe behind GET /api/weather-fallback-check. It exists because this whole
+  // module is only reached when Open-Meteo has already failed, so it can be — and on the
+  // reference deployment was, for weeks — completely dead without anything noticing.
+  it('reports the run it reached and how many hours it got', async () => {
+    vi.setSystemTime(new Date('2026-01-15T02:00:00Z')); // latest run boundary: 00Z
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      text: async () => opendapAscii([0, 3600 * 100, 3600 * 300], [270, 271, 272]),
+    } as Response);
+
+    await expect(probeMetNordicDirect()).resolves.toEqual({
+      runIso: '2026-01-15T00:00:00.000Z',
+      hours: 3,
+    });
+  });
+
+  it('does NOT answer from the cached wrapper — a cached success would hide a dead tier', async () => {
+    // The one property that makes this a liveness probe rather than a cache read:
+    // fetchMetNordicDirect is `'use cache'` with an 8 h expiry, so a probe routed through it
+    // could keep reporting yesterday's success while every live request 400s. cacheLife() is
+    // called only inside that wrapper, so its absence here is the proof.
+    vi.setSystemTime(new Date('2026-01-15T02:00:00Z'));
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      text: async () => opendapAscii([0, 3600 * 100], [270, 271]),
+    } as Response);
+    // Module-level mock, so it carries calls from every test above this one.
+    vi.mocked(cacheLife).mockClear();
+
+    await probeMetNordicDirect();
+    expect(vi.mocked(cacheLife)).not.toHaveBeenCalled();
+
+    // ...and the contrast: the normal fallback path does go through it.
+    await fetchSolarForecastDirect();
+    expect(vi.mocked(cacheLife)).toHaveBeenCalled();
+  });
+
+  it('surfaces the fetch failure instead of swallowing it', async () => {
+    // The shape that motivated it: every run in the walk-back returns the same status, so the
+    // probe
+    // must hand the caller a message the alert can name (healthcheck.py fingerprints on it).
+    vi.setSystemTime(new Date('2026-01-15T02:00:00Z'));
+    vi.mocked(fetch).mockResolvedValue({ ok: false, status: 400 } as Response);
+
+    await expect(probeMetNordicDirect()).rejects.toThrow('met.no thredds fetch failed: 400');
   });
 });
 

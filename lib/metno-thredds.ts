@@ -176,6 +176,21 @@ async function fetchMetNordicDirect() {
   return fetchLatestRun();
 }
 
+// Liveness probe for this whole tier, exercised on purpose by GET /api/weather-fallback-check
+// (see healthcheck.py's check_weather_fallback_dead). Resolves to the run it reached; throws
+// whatever fetchLatestRun threw.
+//
+// Deliberately NOT routed through fetchMetNordicDirect: that wrapper is `'use cache'`, so a
+// probe through it could keep answering from an hours-old cached success while the live path
+// fails — which is precisely what this exists to catch. It also must stay a *caller* of
+// fetchLatestRun rather than building its own request: the breakage that motivated it was in
+// the URL this module constructs (raw OPeNDAP brackets, see fetchPointSeries), so any probe
+// with a URL of its own would have passed happily while the real tier was dead.
+export async function probeMetNordicDirect(): Promise<{ runIso: string; hours: number }> {
+  const { runTime, shortwaveCumulative } = await fetchLatestRun();
+  return { runIso: runTime.toISOString(), hours: shortwaveCumulative.length };
+}
+
 // Converts a UTC instant to its Europe/Stockholm calendar date + wall-clock hour via Intl (not
 // manual +1/+2 arithmetic, which gets the spring/autumn DST transitions wrong) — Intl's IANA tz
 // data handles that correctly for free. If you've adapted SITE_LATITUDE/SITE_LONGITUDE outside

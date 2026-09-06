@@ -15,7 +15,8 @@ CLASSIFICATION changes (a check's optional 5th tuple element, defaulting to its 
 should_alert()), or when HEALTHCHECK_ALERT_COOLDOWN_S has passed and it is still unresolved.
 It is declared resolved, with a ✅ notice, only after HEALTHCHECK_RESOLVE_QUIET_S with no
 recurrence. One-shot notices (state keys prefixed "oneshot:") are different: sent exactly once
-ever, never repeated, never "resolved" — for milestones rather than problems.
+ever, never repeated, never "resolved" — for milestones rather than problems. Keys prefixed
+"probe:" are neither: they are a check's own bookkeeping (see check_weather_fallback_dead).
 
 These rules were rewritten after the simpler ones behaved badly on an INTERMITTENT fault, which
 is worth knowing if you are tempted to simplify them back. Resolving after a single clean run
@@ -38,6 +39,17 @@ Environment (beyond notify.py's own NTFY_*):
                                 Stockholm midnight (default 1800) — the rows only exist once
                                 the first post-midnight render lands (solinteg-telemetry.timer
                                 runs a few minutes past midnight for exactly this)
+  WEATHER_FALLBACK_PROBE_INTERVAL_H
+                                how often to actively exercise the second weather tier
+                                (default 24; 0 disables the probe — set that if
+                                SOLAR_FORECAST_MODEL is not 'metno_nordic', since the tier
+                                does not exist then). Each probe costs thredds.met.no a live
+                                NetCDF subset, so this is a daily liveness check, not a health
+                                metric to sample tightly.
+  WEATHER_FALLBACK_URL          the probe endpoint (default
+                                http://localhost:3000/api/weather-fallback-check)
+  WEATHER_FALLBACK_TIMEOUT_S    probe timeout (default 120 — the route's own worst case is
+                                RUN_LOOKBACK_ATTEMPTS x THREDDS_FETCH_TIMEOUT_MS = 100 s)
   ORACLE_REVIEW_MIN_DAYS        one-shot: send a single "oracle-review data is ready" notice
                                 once this many status='ok' oracle_daily rows exist
                                 (default 16; 0 disables)
@@ -67,6 +79,8 @@ import logging
 import os
 import shutil
 import sqlite3
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -88,6 +102,13 @@ RESOLVE_QUIET_S = int(os.environ.get("HEALTHCHECK_RESOLVE_QUIET_S", "10800"))
 POLLER_STALE_S = int(os.environ.get("POLLER_STALE_S", "300"))
 WEATHER_STALE_S = int(os.environ.get("WEATHER_STALE_S", "1800"))
 CONTROL_ERROR_WINDOW_S = int(os.environ.get("CONTROL_ERROR_WINDOW_S", "900"))
+# Second-weather-tier liveness probe (check_weather_fallback_dead). Daily, not tighter: the rot
+# it catches lasts weeks, while each probe makes thredds.met.no subset a multi-GB NetCDF
+# server-side, and MET Norway's terms ask clients to be gentle.
+WEATHER_FALLBACK_PROBE_INTERVAL_H = float(os.environ.get("WEATHER_FALLBACK_PROBE_INTERVAL_H", "24"))
+WEATHER_FALLBACK_URL = os.environ.get(
+    "WEATHER_FALLBACK_URL", "http://localhost:3000/api/weather-fallback-check")
+WEATHER_FALLBACK_TIMEOUT_S = float(os.environ.get("WEATHER_FALLBACK_TIMEOUT_S", "120"))
 DISK_FREE_MIN_PCT = float(os.environ.get("DISK_FREE_MIN_PCT", "10"))
 PLAN_GRACE_AFTER_MIDNIGHT_S = int(os.environ.get("PLAN_GRACE_AFTER_MIDNIGHT_S", "1800"))
 # How far into the plan's own horizon to judge the solar source. Slots past the weather
@@ -112,6 +133,11 @@ PROBE_READY_MIN_SAMPLES = int(os.environ.get("PROBE_READY_MIN_SAMPLES", "30"))
 # State keys with this prefix are one-shot notices: sent once, then remembered forever —
 # excluded from both the cooldown re-alert path and the "resolved" sweep in main().
 ONESHOT_PREFIX = "oneshot:"
+
+# State keys with this prefix are a check's own bookkeeping, not an issue: no last_seen, no
+# alert history, and MUST survive the resolve sweep (which would otherwise delete them as
+# malformed entries — and a deleted entry here means a rate limiter that resets every 5 min).
+PROBE_PREFIX = "probe:"
 
 UTC = timezone.utc
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
@@ -239,6 +265,158 @@ def check_solar_source_degraded(con: sqlite3.Connection, now: datetime):
                 f"climatology is next. Worth a look before then.", "stale")
 
     return None
+
+
+def probe_weather_fallback():
+    """Exercise the second weather tier through the web app. -> (verdict, detail).
+
+    Never raises. verdict is one of:
+      'ok'           the tier answered with real data
+      'failed'       it was exercised and could not deliver (detail says why)
+      'unreachable'  the local web app never answered, so NOTHING was exercised
+
+    The three-way split is what the rate limiter needs: 'failed' means a request did reach
+    met.no and today's budget is spent, while 'unreachable' means it never left the box, so
+    retrying on the next tick costs nobody anything — and a web app that is actually down is
+    check_todays_plan's alert, not this one's. Reporting it here would blame the wrong
+    component for a failure the tier had no part in.
+    """
+    req = urllib.request.Request(WEATHER_FALLBACK_URL, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=WEATHER_FALLBACK_TIMEOUT_S) as res:
+            body = json.loads(res.read().decode("utf-8", "replace"))
+        return "ok", f"run {body.get('run')}, {body.get('hours')} forecast hours"
+    except urllib.error.HTTPError as exc:
+        # The route answers 503 + {ok:false,error} when the tier itself failed. Anything else
+        # is still a real finding, and 404 in particular is worth recognising: it means this
+        # check is running against a web app that predates the route.
+        detail = f"HTTP {exc.code}"
+        try:
+            detail = json.loads(exc.read().decode("utf-8", "replace")).get("error") or detail
+        except (ValueError, OSError):
+            pass
+        return "failed", detail
+    except (urllib.error.URLError, OSError) as exc:
+        # URLError carries the underlying socket error in .reason; a bare OSError can also
+        # reach here from the read. A timeout counts as a real probe: the route fired, so the
+        # upstream request went out, and "did not answer inside the budget" is a verdict on the
+        # tier. Everything else here happened before anything was sent.
+        reason = getattr(exc, "reason", exc)
+        if isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError):
+            return "failed", f"no answer within {WEATHER_FALLBACK_TIMEOUT_S:.0f}s"
+        return "unreachable", f"{type(reason).__name__}: {reason}"
+    except ValueError as exc:
+        return "failed", f"unparseable response: {exc}"
+    except Exception as exc:  # noqa: BLE001 — deliberate, see below
+        # Last resort, and the one broad except in this file. Every other check reaches the
+        # outside world only through safe_scalar/safe_row, which swallow their own errors,
+        # because an exception escaping a check would abort main() before it sends ANY alert —
+        # a broken smoke detector reads exactly like no fire. This one makes an HTTP request,
+        # and urllib's error surface is not fully OSError: http.client raises
+        # BadStatusLine/IncompleteRead off HTTPException, which is a plain Exception. Reported
+        # rather than hidden, and it counts as a probe so an unexpected-but-persistent fault
+        # cannot become a 5-minute retry loop.
+        return "failed", f"unexpected {type(exc).__name__}: {exc}"
+
+
+def weather_fallback_probe_due(entry: dict, now: datetime) -> bool:
+    last = entry.get("last_probe")
+    if not last:
+        return True
+    try:
+        elapsed = (now - datetime.fromisoformat(last)).total_seconds()
+    except (TypeError, ValueError):
+        return True  # malformed timestamp — probe now and overwrite it
+    return elapsed >= WEATHER_FALLBACK_PROBE_INTERVAL_H * 3600
+
+
+def check_weather_fallback_dead(state: dict, now: datetime):
+    """Is the second weather tier alive? Asked on purpose, not only when it is needed.
+
+    Every other check here reads telemetry that something else already produced. This one has
+    to generate its own signal, because the thing it watches is only ever used when the primary
+    source fails — roughly one day in ten on the reference deployment — and is therefore capable
+    of being broken for weeks without a trace. That is not hypothetical: the Thredds fetch there
+    was returning 400 on every run for an unknown period (raw OPeNDAP brackets), invisible until
+    the one morning it was needed, and even then it degraded quietly to climatology.
+    check_solar_source_degraded() only fires once ALL the live tiers are down, so it cannot see a
+    single dead tier — by the time it speaks, the redundancy is already gone.
+
+    Unlike the probe, the JUDGEMENT runs every tick, off the remembered verdict. That is
+    deliberate: reporting the issue only on the ~1 run in 288 that actually probes would leave
+    it absent for hours in between, the resolve sweep would declare it fixed after
+    RESOLVE_QUIET_S, and the next day's probe would push it as brand new — the exact
+    alert-flapping this file's dedup rules exist to prevent. Remembering the verdict makes a
+    dead tier one standing issue under the normal cooldown, and it stops being reported the
+    moment a probe succeeds.
+
+    Note what this does NOT cover: if healthcheck.py itself stops running, nothing here (or
+    anywhere) notices. That is true of every alert in this file, not a gap specific to the
+    probe — see deploy/README.md's dead-man's switch for the box-level answer.
+
+    Only meaningful when the Thredds tier exists at all (SOLAR_FORECAST_MODEL='metno_nordic');
+    on any other model the route reports the tier as failing, so set
+    WEATHER_FALLBACK_PROBE_INTERVAL_H=0 there.
+
+    PRIORITY_LOW on purpose. The chain still has the persisted last-good forecast and then
+    climatology beneath this tier, so a dead tier 2 is a loss of depth, not a live outage —
+    the same reasoning as check_weather_stale.
+    """
+    if WEATHER_FALLBACK_PROBE_INTERVAL_H <= 0:
+        return None
+
+    key = PROBE_PREFIX + "weather_fallback"
+    prior = state.get(key) or {}
+    if weather_fallback_probe_due(prior, now):
+        # Stamped BEFORE the request, not after: if this run is killed mid-flight, or the probe
+        # is cut off by its own timeout, the day's budget still counts as spent. Retrying every
+        # 5 minutes against a server that subsets a multi-GB NetCDF per call is the one outcome
+        # worth engineering against.
+        entry = dict(prior, last_probe=now.isoformat())
+        state[key] = entry
+        verdict, detail = probe_weather_fallback()
+        if verdict == "unreachable":
+            if prior:
+                state[key] = prior
+            else:
+                state.pop(key, None)
+            log.info("weather fallback probe skipped, web app unreachable: %s", detail)
+        elif verdict == "ok":
+            entry.update(ok=True, last_ok=now.isoformat())
+            entry.pop("error", None)
+            log.info("weather fallback probe ok: %s", detail)
+        else:
+            entry.update(ok=False, error=detail)
+            log.warning("weather fallback probe failed: %s", detail)
+
+    current = state.get(key) or {}
+    if current.get("ok") is not False:
+        return None
+
+    detail = current.get("error") or "unknown error"
+    last_ok = current.get("last_ok")
+    worked = (f"It last answered at {last_ok}."
+              if last_ok else "It has not answered once since this check was deployed.")
+    if "404" in detail:
+        # Worth saying out loud rather than leaving as a bare status: a 404 is the probe
+        # ENDPOINT missing, not the weather tier failing, and the two want different actions.
+        # The likely cause is a half-finished deploy — healthcheck.py updated, the web app not
+        # rebuilt — which is a confusing thing to be woken by if the alert only says "dead".
+        worked += (" A 404 is this route missing rather than the tier failing — check that the "
+                   "web app was rebuilt and restarted by the last deploy.")
+    return ("weather_fallback_dead", notify.PRIORITY_LOW,
+            "Solinteg: the second weather source is dead",
+            f"The MET Norway Thredds fallback (tier 2 of the solar/temperature chain) failed "
+            f"its liveness probe: {detail}. {worked} Nothing is broken right now — Open-Meteo "
+            f"is still serving the plan, and beneath this tier sit the persisted last-good "
+            f"forecast and then climatology — but the redundancy is gone until it is fixed, "
+            f"and a dead tier here is invisible on every other day. Reproduce with: curl -s "
+            f"localhost:3000/api/weather-fallback-check. See lib/metno-thredds.ts.",
+            # Fingerprint = the error text itself. Its shape is stable (the fetch's own
+            # "met.no thredds fetch failed: <status>"), and the distinction it carries is the
+            # one worth breaking the cooldown for: a 400 is a bug on this side, while a timeout
+            # or a 5xx is met.no having a bad day.
+            detail)
 
 
 def check_todays_plan(con: sqlite3.Connection, today: str, now: datetime):
@@ -538,6 +716,8 @@ def main() -> int:
         log.error("cannot open telemetry.db read-only: %s", exc)
         return 1
 
+    state = load_state()
+
     try:
         issues = run_checks(con, now)
         oneshots = [n for n in (oracle_review_ready(con),
@@ -546,7 +726,14 @@ def main() -> int:
     finally:
         con.close()
 
-    state = load_state()
+    # Not part of run_checks(): this one reads no telemetry at all — it generates its own
+    # signal — so it needs the state file both to rate-limit itself and to remember the last
+    # verdict across the runs it does not probe on. Hence load_state() moving above the DB
+    # checks, which is also why it is passed the same dict the alerting loop below consumes.
+    fallback = check_weather_fallback_dead(state, now)
+    if fallback is not None:
+        issues.append(fallback)
+
     seen_keys = set()
     for issue in issues:
         key, severity, title, message = issue[:4]
@@ -590,7 +777,7 @@ def main() -> int:
     # Cost: a genuinely-fixed issue's ✅ arrives up to RESOLVE_QUIET_S late. Worth it — a
     # premature all-clear on a flapping fault is the more misleading of the two.
     for key, entry in list(state.items()):
-        if key.startswith(ONESHOT_PREFIX) or key in seen_keys:
+        if key.startswith((ONESHOT_PREFIX, PROBE_PREFIX)) or key in seen_keys:
             continue
         last_seen = entry.get("last_seen") or entry.get("last_alert")
         if last_seen is None:  # malformed entry — don't wedge on it
