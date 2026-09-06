@@ -55,7 +55,21 @@ export const hddNormalByMonth: number[] = [12.3, 11.1, 9.3, 5.6, 1.4, 0.2, 0, 0,
 // TRUE load, not the night-tariff-distorted series that forced the old uniform split:
 // each month uses only its clean window (winters Nov-Feb 2022-2025 where PV is negligible
 // and the Jan-2026 battery didn't exist yet; other months from the pre-PV year; April
-// interpolated Mar/May — no clean April exists). Winter shape: morning (06-07) and
+// interpolated Mar/May — no clean April exists).
+//
+// JULY and AUGUST are different: they come from the house's OWN measured house_load_w (30 and
+// 31 complete days of telemetry, --telemetry-months 7,8) rather than the meter history,
+// because the only clean meter window for them is pre-PV, pre-battery behaviour. On the
+// reference deployment the refresh moved real weight: the evening 17-21 block dropped from
+// 29.4% to 23.4% (July) and 29.0% to 24.3% (August), the old 18h spike disappeared, and the
+// peak landed at 16h in both months, with midday up ~10%. Two independent months agreeing in
+// direction and size is the reason to believe it, and the daily TOTAL barely moved (July
+// 19.4 -> 20.9, August 20.3 -> 20.3 kWh/day) — the level was right, the shape was not. The
+// likely reading, as interpretation rather than measurement: discretionary load has migrated
+// into the solar-rich afternoon and away from the pre-PV dinner peak. Expect your own site to
+// differ; regenerate rather than inheriting these.
+//
+// Winter shape: morning (06-07) and
 // evening (16-18) peaks ~5-6%/h, midday trough ~2-2.5%/h — the uniform 4.17%/h assumption
 // under-allocated load at exactly the price-peak hours by ~30-40%. October's extreme
 // midday trough rests on a single pre-PV month (31 days) — noisier than the winter rows
@@ -67,8 +81,8 @@ export const hourShareByMonth: number[][] = [
   [0.0362, 0.0370, 0.0382, 0.0368, 0.0354, 0.0563, 0.0629, 0.0513, 0.0468, 0.0361, 0.0241, 0.0306, 0.0332, 0.0330, 0.0340, 0.0330, 0.0418, 0.0558, 0.0649, 0.0507, 0.0446, 0.0384, 0.0392, 0.0397],
   [0.0160, 0.0167, 0.0166, 0.0170, 0.0165, 0.0520, 0.0489, 0.0480, 0.0586, 0.0527, 0.0320, 0.0450, 0.0534, 0.0549, 0.0508, 0.0481, 0.0633, 0.0624, 0.0745, 0.0562, 0.0412, 0.0296, 0.0248, 0.0210],
   [0.0235, 0.0212, 0.0210, 0.0215, 0.0215, 0.0381, 0.0375, 0.0431, 0.0603, 0.0492, 0.0385, 0.0462, 0.0598, 0.0452, 0.0381, 0.0544, 0.0472, 0.0645, 0.0794, 0.0568, 0.0404, 0.0351, 0.0308, 0.0264],
-  [0.0247, 0.0247, 0.0239, 0.0241, 0.0228, 0.0268, 0.0281, 0.0449, 0.0551, 0.0513, 0.0426, 0.0440, 0.0444, 0.0438, 0.0429, 0.0508, 0.0496, 0.0644, 0.0754, 0.0631, 0.0487, 0.0420, 0.0344, 0.0275],
-  [0.0279, 0.0273, 0.0278, 0.0258, 0.0273, 0.0271, 0.0282, 0.0347, 0.0459, 0.0481, 0.0407, 0.0467, 0.0538, 0.0465, 0.0484, 0.0429, 0.0394, 0.0712, 0.0679, 0.0588, 0.0500, 0.0417, 0.0374, 0.0343],
+  [0.0267, 0.0271, 0.0263, 0.0261, 0.0266, 0.0276, 0.0309, 0.0435, 0.0473, 0.0447, 0.0454, 0.0514, 0.0472, 0.0505, 0.0498, 0.0499, 0.0750, 0.0632, 0.0465, 0.0415, 0.0422, 0.0404, 0.0378, 0.0326],
+  [0.0243, 0.0233, 0.0246, 0.0236, 0.0238, 0.0254, 0.0360, 0.0436, 0.0488, 0.0446, 0.0470, 0.0591, 0.0552, 0.0509, 0.0474, 0.0489, 0.0662, 0.0660, 0.0458, 0.0484, 0.0443, 0.0387, 0.0327, 0.0312],
   [0.0289, 0.0267, 0.0301, 0.0299, 0.0294, 0.0326, 0.0476, 0.0441, 0.0503, 0.0389, 0.0389, 0.0448, 0.0496, 0.0465, 0.0447, 0.0387, 0.0430, 0.0655, 0.0681, 0.0520, 0.0444, 0.0412, 0.0338, 0.0305],
   [0.0381, 0.0431, 0.0440, 0.0425, 0.0465, 0.0522, 0.0870, 0.0776, 0.0483, 0.0206, 0.0130, 0.0108, 0.0106, 0.0028, 0.0084, 0.0230, 0.0346, 0.0654, 0.0911, 0.0679, 0.0509, 0.0412, 0.0401, 0.0402],
   [0.0426, 0.0427, 0.0428, 0.0445, 0.0472, 0.0506, 0.0594, 0.0575, 0.0472, 0.0318, 0.0237, 0.0214, 0.0221, 0.0226, 0.0305, 0.0427, 0.0617, 0.0631, 0.0490, 0.0407, 0.0397, 0.0350, 0.0383, 0.0432],
