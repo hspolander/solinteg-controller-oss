@@ -98,8 +98,8 @@ describe('Action contract: lib/optimizer.ts <-> scripts/services/dispatch_loop.p
     // If a refactor changes the shape of either declaration, the parsers above would start
     // returning [] and every assertion would vacuously pass. Pin the current values so the
     // test fails loudly instead of going quiet.
-    expect(tsActionUnion()).toEqual(['charge', 'discharge', 'idle']);
+    expect(tsActionUnion()).toEqual(['charge', 'discharge', 'hold', 'idle']);
     expect(pyTuple('FORCED_ACTIONS')).toEqual(['charge', 'discharge']);
-    expect(pyTuple('AUTO_ACTIONS')).toEqual(['idle']);
+    expect(pyTuple('AUTO_ACTIONS')).toEqual(['hold', 'idle']);
   });
 });

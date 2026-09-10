@@ -250,15 +250,26 @@ class ApplyTargetRouting(unittest.TestCase):
 
     def test_unknown_action_still_fails_safe_but_warns_loudly(self):
         # The scenario this exists for: the optimizer emits an action this executor does not
-        # implement.
-        # Auto is still the right fail-safe, but it must not be silent — auto CHARGES from
-        # surplus, which for a hold-style action is the opposite of what was planned.
+        # implement. Auto is still the right fail-safe, but it must not be silent — auto
+        # CHARGES from surplus, which for a hold-style action would be the opposite of what
+        # was planned. "frobnicate" stands in for any action neither declared nor implemented;
+        # 'hold' itself is now a deliberate AUTO_ACTIONS member (see FORCED_ACTIONS/AUTO_ACTIONS'
+        # own comment) and must NOT warn — that is test_hold_maps_to_auto_without_a_warning below.
         with self.assertLogs("solinteg.dispatch", level="WARNING") as caught:
-            dl.apply_target(object(), "hold", 0)
+            dl.apply_target(object(), "frobnicate", 0)
         self.assertEqual(self.calls, [("auto", None)])
         joined = "\n".join(caught.output)
         self.assertIn("unrecognised dispatch action", joined)
-        self.assertIn("hold", joined)
+        self.assertIn("frobnicate", joined)
+
+    def test_hold_maps_to_auto_without_a_warning(self):
+        # 'hold' is a DECLARED auto mapping (AUTO_ACTIONS), not an oversight — no register
+        # expresses "don't charge, export the surplus" (MODBUS.md), so auto is genuinely the
+        # only thing apply_target can do with it. It must route exactly like 'idle': to auto,
+        # and quietly, since a warning here would be a false alarm on every hold slot.
+        with self.assertNoLogs("solinteg.dispatch", level="WARNING"):
+            dl.apply_target(object(), "hold", 0)
+        self.assertEqual(self.calls, [("auto", None)])
 
     def test_declared_vocabularies_are_disjoint(self):
         # An action in both tuples would make the contract test's union check pass while

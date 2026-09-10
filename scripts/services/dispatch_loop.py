@@ -266,7 +266,14 @@ SLOT_HOURS = 0.25
 # the TS union. Adding an action there fails that test until it is either given a branch below
 # or listed in AUTO_ACTIONS as a deliberate auto mapping. See CONTRIBUTING.md.
 FORCED_ACTIONS = ("charge", "discharge")
-AUTO_ACTIONS = ("idle",)
+# 'hold' (freeze SoC, export the solar surplus) is a DELIBERATE auto mapping, not an oversight:
+# no known register expresses "don't charge, export the surplus" (MODBUS.md warns against the
+# nearest approximation), so there is nothing else apply_target() could do with it. It is also
+# gated to disarmed installs on the TS side (lib/plan.ts's holdEnabled), precisely because
+# auto's real behaviour - charging the surplus - is the opposite of what hold asks for; see that
+# gate's comment for the full reasoning. Declared here so action-contract.test.ts's "every
+# Action is accounted for" check passes on purpose rather than by accident.
+AUTO_ACTIONS = ("idle", "hold")
 
 # One real source of truth: same env var name lib/constants.ts reads, matching hardcoded
 # fallback default (kept in sync by lib/__tests__/constants-cross-language.test.ts).
