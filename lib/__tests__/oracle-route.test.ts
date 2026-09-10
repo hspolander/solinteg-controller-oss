@@ -26,6 +26,12 @@ vi.mock('../telemetry', () => ({
   readArmedEvents: vi.fn(),
   readPriceSnapshot: vi.fn(),
   readOracleDates: vi.fn(),
+  // Defaults to "nothing persisted yet": every day in the sweep falls through to a fresh
+  // computeOracleDay call, matching these tests' original assumption from before the shadow
+  // sweep's stored-row short-circuit existed. readDayAheadDispatch only matters when a test
+  // passes shadow=1, which none here do, so its default (undefined = no run found) is inert.
+  readRecentOracleDays: vi.fn(() => []),
+  readDayAheadDispatch: vi.fn(),
   upsertOracleDaily: vi.fn(),
 }));
 vi.mock('../oracle', async (importOriginal) => {

@@ -182,5 +182,11 @@ CREATE TABLE IF NOT EXISTS oracle_daily (
     diagnostics_json          TEXT               -- coverage detail + day-D energy-balance residual
                                                  -- (pv + import − load − export − ΔSoC): systematically
                                                  -- nonzero ⇒ model physics drift from the real meter,
-                                                 -- the one case where negative regrets mean something
+                                                 -- the one case where negative regrets mean something.
+                                                 -- Also carries .shadow — { shadowVersion, dayAhead:
+                                                 -- ShadowScore|null }, the nightly sweep's shadow score
+                                                 -- of the optimizer's own day-ahead plan (lib/oracle.ts);
+                                                 -- shadowVersion is the backfill sentinel: rows whose
+                                                 -- version doesn't match SHADOW_SCORE_VERSION are
+                                                 -- re-scored once by the next sweep
 );
