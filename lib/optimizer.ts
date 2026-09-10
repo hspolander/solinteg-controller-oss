@@ -6,6 +6,10 @@ import {
   BATTERY_WEAR_COST_ORE_PER_KWH,
   GRID_KW,
   MAX_DEFERRAL_SACRIFICE_ORE,
+  HOLD_MIN_PV_KW,
+  HOLD_REFILL_WINDOW_H,
+  HOLD_REFILL_MARGIN,
+  HOLD_PRICE_DROP_MARGIN_ORE,
 } from './constants';
 
 export { BATTERY_KWH, BATTERY_MAX_KW, GRID_KW, BATTERY_MIN_SOC_KWH }; // re-export for tests and external callers
@@ -17,12 +21,19 @@ const MIN_SOC_KWH = BATTERY_MIN_SOC_KWH;
 
 const SOC_LEVELS = 193; // SoC discretisation for the DP (≈0.12 kWh resolution over the usable range)
 
-export type Action = 'charge' | 'discharge' | 'idle';
+// Hold mode (gated, opt-in via holdEnabled). Lets the DP freeze SoC and EXPORT
+// solar surplus instead of forcing it into the battery — but only when three gate conditions
+// hold (see dpCore). Gate parameters live in lib/constants.ts (env-overridable, natural units);
+// only the slot-unit conversions happen here.
+const HOLD_MIN_PV_KWH = HOLD_MIN_PV_KW / 4; // gate 2: gross PV threshold → per 15-min slot
+const HOLD_REFILL_WINDOW_SLOTS = Math.round(HOLD_REFILL_WINDOW_H * 4); // gates 1+3: hours → slots
+
+export type Action = 'charge' | 'discharge' | 'idle' | 'hold';
 
 export interface OptimizerSlot {
   startTime: string;
-  buyPrice: number; // öre/kWh — priceIncludingTaxAndSurcharge + 71 öre skatt/överföring
-  sellPrice: number; // öre/kWh — price received per exported kWh: spot + EXPORT_BONUS_ORE (nätnytta), see DOMAIN.md
+  buyPrice: number; // öre/kWh — priceIncludingTaxAndSurcharge + 71 öre tax/transfer
+  sellPrice: number; // öre/kWh — price received per exported kWh: spot + EXPORT_BONUS_ORE (grid benefit), see DOMAIN.md
   solarKwh: number; // expected solar production for this 15-min slot
   consumptionKwh?: number; // expected household load for this 15-min slot (optional; defaults to 0)
   // Provenance tags, informational only — the DP never reads these, they exist purely so
@@ -180,6 +191,7 @@ export function optimizeDispatch(
     deferralRateOrePerKwhHour?: number;
     maxDeferralSacrificeOre?: number;
     solarRiskPremiumOre?: number;
+    holdEnabled?: boolean;
   },
 ): DispatchSlot[] {
   if ((opts?.deferralRateOrePerKwhHour ?? 0) > 0 && slots.length > 0) {
@@ -206,6 +218,7 @@ function dpCore(
     loadFactor?: number;
     deferralRateOrePerKwhHour?: number;
     solarRiskPremiumOre?: number;
+    holdEnabled?: boolean;
   },
 ): DispatchSlot[] {
   const n = slots.length;
@@ -257,6 +270,33 @@ function dpCore(
     suffixSolarKwh[i] = suffixSolarKwh[i + 1] + slots[i].solarKwh;
   }
 
+  // Hold gates (opt-in). Precompute per-slot whether the DP MAY freeze SoC and export solar
+  // surplus at slot i instead of forcing it into the battery. Gate 1 (prices heading down) + gate 2
+  // (gross PV > 3 kW) are pure slot conditions → holdSlotEligible[i]. Gate 3 (refill guarantee) also
+  // depends on SoC and is tested in the s-loop against refillableSolarKwh[i]. No-op when holdEnabled=false
+  // (default): the arrays are zeros and holdOK short-circuits, so the DP is bit-identical to before.
+  const holdEnabled = opts?.holdEnabled ?? false;
+  const holdSlotEligible = new Uint8Array(n);
+  const refillableSolarKwh = new Float64Array(n);
+  if (holdEnabled) {
+    for (let i = 0; i < n; i++) {
+      const pvOk = slots[i].solarKwh > HOLD_MIN_PV_KWH; // gate 2 (gross PV)
+      // gate 1: sell price now ≥ cheapest BUY within the refill window ahead + margin
+      let minBuyAhead = Infinity;
+      const g1End = Math.min(n, i + 1 + HOLD_REFILL_WINDOW_SLOTS);
+      for (let k = i + 1; k < g1End; k++) if (slots[k].buyPrice < minBuyAhead) minBuyAhead = slots[k].buyPrice;
+      const priceDropOk =
+        Number.isFinite(minBuyAhead) && slots[i].sellPrice - minBuyAhead >= HOLD_PRICE_DROP_MARGIN_ORE;
+      holdSlotEligible[i] = pvOk && priceDropOk ? 1 : 0;
+      // gate 3 (left-hand side): chargeable solar over the next 12 h — load-netted, capped to the grid limit,
+      // efficiency-corrected. min(...,SLOT_MAX_KWH) prevents curtailed energy from overestimating refill.
+      let refill = 0;
+      const g3End = Math.min(n, i + HOLD_REFILL_WINDOW_SLOTS);
+      for (let k = i; k < g3End; k++) refill += Math.min(solarRem[k], SLOT_MAX_KWH) * ONE_WAY_EFF;
+      refillableSolarKwh[i] = refill;
+    }
+  }
+
   // Backward pass: costToGo[level] = min öre cost from the next slot onward at that SoC level.
   let costToGo = new Float64Array(SOC_LEVELS); // terminal value 0
   if (opts?.endSoc !== undefined) {
@@ -290,6 +330,12 @@ function dpCore(
       // free solar auto-charges it to unless something actively discharges it instead
       // (handled separately, j < s below) — see autoChargeInputKwh's definition above.
       const naturalFloor = idxOf(Math.min(soc + autoInput * ONE_WAY_EFF, BATTERY_KWH));
+      // Hold allowed at (i, s)? gate 1+2 (slot level) AND gate 3 (refill ≥ 1.1× headroom).
+      // When true the DP may choose j ∈ [s, naturalFloor) = freeze/partially store and export the surplus.
+      const holdOK =
+        holdEnabled &&
+        holdSlotEligible[i] === 1 &&
+        refillableSolarKwh[i] >= HOLD_REFILL_MARGIN * Math.max(0, BATTERY_KWH - soc);
       // Solar-redundancy premium for grid-buying AT THIS state: scales with how much of the
       // remaining headroom the strictly-future raw forecast solar could fill on its own (see
       // suffixSolarKwh above for why raw, not netted). Headroom is this slot's proxy for
@@ -306,7 +352,7 @@ function dpCore(
       let bestJ = s;
       for (let j = lo; j <= hi; j++) {
         if (j < s && j < minSocLevel) continue; // never discharge below the floor
-        if (j >= s && j < naturalFloor) continue; // can't charge less than auto-charging already provides
+        if (j >= s && j < naturalFloor && !holdOK) continue; // auto-charge floor; relaxed when hold is gated ON
         const dE = socOf(j) - soc;
         let gImp: number;
         let gExp: number;
@@ -384,7 +430,13 @@ function dpCore(
     } else {
       const need = dE / ONE_WAY_EFF;
       const gridForCharging = Math.max(0, need - Math.min(solarRem[i], need));
-      action = gridForCharging > step ? 'charge' : 'idle';
+      // 'hold' = solar surplus that auto/idle WOULD have stored but is exported here: SoC stayed
+      // below the natural floor despite surplus. Can only happen when the auto-charge block has
+      // been relaxed (holdOK), so the label is unambiguous. '- step' guards against discretization noise.
+      const naturalFloorSoc = Math.min(soc + Math.min(solarRem[i], SLOT_MAX_KWH) * ONE_WAY_EFF, BATTERY_KWH);
+      if (gridForCharging > step) action = 'charge';
+      else if (f.solarExport > 1e-6 && socNext < naturalFloorSoc - step) action = 'hold';
+      else action = 'idle';
     }
     result[i] = {
       startTime: slots[i].startTime,

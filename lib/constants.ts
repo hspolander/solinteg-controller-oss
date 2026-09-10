@@ -163,6 +163,40 @@ export const MAX_DEFERRAL_SACRIFICE_ORE = numEnv('SOLINTEG_DEFERRAL_MAX_SACRIFIC
  */
 export const SOLAR_RISK_PREMIUM_ORE_PER_KWH = numEnv('SOLINTEG_SOLAR_RISK_PREMIUM_ORE', 20);
 
+// ---- Hold mode (opt-in, shadow-only — see lib/plan.ts's holdEnabled wiring) ----
+// Gate parameters for the DP's 'hold' action: freeze SoC and export the solar surplus instead
+// of storing it. Slot-unit conversions (kW → kWh/slot, hours → slots) happen at the use site
+// in lib/optimizer.ts; the values here stay in natural units like everything else in this file.
+
+/**
+ * Gate 2: minimum gross PV (kW) for a slot to be hold-eligible — below this the surplus is
+ * too small for exporting it to beat storing it once round-trip losses and wear are in.
+ * Env: SOLINTEG_HOLD_MIN_PV_KW.
+ */
+export const HOLD_MIN_PV_KW = numEnv('SOLINTEG_HOLD_MIN_PV_KW', 3);
+
+/**
+ * Gates 1+3: look-ahead window (hours) for both the price-drop test (cheapest buy ahead)
+ * and the refill guarantee (forecast solar available to re-fill what hold declines to store).
+ * Env: SOLINTEG_HOLD_REFILL_WINDOW_H.
+ */
+export const HOLD_REFILL_WINDOW_H = numEnv('SOLINTEG_HOLD_REFILL_WINDOW_H', 12);
+
+/**
+ * Gate 3: refillable solar within the window must cover the battery's remaining headroom
+ * times this margin (1.1 = full + 10 %) before hold may decline to store — the buffer absorbs
+ * forecast optimism so hold can't strand the battery below full ahead of an expensive evening.
+ * Env: SOLINTEG_HOLD_REFILL_MARGIN.
+ */
+export const HOLD_REFILL_MARGIN = numEnv('SOLINTEG_HOLD_REFILL_MARGIN', 1.1);
+
+/**
+ * Gate 1: sell price now must beat the cheapest buy price within the window by at least this
+ * many öre before a slot is hold-eligible. 0 = any non-negative spread qualifies; raise it to
+ * demand a real profit margin per exported kWh. Env: SOLINTEG_HOLD_PRICE_DROP_ORE.
+ */
+export const HOLD_PRICE_DROP_MARGIN_ORE = numEnv('SOLINTEG_HOLD_PRICE_DROP_ORE', 0);
+
 /**
  * Trailing window (days) for the live per-hour load profile read from telemetry readings,
  * which replaces the static Ellevio-fitted hour shape whenever enough data exists (see
