@@ -73,6 +73,10 @@ Environment (beyond notify.py's own NTFY_*):
                                 rows (default 900)
   DISK_FREE_MIN_PCT            minimum free space on / before alerting (default 10) - a full
                                 disk breaks telemetry writes and the nightly backup alike
+  SOLAR_CACHE_WRITE_LAG_MAX_S  how far solar-forecast-cache.json's fetchedAt may lag a run that
+                                just used a live forecast before the WRITE path (not just the
+                                fallback chain) counts as broken (default 7200 = 2h). See
+                                check_solar_cache_write_broken.
 """
 import json
 import logging
@@ -117,6 +121,16 @@ PLAN_GRACE_AFTER_MIDNIGHT_S = int(os.environ.get("PLAN_GRACE_AFTER_MIDNIGHT_S", 
 SOLAR_SOURCE_LOOKAHEAD_SLOTS = int(os.environ.get("SOLAR_SOURCE_LOOKAHEAD_SLOTS", "24"))
 # Only judge a run that is actually current; an old one means a different check's problem.
 SOLAR_SOURCE_MAX_RUN_AGE_S = int(os.environ.get("SOLAR_SOURCE_MAX_RUN_AGE_S", "3600"))
+# Mirrors lib/solar-forecast-cache.ts's own CACHE_PATH default — same file, read from the other
+# side. healthcheck.py runs as the app's own service user, so this needs no elevated access.
+SOLAR_FORECAST_CACHE_PATH = os.environ.get(
+    "SOLAR_FORECAST_CACHE_PATH", "/opt/solinteg/solar-forecast-cache.json")
+# How far the persisted-forecast tier's fetchedAt may lag a run that just used a live forecast
+# before the WRITE path itself counts as broken, not merely between renders. Wide enough that
+# a normal plan-refresh cadence is nowhere near it; tight enough to catch the fault in a couple
+# of hours rather than waiting out the full SOLAR_FORECAST_CACHE_MAX_AGE_H (default 8h) before
+# anything downstream would even notice the file was stale.
+SOLAR_CACHE_WRITE_LAG_MAX_S = int(os.environ.get("SOLAR_CACHE_WRITE_LAG_MAX_S", "7200"))
 ORACLE_REVIEW_MIN_DAYS = int(os.environ.get("ORACLE_REVIEW_MIN_DAYS", "16"))
 # Default 0 = OFF, deliberately: this is a "go run this probe" nag, and the question it scouts
 # for has already been answered once on the reference deployment (see MODBUS.md). Opt in by
@@ -264,6 +278,67 @@ def check_solar_source_degraded(con: sqlite3.Connection, now: datetime):
                 f"rather than failing. It expires (see SOLAR_FORECAST_CACHE_MAX_AGE_H), and "
                 f"climatology is next. Worth a look before then.", "stale")
 
+    return None
+
+
+def check_solar_cache_write_broken(con: sqlite3.Connection, now: datetime):
+    """Is the persisted-forecast tier's WRITE path actually still working?
+
+    lib/plan.ts calls saveSolarForecast() every time a live forecast (tier 1 or 2) succeeds —
+    which is most renders — so solar-forecast-cache.json's fetchedAt should track the newest
+    optimizer_runs row to within one plan-refresh cycle. This exists for the same reason
+    check_weather_fallback_dead does, one tier further down the same chain: the file is only
+    ever READ when both live tiers are already down, which is rare, so a broken WRITE (a
+    permission error, a full disk, a future refactor that stops calling saveSolarForecast) could
+    sit invisible for weeks — the exact shape that let tier 2 die silently on the reference
+    deployment.
+
+    Deliberately does NOT fire just because the file is old. If both live tiers are legitimately
+    down the file SHOULD stop updating (there is nothing new to persist), and
+    check_solar_source_degraded's 'stale' branch already reports that correctly as the fallback
+    working, not failing. This only fires when the LATEST run says a live forecast just
+    succeeded (solarSource == 'forecast') but the persisted copy was not refreshed to match —
+    a combination only possible if the write path itself is broken.
+    """
+    row = safe_row(con, "SELECT logged_at, inputs_json FROM optimizer_runs "
+                        "ORDER BY logged_at DESC LIMIT 1")
+    if row is None:
+        return None  # no plan at all is check_todays_plan's business, not this one
+    logged_at, inputs_json = row
+    try:
+        run_time = datetime.fromisoformat(logged_at)
+        age = (now - run_time).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if age > SOLAR_SOURCE_MAX_RUN_AGE_S:
+        return None  # a stale plan is check_todays_plan's alert; don't double-report it here
+    try:
+        slots = json.loads(inputs_json)[:1]
+    except (ValueError, TypeError):
+        return None
+    if not slots or not isinstance(slots[0], dict) or slots[0].get("solarSource") != "forecast":
+        return None  # only meaningful right after a live tier just succeeded
+
+    try:
+        with open(SOLAR_FORECAST_CACHE_PATH, encoding="utf-8") as f:
+            snapshot = json.load(f)
+        fetched_at = datetime.fromisoformat(snapshot["fetchedAt"])
+        lag_s = (run_time - fetched_at).total_seconds()
+    except (OSError, ValueError, KeyError, TypeError):
+        return ("solar_cache_write_broken", notify.PRIORITY_LOW,
+                "Solinteg: persisted-forecast safety net is not being written",
+                f"The latest plan used a live solar forecast, but the persisted last-good copy "
+                f"at {SOLAR_FORECAST_CACHE_PATH} is missing or unreadable. Tier 3 of the solar "
+                f"fallback chain has silently lost its data — check the web service log for "
+                f"'saveSolarForecast failed'.", "missing")
+
+    if lag_s > SOLAR_CACHE_WRITE_LAG_MAX_S:
+        return ("solar_cache_write_broken", notify.PRIORITY_LOW,
+                "Solinteg: persisted-forecast safety net is going stale",
+                f"The latest plan used a live solar forecast, but the persisted copy on disk is "
+                f"{lag_s / 3600:.1f}h older than it — the write path may be broken even though "
+                f"live forecasts are flowing normally. Same failure class as tier 2 dying "
+                f"silently, one tier further down the chain.", "stale_write")
     return None
 
 
@@ -657,6 +732,7 @@ def run_checks(con: sqlite3.Connection, now: datetime):
         check_weather_stale(con, now),
         check_todays_plan(con, today, now),
         check_solar_source_degraded(con, now),
+        check_solar_cache_write_broken(con, now),
         check_control_errors(con, now),
         check_disk_space(),
     ]

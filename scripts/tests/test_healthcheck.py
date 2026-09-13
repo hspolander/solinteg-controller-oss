@@ -536,6 +536,115 @@ class SolarSourceDegradedTests(unittest.TestCase):
         self.assertIsNone(hc.check_solar_source_degraded(con, NOW))
 
 
+class SolarCacheWriteBrokenTests(unittest.TestCase):
+    """check_solar_cache_write_broken — is the persisted-forecast tier's WRITE path alive?
+
+    The tier-3 analogue of check_weather_fallback_dead/check_solar_source_degraded:
+    solar-forecast-cache.json is only ever READ once both live weather tiers are down (rare), so
+    a broken WRITE (saveSolarForecast silently failing) could sit invisible for weeks — the same
+    shape that let tier 2 die silently before it got its own liveness probe. Deliberately does
+    NOT fire on a stale-but-unused file: that is the fallback working, and
+    check_solar_source_degraded's 'stale' branch already owns it.
+    """
+
+    def setUp(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        self.cache_path = os.path.join(tmpdir.name, "solar-forecast-cache.json")
+        p = mock.patch.object(hc, "SOLAR_FORECAST_CACHE_PATH", self.cache_path)
+        p.start()
+        self.addCleanup(p.stop)
+
+    @staticmethod
+    def _db(solar_source, logged_at=NOW):
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE optimizer_runs (logged_at TEXT, inputs_json TEXT)")
+        slots = [{"startTime": "2026-09-12T00:00:00", "solarSource": solar_source}]
+        con.execute("INSERT INTO optimizer_runs VALUES (?, ?)",
+                    (logged_at.isoformat(), json.dumps(slots)))
+        return con
+
+    def _write_cache(self, fetched_at_text):
+        with open(self.cache_path, "w", encoding="utf-8") as f:
+            json.dump({"fetchedAt": fetched_at_text, "forecast": {}}, f)
+
+    def test_fresh_cache_is_silent(self):
+        self._write_cache((NOW - timedelta(minutes=10)).isoformat())
+        self.assertIsNone(hc.check_solar_cache_write_broken(self._db("forecast"), NOW))
+
+    def test_real_js_z_suffix_timestamp_is_understood(self):
+        # saveSolarForecast() writes new Date().toISOString(), which always ends in 'Z', never
+        # '+00:00' — the actual format this will see in production.
+        self._write_cache((NOW - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+        self.assertIsNone(hc.check_solar_cache_write_broken(self._db("forecast"), NOW))
+
+    def test_missing_cache_alerts(self):
+        issue = hc.check_solar_cache_write_broken(self._db("forecast"), NOW)
+        self.assertIsNotNone(issue)
+        key, priority, _title, _message, fingerprint = issue
+        self.assertEqual(key, "solar_cache_write_broken")
+        self.assertEqual(priority, hc.notify.PRIORITY_LOW)
+        self.assertEqual(fingerprint, "missing")
+
+    def test_stale_cache_alerts_as_stale_write(self):
+        self._write_cache((NOW - timedelta(hours=3)).isoformat())
+        issue = hc.check_solar_cache_write_broken(self._db("forecast"), NOW)
+        self.assertIsNotNone(issue)
+        _key, _priority, _title, message, fingerprint = issue
+        self.assertEqual(fingerprint, "stale_write")
+        self.assertIn("3.0h", message)
+
+    def test_missing_and_stale_share_a_key_so_the_fingerprint_breaks_the_cooldown(self):
+        missing = hc.check_solar_cache_write_broken(self._db("forecast"), NOW)
+        self._write_cache((NOW - timedelta(hours=3)).isoformat())
+        stale = hc.check_solar_cache_write_broken(self._db("forecast"), NOW)
+        self.assertEqual(missing[0], stale[0])
+        self.assertNotEqual(missing[4], stale[4])
+
+    def test_malformed_cache_alerts_as_missing(self):
+        with open(self.cache_path, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        issue = hc.check_solar_cache_write_broken(self._db("forecast"), NOW)
+        self.assertEqual(issue[4], "missing")
+
+    def test_cache_without_fetchedat_alerts_as_missing(self):
+        with open(self.cache_path, "w", encoding="utf-8") as f:
+            json.dump({"forecast": {}}, f)
+        issue = hc.check_solar_cache_write_broken(self._db("forecast"), NOW)
+        self.assertEqual(issue[4], "missing")
+
+    def test_legitimate_fallback_use_is_silent_even_with_no_cache_file(self):
+        # Both live tiers down: solarSource is 'stale' or 'typical', not 'forecast' — the cache
+        # SHOULD be untouched right now, and check_solar_source_degraded already owns this case.
+        self.assertIsNone(hc.check_solar_cache_write_broken(self._db("stale"), NOW))
+        self.assertIsNone(hc.check_solar_cache_write_broken(self._db("typical"), NOW))
+
+    def test_an_old_run_is_left_to_check_todays_plan(self):
+        old = NOW - timedelta(hours=3)
+        self.assertIsNone(hc.check_solar_cache_write_broken(self._db("forecast", old), NOW))
+
+    def test_no_runs_at_all_is_silent(self):
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE optimizer_runs (logged_at TEXT, inputs_json TEXT)")
+        self.assertIsNone(hc.check_solar_cache_write_broken(con, NOW))
+
+    def test_missing_table_does_not_crash(self):
+        self.assertIsNone(hc.check_solar_cache_write_broken(sqlite3.connect(":memory:"), NOW))
+
+    def test_malformed_inputs_json_does_not_crash(self):
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE optimizer_runs (logged_at TEXT, inputs_json TEXT)")
+        con.execute("INSERT INTO optimizer_runs VALUES (?, ?)", (NOW.isoformat(), "{not json"))
+        self.assertIsNone(hc.check_solar_cache_write_broken(con, NOW))
+
+    def test_slots_without_a_source_field_do_not_crash(self):
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE optimizer_runs (logged_at TEXT, inputs_json TEXT)")
+        con.execute("INSERT INTO optimizer_runs VALUES (?, ?)",
+                    (NOW.isoformat(), json.dumps([{"startTime": "x"}])))
+        self.assertIsNone(hc.check_solar_cache_write_broken(con, NOW))
+
+
 class FakeHttpResponse:
     """Context-managed stand-in for what urlopen() returns — enough for read()+json.loads."""
 
