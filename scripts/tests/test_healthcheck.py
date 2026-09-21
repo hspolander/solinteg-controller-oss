@@ -763,6 +763,9 @@ class WeatherFallbackCheckTests(unittest.TestCase):
         p = mock.patch.object(hc, "WEATHER_FALLBACK_PROBE_INTERVAL_H", 24.0)
         p.start()
         self.addCleanup(p.stop)
+        r = mock.patch.object(hc, "WEATHER_FALLBACK_PROBE_RETRY_INTERVAL_H", 2.0)
+        r.start()
+        self.addCleanup(r.stop)
 
     def run_check(self, state, verdict, detail=ERROR, now=NOW):
         """-> (issue, how many times the network probe was actually attempted)."""
@@ -817,6 +820,36 @@ class WeatherFallbackCheckTests(unittest.TestCase):
         _issue, calls = self.run_check(state, "ok", now=NOW + timedelta(hours=23, minutes=59))
         self.assertEqual(calls, 0)
         _issue, calls = self.run_check(state, "ok", now=NOW + timedelta(hours=24))
+        self.assertEqual(calls, 1)
+
+    def test_a_failed_probe_retries_sooner_than_a_healthy_one(self):
+        """A failure switches to WEATHER_FALLBACK_PROBE_RETRY_INTERVAL_H (2h here) instead of
+        waiting out the full 24h interval, so a transient met.no miss gets a chance to clear
+        before the next alert-cooldown push repeats a stale verdict."""
+        state = {}
+        self.run_check(state, "failed")
+        _issue, calls = self.run_check(state, "ok", now=NOW + timedelta(hours=2))
+        self.assertEqual(calls, 1)  # due at 2h because the prior verdict was a failure
+
+    def test_a_retry_that_clears_reverts_to_the_slow_cadence(self):
+        """Once a retry comes back 'ok', the NEXT probe should wait the normal 24h again, not
+        keep retrying every 2h forever."""
+        state = {}
+        self.run_check(state, "failed")
+        self.run_check(state, "ok", now=NOW + timedelta(hours=2))
+        _issue, calls = self.run_check(state, "ok", now=NOW + timedelta(hours=3, minutes=59))
+        self.assertEqual(calls, 0)  # back to the 24h cadence, not still retrying hourly
+        _issue, calls = self.run_check(state, "ok", now=NOW + timedelta(hours=26))
+        self.assertEqual(calls, 1)  # 24h after the LAST probe (at +2h), i.e. +26h
+
+    def test_a_retry_that_still_fails_keeps_retrying_at_the_fast_cadence(self):
+        state = {}
+        self.run_check(state, "failed")
+        _issue, calls = self.run_check(state, "failed", now=NOW + timedelta(hours=2))
+        self.assertEqual(calls, 1)
+        _issue, calls = self.run_check(state, "failed", now=NOW + timedelta(hours=3, minutes=59))
+        self.assertEqual(calls, 0)  # next retry not due until 2h after THIS probe
+        _issue, calls = self.run_check(state, "failed", now=NOW + timedelta(hours=4))
         self.assertEqual(calls, 1)
 
     def test_an_unreachable_web_app_does_not_spend_the_budget(self):

@@ -40,12 +40,21 @@ Environment (beyond notify.py's own NTFY_*):
                                 the first post-midnight render lands (solinteg-telemetry.timer
                                 runs a few minutes past midnight for exactly this)
   WEATHER_FALLBACK_PROBE_INTERVAL_H
-                                how often to actively exercise the second weather tier
-                                (default 24; 0 disables the probe — set that if
-                                SOLAR_FORECAST_MODEL is not 'metno_nordic', since the tier
+                                how often to actively exercise the second weather tier while it
+                                is believed healthy (default 24; 0 disables the probe — set that
+                                if SOLAR_FORECAST_MODEL is not 'metno_nordic', since the tier
                                 does not exist then). Each probe costs thredds.met.no a live
                                 NetCDF subset, so this is a daily liveness check, not a health
                                 metric to sample tightly.
+  WEATHER_FALLBACK_PROBE_RETRY_INTERVAL_H
+                                how often to re-probe while the LAST probe failed (default 2).
+                                Deliberately shorter than WEATHER_FALLBACK_PROBE_INTERVAL_H and
+                                than HEALTHCHECK_ALERT_COOLDOWN_S: most failures here are met.no
+                                having a slow moment, not a real outage, so a transient miss
+                                should get a fresh chance to clear itself before the next repeat
+                                push goes out, not wait a full day for it. A verdict that stays
+                                failed across several retries still alerts every cooldown, same
+                                as before.
   WEATHER_FALLBACK_URL          the probe endpoint (default
                                 http://localhost:3000/api/weather-fallback-check)
   WEATHER_FALLBACK_TIMEOUT_S    probe timeout (default 120 — the route's own worst case is
@@ -110,6 +119,12 @@ CONTROL_ERROR_WINDOW_S = int(os.environ.get("CONTROL_ERROR_WINDOW_S", "900"))
 # it catches lasts weeks, while each probe makes thredds.met.no subset a multi-GB NetCDF
 # server-side, and MET Norway's terms ask clients to be gentle.
 WEATHER_FALLBACK_PROBE_INTERVAL_H = float(os.environ.get("WEATHER_FALLBACK_PROBE_INTERVAL_H", "24"))
+# Faster cadence used only while the last probe FAILED — see weather_fallback_probe_due(). Kept
+# under ALERT_COOLDOWN_S (4h default) on purpose, so a transient miss gets re-tested and has a
+# chance to clear before the next repeat push, rather than nagging on a verdict that is already
+# stale by the time it re-fires.
+WEATHER_FALLBACK_PROBE_RETRY_INTERVAL_H = float(
+    os.environ.get("WEATHER_FALLBACK_PROBE_RETRY_INTERVAL_H", "2"))
 WEATHER_FALLBACK_URL = os.environ.get(
     "WEATHER_FALLBACK_URL", "http://localhost:3000/api/weather-fallback-check")
 WEATHER_FALLBACK_TIMEOUT_S = float(os.environ.get("WEATHER_FALLBACK_TIMEOUT_S", "120"))
@@ -395,6 +410,11 @@ def probe_weather_fallback():
 
 
 def weather_fallback_probe_due(entry: dict, now: datetime) -> bool:
+    """`entry` is the verdict from the last COMPLETED probe (see check_weather_fallback_dead) —
+    its own 'ok' decides which cadence applies to the NEXT one. A failed verdict switches to the
+    short retry interval so a transient miss (met.no slow for one call, not actually down) gets
+    re-tested — and can clear itself — well before the next alert-cooldown push would otherwise
+    repeat a verdict nobody has re-checked in a day."""
     last = entry.get("last_probe")
     if not last:
         return True
@@ -402,7 +422,9 @@ def weather_fallback_probe_due(entry: dict, now: datetime) -> bool:
         elapsed = (now - datetime.fromisoformat(last)).total_seconds()
     except (TypeError, ValueError):
         return True  # malformed timestamp — probe now and overwrite it
-    return elapsed >= WEATHER_FALLBACK_PROBE_INTERVAL_H * 3600
+    interval_h = (WEATHER_FALLBACK_PROBE_RETRY_INTERVAL_H if entry.get("ok") is False
+                  else WEATHER_FALLBACK_PROBE_INTERVAL_H)
+    return elapsed >= interval_h * 3600
 
 
 def check_weather_fallback_dead(state: dict, now: datetime):
@@ -436,6 +458,15 @@ def check_weather_fallback_dead(state: dict, now: datetime):
     PRIORITY_LOW on purpose. The chain still has the persisted last-good forecast and then
     climatology beneath this tier, so a dead tier 2 is a loss of depth, not a live outage —
     the same reasoning as check_weather_stale.
+
+    While the last probe failed, weather_fallback_probe_due() switches to the shorter
+    WEATHER_FALLBACK_PROBE_RETRY_INTERVAL_H cadence instead of waiting out the full daily
+    interval. That matters in practice: most failures here are met.no being slow on one
+    particular call, not an actual outage, and without a faster retry the FIRST alert would be
+    correct but every repeat until tomorrow's probe would be nagging about a verdict nobody had
+    re-checked in the meantime. The retry gives a transient miss a chance to clear itself — and
+    send the ✅ resolved notice — well inside one cooldown window, while a verdict that keeps
+    failing on retry still alerts on the normal schedule.
     """
     if WEATHER_FALLBACK_PROBE_INTERVAL_H <= 0:
         return None
