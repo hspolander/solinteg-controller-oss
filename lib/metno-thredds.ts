@@ -54,10 +54,11 @@ function siteGridIndex(): { ix: number; iy: number } | null {
 }
 
 // Deliberately its own constant, not the shared FETCH_TIMEOUT_MS (tuned for Open-Meteo's fast
-// JSON responses): a single OPeNDAP point query here measured ~8.6s over plain curl (2026-07-20,
-// no server load spike involved) — this endpoint subsets a live ~4GB NetCDF file server-side per
-// request rather than serving from a fast path, so a short timeout would make the fallback
-// itself flaky on exactly the days it's needed.
+// JSON responses): a single OPeNDAP point query here measured ~3.5s over plain curl against
+// metpplatest (2026-09-22, the full 44-hour/2-variable production query, no server load spike
+// involved) — this endpoint subsets a live NetCDF file server-side per request rather than
+// serving from a fast path, so a short timeout would make the fallback itself flaky on exactly
+// the days it's needed. Kept well above the observed time rather than tightened to it.
 const THREDDS_FETCH_TIMEOUT_MS = 25_000;
 
 // Identifies this client per MET Norway's ToS (a missing/generic UA gets throttled or blocked,
@@ -66,30 +67,39 @@ const THREDDS_FETCH_TIMEOUT_MS = 25_000;
 const THREDDS_USER_AGENT = 'solinteg-controller/1.0 (+https://github.com/hspolander/solinteg-controller-oss)';
 const SHORTWAVE_VAR = 'integral_of_surface_downwelling_shortwave_flux_in_air_wrt_time';
 const TEMP_VAR = 'air_temperature_2m';
-// Runs are issued 00/06/12/18Z; this only needs ~2 days ahead (matching Open-Meteo's
-// forecast_days=2), and every run observed 2026-07-20 (00Z/06Z/12Z) covered at least that —
-// staying well under the shortest observed length (56) leaves margin without a discovery round trip.
+// This only needs ~2 days ahead (matching Open-Meteo's forecast_days=2); every metpplatest run
+// observed 2026-09-22 carried 59 forecast hours, so 44 stays well under that with margin.
 const FORECAST_HOURS = 44;
-// How many 6-hourly runs to walk back if the latest expected one isn't published/reachable yet
-// (observed ~2h publish latency for the 12Z run; walking back avoids hardcoding that number).
+// How many HOURLY runs to walk back if the latest expected one isn't published/reachable yet.
+// metpplatest publishes roughly on the hour (observed 2026-09-22: a run's own `history`
+// attribute was timestamped ~26 min after its nominal hour) — walking back a few hours covers a
+// slow publish without hardcoding the exact lag. 4 attempts means "up to ~4h behind wall-clock".
 const RUN_LOOKBACK_ATTEMPTS = 4;
 
+// metpplatest, not metpparchive: metpparchive (yyyy/mm/dd/-nested, 6-hourly runs) started
+// 404ing on its whole catalog path, confirmed live 2026-09-22 across every date tried, including
+// a run that had served fine the day before. It looks like a rolling-retention archive that a
+// just-issued run hadn't been populated into yet, not a "latest" mirror, so a client that only
+// ever wants the newest run was never well served by it. metpplatest is what MET Norway actually
+// publishes near-real-time runs to — same underlying MEPS model and same 1km LCC grid (confirmed
+// live 2026-09-22 by reading its own .das/.dds back), just a flat directory of hourly-named
+// files instead of metpparchive's dated 6-hourly ones. No dated subdirectory here on purpose;
+// metpplatest doesn't have one.
 function runFileUrl(runTime: Date): string {
   const yyyy = runTime.getUTCFullYear();
   const mm = String(runTime.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(runTime.getUTCDate()).padStart(2, '0');
   const hh = String(runTime.getUTCHours()).padStart(2, '0');
   return (
-    `https://thredds.met.no/thredds/dodsC/metpparchive/${yyyy}/${mm}/${dd}/` +
+    `https://thredds.met.no/thredds/dodsC/metpplatest/` +
     `met_forecast_1_0km_nordic_${yyyy}${mm}${dd}T${hh}Z.nc`
   );
 }
 
-// Most recent 00/06/12/18Z boundary at or before `from`.
+// Most recent hour boundary at or before `from` — metpplatest publishes (roughly) hourly.
 function latestRunBoundary(from: Date): Date {
   const d = new Date(from);
   d.setUTCMinutes(0, 0, 0);
-  d.setUTCHours(Math.floor(d.getUTCHours() / 6) * 6);
   return d;
 }
 
@@ -123,9 +133,9 @@ async function fetchPointSeries(
   // enforcement arrived after this client was first written against the service in July 2026.
   // The failure mode is worth understanding before you touch this: every run in the walk-back
   // 400s identically and instantly, and fetchLatestRun throws the OLDEST attempt's error, so the
-  // log names a run from 24 h earlier and reads like "met.no has not published yet" rather than
-  // like a bug here. Since this whole path only runs when the primary source has already failed,
-  // a break here can sit unnoticed until the day you actually need it.
+  // log names a run from RUN_LOOKBACK_ATTEMPTS hours earlier and reads like "met.no has not
+  // published yet" rather than like a bug here. Since this whole path only runs when the primary
+  // source has already failed, a break here can sit unnoticed until the day you actually need it.
   const selector = (v: string) => `${v}%5B${range}%5D%5B${iy}%5D%5B${ix}%5D`;
   const url = `${runFileUrl(runTime)}.ascii?${selector(SHORTWAVE_VAR)},${selector(TEMP_VAR)}`;
   const res = await fetch(url, {
@@ -161,7 +171,7 @@ async function fetchLatestRun(): Promise<{
       return { runTime, shortwaveCumulative, tempKelvin };
     } catch (err) {
       lastErr = err;
-      runTime = new Date(runTime.getTime() - 6 * 3600 * 1000);
+      runTime = new Date(runTime.getTime() - 3600 * 1000);
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error('met.no thredds: all recent runs failed');

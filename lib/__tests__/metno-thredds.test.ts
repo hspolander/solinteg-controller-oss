@@ -55,8 +55,9 @@ afterEach(() => {
 
 describe('fetchSolarForecastDirect', () => {
   it('converts the cumulative shortwave integral into a per-hour average GHI, bucketed by Stockholm date/hour', async () => {
-    // Run reference time 2026-01-15T00:00Z (a run boundary); winter -> Stockholm = UTC+1, so
-    // hour 0 UTC is Stockholm hour 1 of the SAME date.
+    // System time is already on an hour boundary, so latestRunBoundary leaves it unchanged:
+    // run reference time 2026-01-15T02:00Z. Winter -> Stockholm = UTC+1, so hour 0 UTC is
+    // Stockholm hour 3 of the SAME date.
     vi.setSystemTime(new Date('2026-01-15T02:00:00Z'));
     // Cumulative integral in J/m² accumulates 3600 * avgWm2 each hour: hour0->hour1 delta of
     // 3600*100 means avg 100 W/m² for that hour.
@@ -69,10 +70,10 @@ describe('fetchSolarForecastDirect', () => {
 
     const result = await fetchSolarForecastDirect();
 
-    // hour i=0 -> UTC 00:00-01:00 -> Stockholm hour 1, date 2026-01-15, avg 100 W/m²
-    expect(result['2026-01-15'][slotIndex(1, 0)]).toBe(expectedKwhPerSlot(100, 1));
-    // hour i=1 -> UTC 01:00-02:00 -> Stockholm hour 2, avg 200 W/m²
-    expect(result['2026-01-15'][slotIndex(2, 0)]).toBe(expectedKwhPerSlot(200, 1));
+    // hour i=0 -> UTC 02:00-03:00 -> Stockholm hour 3, date 2026-01-15, avg 100 W/m²
+    expect(result['2026-01-15'][slotIndex(3, 0)]).toBe(expectedKwhPerSlot(100, 1));
+    // hour i=1 -> UTC 03:00-04:00 -> Stockholm hour 4, avg 200 W/m²
+    expect(result['2026-01-15'][slotIndex(4, 0)]).toBe(expectedKwhPerSlot(200, 1));
   });
 
   it('repeats each hour’s value across all four 15-min slots', async () => {
@@ -86,29 +87,30 @@ describe('fetchSolarForecastDirect', () => {
     const result = await fetchSolarForecastDirect();
     const expected = expectedKwhPerSlot(150, 1);
     for (const minute of [0, 15, 30, 45]) {
-      expect(result['2026-01-15'][slotIndex(1, minute)]).toBe(expected);
+      expect(result['2026-01-15'][slotIndex(3, minute)]).toBe(expected);
     }
   });
 
-  it('walks back to an earlier 6-hourly run when the latest run’s fetch fails', async () => {
-    vi.setSystemTime(new Date('2026-01-15T02:00:00Z')); // latest run boundary: 00Z
+  it('walks back to an earlier hourly run when the latest run’s fetch fails', async () => {
+    vi.setSystemTime(new Date('2026-01-15T00:00:00Z')); // latest run boundary: 2026-01-15T00Z
     const goodBody = opendapAscii([0, 3600 * 100], [270, 271]);
 
     vi.mocked(fetch).mockImplementation(async (url) => {
       const u = String(url);
-      if (u.includes('T00Z')) throw new Error('run not published yet'); // the latest (00Z) run fails
-      return { ok: true, text: async () => goodBody } as Response; // the 18Z run (6h earlier) succeeds
+      // the latest (00Z) run fails
+      if (u.includes('20260115T00Z')) throw new Error('run not published yet');
+      return { ok: true, text: async () => goodBody } as Response; // the run 1h earlier succeeds
     });
 
     const result = await fetchSolarForecastDirect();
-    // The successful run is the 18Z run one day EARLIER (2026-01-14T18:00Z) -> Stockholm
-    // 19:00 on 2026-01-14 (winter CET, +1h), not 2026-01-15 — the walk-back moves the run's
-    // own reference time, not just its hour-of-day.
-    expect(result['2026-01-14'][slotIndex(19, 0)]).toBe(expectedKwhPerSlot(100, 1));
+    // The successful run is one hour EARLIER, the previous UTC day (2026-01-14T23:00Z) ->
+    // Stockholm 2026-01-15T00:00 (winter CET, +1h) — the walk-back moves the run's own
+    // reference time, not just its hour-of-day, and this exercises the UTC-day rollover.
+    expect(result['2026-01-15'][slotIndex(0, 0)]).toBe(expectedKwhPerSlot(100, 1));
     // Confirms it actually walked back, not that it coincidentally returned data some other way.
     const calledUrls = vi.mocked(fetch).mock.calls.map((c) => String(c[0]));
-    expect(calledUrls.some((u) => u.includes('T00Z'))).toBe(true);
-    expect(calledUrls.some((u) => u.includes('T18Z'))).toBe(true);
+    expect(calledUrls.some((u) => u.includes('20260115T00Z'))).toBe(true);
+    expect(calledUrls.some((u) => u.includes('20260114T23Z'))).toBe(true);
   });
 
   it('percent-encodes the subset brackets — a raw [ or ] is a 400 from met.no', async () => {
@@ -128,6 +130,28 @@ describe('fetchSolarForecastDirect', () => {
     const url = String(vi.mocked(fetch).mock.calls[0][0]);
     expect(url).not.toMatch(/[[\]]/);
     expect(url).toContain('%5B0:1:43%5D');
+  });
+
+  it('queries metpplatest, not the dated metpparchive path', async () => {
+    // Regression: metpparchive (yyyy/mm/dd/-nested, 6-hourly runs) started 404ing on every date
+    // tried, including a run that had served fine the day before — confirmed live 2026-09-22 to
+    // be a rolling-retention archive that a just-issued run hadn't been populated into yet, not a
+    // "latest" mirror. metpplatest is what actually carries near-real-time runs (same MEPS model,
+    // same grid, confirmed live 2026-09-22), as a flat directory of hourly-named files with no
+    // date subdirectory at all — so both the collection name AND the path shape had to change,
+    // not just one or the other.
+    vi.setSystemTime(new Date('2026-01-15T02:00:00Z'));
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      text: async () => opendapAscii([0, 3600 * 100], [270, 271]),
+    } as Response);
+
+    await fetchSolarForecastDirect();
+
+    const url = String(vi.mocked(fetch).mock.calls[0][0]);
+    expect(url).toContain('/thredds/dodsC/metpplatest/met_forecast_1_0km_nordic_20260115T02Z.nc');
+    expect(url).not.toContain('metpparchive');
+    expect(url).not.toContain('/2026/01/15/'); // no dated subdirectory on metpplatest
   });
 
   it('throws after exhausting every lookback attempt', async () => {
@@ -158,14 +182,14 @@ describe('probeMetNordicDirect', () => {
   // module is only reached when Open-Meteo has already failed, so it can be — and on the
   // reference deployment was, for weeks — completely dead without anything noticing.
   it('reports the run it reached and how many hours it got', async () => {
-    vi.setSystemTime(new Date('2026-01-15T02:00:00Z')); // latest run boundary: 00Z
+    vi.setSystemTime(new Date('2026-01-15T02:00:00Z')); // latest run boundary: 02Z
     vi.mocked(fetch).mockResolvedValue({
       ok: true,
       text: async () => opendapAscii([0, 3600 * 100, 3600 * 300], [270, 271, 272]),
     } as Response);
 
     await expect(probeMetNordicDirect()).resolves.toEqual({
-      runIso: '2026-01-15T00:00:00.000Z',
+      runIso: '2026-01-15T02:00:00.000Z',
       hours: 3,
     });
   });
