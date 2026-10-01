@@ -9,6 +9,11 @@ Register map (holding registers). Source: plugin_solinteg.py @ commit 350266f
 (wills106/homeassistant-solax-modbus), source-verified register-by-register.
 See MODBUS.md for the full verified map and control registers.
 
+  10994  S32  Meter L1 power (W)       same sign as 11000; L1+L2+L3 == 11000 (probed live on the reference unit)
+  10996  S32  Meter L2 power (W)
+  10998  S32  Meter L3 power (W)       a CT that reads exactly 0 here for hours is a wiring fault:
+                                       healthcheck.check_meter_phase_dead (an L3 CT sat
+                                       disconnected for weeks on the reference install)
   11000  S32  Meter (grid) power (W)   AS REPORTED: +ve = EXPORT, -ve = IMPORT
   11016  S32  Inverter AC output (W)   NOT house load — see below
   11028  U32  Total PV power (W)
@@ -98,10 +103,12 @@ WORK_MODES = {
 
 
 def read_inverter(client: ModbusTcpClient) -> dict:
-    # Block 1: 11000–11029 (meter power, inverter AC output, PV — 30 registers)
-    r1 = client.read_holding_registers(11000, count=30, device_id=SLAVE_ID)
+    # Block 1: 10994–11029 (per-phase meter, meter total, inverter AC output, PV — 36
+    # registers). Starts at the per-phase meter powers so they cost no extra round trip on a
+    # link that stalls 4-8 s about once a minute (MODBUS.md).
+    r1 = client.read_holding_registers(10994, count=36, device_id=SLAVE_ID)
     if r1.isError():
-        raise IOError(f"Block 11000 read failed: {r1}")
+        raise IOError(f"Block 10994 read failed: {r1}")
 
     # Block 2: 30258–30259 (battery power — separate due to large address gap)
     r2 = client.read_holding_registers(30258, count=2, device_id=SLAVE_ID)
@@ -121,9 +128,12 @@ def read_inverter(client: ModbusTcpClient) -> dict:
         raise IOError(f"Block 50000 read failed: {r4}")
 
     regs = r1.registers
-    grid_w         = s32(regs[0],  regs[1])            # 11000  +ve = export, -ve = import
-    inverter_ac_w  = s32(regs[16], regs[17])           # 11016  inverter AC output (NOT load)
-    pv_w           = u32(regs[28], regs[29])           # 11028
+    meter_l1_w     = s32(regs[0],  regs[1])            # 10994  same sign convention as 11000
+    meter_l2_w     = s32(regs[2],  regs[3])            # 10996
+    meter_l3_w     = s32(regs[4],  regs[5])            # 10998
+    grid_w         = s32(regs[6],  regs[7])            # 11000  +ve = export, -ve = import
+    inverter_ac_w  = s32(regs[22], regs[23])           # 11016  inverter AC output (NOT load)
+    pv_w           = u32(regs[34], regs[35])           # 11028
     battery_w      = s32(r2.registers[0], r2.registers[1])  # 30258  -ve = charging
     soc_raw        = r3.registers[0]                   # 33000
     soh_raw        = r3.registers[1]                   # 33001
@@ -147,6 +157,9 @@ def read_inverter(client: ModbusTcpClient) -> dict:
         "battery_temp_c": battery_temp_c,
         "pv_w": pv_w,
         "grid_w": grid_w,
+        "meter_l1_w": meter_l1_w,
+        "meter_l2_w": meter_l2_w,
+        "meter_l3_w": meter_l3_w,
         "battery_w": battery_w,
         "inverter_ac_w": inverter_ac_w,
         "house_load_w": house_load_w,
@@ -179,13 +192,18 @@ def init_db(path: Path) -> sqlite3.Connection:
             inverter_ac_w  INTEGER,
             house_load_w   INTEGER,
             work_mode      TEXT,
-            work_mode_raw  INTEGER
+            work_mode_raw  INTEGER,
+            meter_l1_w     INTEGER,
+            meter_l2_w     INTEGER,
+            meter_l3_w     INTEGER
         )
     """)
     # Additive migration for DBs created before soh_pct/battery_temp_c existed (2026-07-02) —
     # CREATE TABLE IF NOT EXISTS above is a no-op on an existing table, so old columns must be
     # added explicitly. Safe to run repeatedly: ignores "duplicate column" if already applied.
-    for col in ("soh_pct REAL", "battery_temp_c REAL"):
+    # The per-phase meter columns followed later still.
+    for col in ("soh_pct REAL", "battery_temp_c REAL",
+                "meter_l1_w INTEGER", "meter_l2_w INTEGER", "meter_l3_w INTEGER"):
         try:
             con.execute(f"ALTER TABLE readings ADD COLUMN {col}")
         except sqlite3.OperationalError:
@@ -199,14 +217,16 @@ def log_reading(con: sqlite3.Connection, data: dict) -> None:
     con.execute(
         """INSERT INTO readings
            (timestamp, soc_pct, soc_kwh, soh_pct, battery_temp_c, pv_w, grid_w, battery_w,
-            inverter_ac_w, house_load_w, work_mode, work_mode_raw)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            inverter_ac_w, house_load_w, work_mode, work_mode_raw,
+            meter_l1_w, meter_l2_w, meter_l3_w)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             data["timestamp"], data["soc_pct"], data["soc_kwh"],
             data["soh_pct"], data["battery_temp_c"],
             data["pv_w"], data["grid_w"], data["battery_w"],
             data["inverter_ac_w"], data["house_load_w"],
             data["work_mode"], data["work_mode_raw"],
+            data["meter_l1_w"], data["meter_l2_w"], data["meter_l3_w"],
         ),
     )
     con.commit()

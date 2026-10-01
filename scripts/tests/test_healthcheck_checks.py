@@ -248,5 +248,62 @@ class AlertKeysAreDistinctTests(unittest.TestCase):
         self.assertEqual(len(keys), len(set(keys)), keys)
 
 
+class CheckMeterPhaseDeadTests(unittest.TestCase):
+    """A disconnected CT is silent everywhere else: the total still looks plausible, and the
+    inverter happily balances the phases it CAN see. An L3 CT sat dead for weeks on the
+    reference install."""
+
+    @staticmethod
+    def db(rows, span_s=6 * 3600):
+        """rows: list of (l1, l2, l3), spread evenly over the last span_s seconds."""
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE readings (timestamp TEXT, meter_l1_w INTEGER, "
+                    "meter_l2_w INTEGER, meter_l3_w INTEGER)")
+        n = len(rows)
+        con.executemany("INSERT INTO readings VALUES (?, ?, ?, ?)",
+                        [(ago(span_s * (n - i) / (n + 1)), *r) for i, r in enumerate(rows)])
+        return con
+
+    def test_dead_l3_while_l1_l2_carry_load_fires_high_with_the_phase_in_the_fingerprint(self):
+        # The real fault's signature: L1/L2 import, L3 exactly 0 throughout.
+        issue = hc.check_meter_phase_dead(self.db([(-1700, -500, 0)] * 200), NOW)
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue[KEY], "meter_phase_dead")
+        self.assertEqual(issue[PRIORITY], notify.PRIORITY_HIGH)
+        self.assertEqual(issue[4], "dead_L3")
+        self.assertIn("L3", issue[2])
+
+    def test_a_healthy_phase_that_often_sits_at_zero_does_not_fire(self):
+        # Self-use holds the meter near zero, so a live phase reads exactly 0 a lot. Half the
+        # time here; real good days showed up to ~50% near-zero. Must stay quiet.
+        rows = [(-800, -600, 0) if i % 2 else (-800, -600, -300) for i in range(200)]
+        self.assertIsNone(hc.check_meter_phase_dead(self.db(rows), NOW))
+
+    def test_a_quiet_house_with_every_phase_near_zero_does_not_fire(self):
+        # Battery covering the house overnight: nothing carries > 100 W, so "dead" and "idle"
+        # are indistinguishable and the check must abstain rather than guess.
+        self.assertIsNone(hc.check_meter_phase_dead(self.db([(-20, 10, 0)] * 200), NOW))
+
+    def test_rows_from_before_the_columns_existed_are_not_read_as_zero(self):
+        # History is NULL, not 0. Treating it as 0 would page "all phases dead" on deploy day.
+        con = self.db([(None, None, None)] * 200)
+        self.assertIsNone(hc.check_meter_phase_dead(con, NOW))
+
+    def test_a_handful_of_rows_after_a_restart_is_not_enough_to_judge(self):
+        # Minutes after the poller (re)starts, a brief exact-0 on one phase must not page.
+        self.assertIsNone(hc.check_meter_phase_dead(self.db([(-1700, -500, 0)] * 20), NOW))
+
+    def test_a_database_without_the_columns_yet_does_not_crash_the_run(self):
+        self.assertIsNone(hc.check_meter_phase_dead(con_with("readings"), NOW))
+
+    def test_only_the_window_counts(self):
+        # A dead phase that was fixed more than a window ago is history, not an alert.
+        con = self.db([(-1700, -500, 0)] * 200, span_s=24 * 3600)
+        con.execute("DELETE FROM readings WHERE timestamp >= ?", (ago(hc.METER_PHASE_WINDOW_S),))
+        con.executemany("INSERT INTO readings VALUES (?, ?, ?, ?)",
+                        [(ago(60 * i + 30), -900, -700, -650) for i in range(100)])
+        self.assertIsNone(hc.check_meter_phase_dead(con, NOW))
+
+
 if __name__ == "__main__":
     unittest.main()

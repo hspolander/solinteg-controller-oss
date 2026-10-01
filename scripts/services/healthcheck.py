@@ -146,6 +146,15 @@ SOLAR_FORECAST_CACHE_PATH = os.environ.get(
 # of hours rather than waiting out the full SOLAR_FORECAST_CACHE_MAX_AGE_H (default 8h) before
 # anything downstream would even notice the file was stale.
 SOLAR_CACHE_WRITE_LAG_MAX_S = int(os.environ.get("SOLAR_CACHE_WRITE_LAG_MAX_S", "7200"))
+# check_meter_phase_dead: look-back window, the flow another phase must carry for a sample to
+# count, and the share of those samples a phase must read EXACTLY 0 to be called dead...
+METER_PHASE_WINDOW_S = int(os.environ.get("METER_PHASE_WINDOW_S", "21600"))
+METER_PHASE_BUSY_W = int(os.environ.get("METER_PHASE_BUSY_W", "100"))
+METER_PHASE_DEAD_SHARE = float(os.environ.get("METER_PHASE_DEAD_SHARE", "0.95"))
+# ...and the fewest qualifying samples it will judge on (180 = one hour at a 20 s poll), so a
+# window that is mostly empty (just after a poller restart, or the deploy that adds the columns)
+# can't page on a handful of rows.
+METER_PHASE_MIN_SAMPLES = int(os.environ.get("METER_PHASE_MIN_SAMPLES", "180"))
 ORACLE_REVIEW_MIN_DAYS = int(os.environ.get("ORACLE_REVIEW_MIN_DAYS", "16"))
 # Default 0 = OFF, deliberately: this is a "go run this probe" nag, and the question it scouts
 # for has already been answered once on the reference deployment (see MODBUS.md). Opt in by
@@ -525,6 +534,62 @@ def check_weather_fallback_dead(state: dict, now: datetime):
             detail)
 
 
+def check_meter_phase_dead(con: sqlite3.Connection, now: datetime):
+    """Is one of the grid meter's three CTs disconnected?
+
+    On the reference deployment, phase L3's CT sat disconnected for six weeks after
+    installation (a wiring fault) and nothing noticed. It cost money, not just data: the
+    inverter's self-use regulation balances the METER to zero, so with L3 invisible it balanced
+    L1+L2 and bought everything on L3 from the grid with a full battery. It only surfaced months
+    later against the utility's billing meter. With only the total stored, a repeat (a CT clamp
+    working loose) would be silent again, and would quietly corrupt house_load_w, the live load
+    profile and every plan built on it.
+
+    The signature is unambiguous: a dead CT reads EXACTLY 0 W while the other phases carry real
+    flow. A healthy phase reads near zero often (self-use holds the meter around zero), so the
+    test is "exactly 0 in >= 95% of the samples where another phase carries > 100 W", and only
+    once such samples fill at least half the window and number at least an hour's worth.
+    Backtested on that deployment's 5-minute per-phase history: it fired on every one of the
+    fault days, always on L3, and never on the ~200 good days after the fix.
+
+    What it can NOT see: a uniform scale error. After L3 was reconnected, all three phases read
+    ~30% low for weeks more (a second wiring fault) with a perfectly normal per-phase split. Only
+    an independent instrument catches that: compare against the utility meter now and then.
+
+    Rows from before the per-phase columns existed are NULL and are skipped, not read as 0.
+    """
+    since = (now - timedelta(seconds=METER_PHASE_WINDOW_S)).isoformat()
+    try:
+        rows = con.execute(
+            "SELECT meter_l1_w, meter_l2_w, meter_l3_w FROM readings WHERE timestamp >= ? "
+            "AND meter_l1_w IS NOT NULL AND meter_l2_w IS NOT NULL AND meter_l3_w IS NOT NULL",
+            (since,),
+        ).fetchall()
+    except sqlite3.Error:
+        return None  # column not there yet (poller not restarted since the migration)
+    if not rows:
+        return None
+    dead = []
+    for k in range(3):
+        busy = [r for r in rows if max(abs(r[j]) for j in range(3) if j != k) > METER_PHASE_BUSY_W]
+        if len(busy) < max(len(rows) / 2, METER_PHASE_MIN_SAMPLES):
+            continue  # too little flow on the other phases (or too little data) to judge
+        zero = sum(1 for r in busy if r[k] == 0)
+        if zero >= METER_PHASE_DEAD_SHARE * len(busy):
+            dead.append((f"L{k + 1}", zero, len(busy)))
+    if not dead:
+        return None
+    names = ", ".join(name for name, _, _ in dead)
+    detail = "; ".join(f"{name} read exactly 0 W in {z} of {n} samples while another phase "
+                       f"carried > {METER_PHASE_BUSY_W} W" for name, z, n in dead)
+    return ("meter_phase_dead", notify.PRIORITY_HIGH,
+            f"Solinteg: grid meter phase {names} looks disconnected",
+            f"Over the last {METER_PHASE_WINDOW_S // 3600} h: {detail}. A dead CT makes the "
+            f"inverter's self-use blind to that phase (its load is bought from the grid even with "
+            f"a full battery) and corrupts house_load_w. Check the meter's CT clamps and wiring.",
+            "dead_" + "+".join(name for name, _, _ in dead))
+
+
 def check_todays_plan(con: sqlite3.Connection, today: str, now: datetime):
     # Both rows only exist once the FIRST dashboard render after Stockholm midnight has
     # logged the new day's snapshot + plan (solinteg-telemetry.timer runs a few minutes past
@@ -765,6 +830,7 @@ def run_checks(con: sqlite3.Connection, now: datetime):
         check_solar_source_degraded(con, now),
         check_solar_cache_write_broken(con, now),
         check_control_errors(con, now),
+        check_meter_phase_dead(con, now),
         check_disk_space(),
     ]
     return [c for c in checks if c is not None]

@@ -35,7 +35,10 @@ CREATE TABLE IF NOT EXISTS readings (
     inverter_ac_w  INTEGER,
     house_load_w   INTEGER,
     work_mode      TEXT,
-    work_mode_raw  INTEGER
+    work_mode_raw  INTEGER,
+    meter_l1_w     INTEGER,         -- per-phase meter power (10994/10996/10998), same sign as
+    meter_l2_w     INTEGER,         -- grid_w; sum == grid_w. NULL in older rows. Watched by
+    meter_l3_w     INTEGER          -- healthcheck.check_meter_phase_dead (a dead CT reads 0)
 );
 CREATE INDEX IF NOT EXISTS idx_ts ON readings(timestamp);
 

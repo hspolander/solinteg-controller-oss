@@ -98,6 +98,16 @@ echo "\$SOLPW" | sudo -S systemctl restart solinteg-dispatch
 sleep 2
 echo "\$SOLPW" | sudo -S systemctl is-active solinteg-dispatch
 
+# The pollers are long-running too. Without a restart, a change to modbus_poller.py (or
+# weather_poller.py, or the common.py they import) deploys "successfully" and keeps running
+# the old code; the reference deployment hit exactly that when the per-phase meter columns
+# were added. A poller restart costs one missed sample, so just always do it.
+for unit in solinteg-poller solinteg-weather; do
+  echo "\$SOLPW" | sudo -S systemctl restart "\$unit"
+done
+sleep 2
+echo "\$SOLPW" | sudo -S systemctl is-active solinteg-poller solinteg-weather
+
 rm -rf /tmp/solinteg-deploy
 curl -s -o /dev/null -w "local curl on NUC: %{http_code}\n" http://localhost:3000/
 unset SOLPW

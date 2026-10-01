@@ -99,10 +99,14 @@ def seed_client(
     soh_raw: int = 9800,
     temp_raw: int = 290,
     work_mode_raw: int = 0x101,
+    phases: tuple[int, int, int] = (1500, 1460, 1420),
 ) -> FakeModbusClient:
     """A fake inverter holding one consistent set of readings, addressed exactly as
     read_inverter's four block reads expect (see MODBUS.md for the register map)."""
     c = FakeModbusClient("test-host")
+    c.regs[10994], c.regs[10995] = split32(phases[0])
+    c.regs[10996], c.regs[10997] = split32(phases[1])
+    c.regs[10998], c.regs[10999] = split32(phases[2])
     c.regs[11000], c.regs[11001] = split32(grid_w)
     c.regs[11016], c.regs[11017] = split32(inverter_ac_w)
     c.regs[11028], c.regs[11029] = split32(pv_w)
@@ -126,6 +130,17 @@ class ReadInverterTests(unittest.TestCase):
         self.assertEqual(data["pv_w"], 6080)
         self.assertEqual(data["battery_w"], -5000)
         self.assertEqual(data["work_mode_raw"], 0x101)
+        self.assertEqual((data["meter_l1_w"], data["meter_l2_w"], data["meter_l3_w"]), (1500, 1460, 1420))
+
+    def test_per_phase_meter_keeps_sign_and_order(self):
+        # Importing on L1/L2 while L3 exports a little: each phase must land in its own field
+        # with its own sign. The block now starts at 10994, so every later field moved by six
+        # registers; a wrong base offset would shuffle these into plausible-looking garbage.
+        data = mp.read_inverter(seed_client(grid_w=-2700, phases=(-1800, -1000, 100)))
+        self.assertEqual((data["meter_l1_w"], data["meter_l2_w"], data["meter_l3_w"]), (-1800, -1000, 100))
+        self.assertEqual(data["grid_w"], -2700)
+        self.assertEqual(data["inverter_ac_w"], 6100)
+        self.assertEqual(data["pv_w"], 6080)
 
     def test_scaling_of_soc_soh_and_temperature(self):
         data = mp.read_inverter(seed_client(soc_raw=9900, soh_raw=9800, temp_raw=290))
@@ -166,7 +181,7 @@ class ReadInverterTests(unittest.TestCase):
     def test_a_failed_block_read_raises_rather_than_logging_a_partial_row(self):
         # Every block is checked with isError(). A silently-partial reading would be written
         # to `readings` as if it were real and pollute every derived figure after it.
-        for failing_addr in (11000, 30258, 33000, 50000):
+        for failing_addr in (10994, 30258, 33000, 50000):
             with self.subTest(addr=failing_addr):
                 c = seed_client()
                 real_read = c.read_holding_registers
@@ -179,6 +194,32 @@ class ReadInverterTests(unittest.TestCase):
                 c.read_holding_registers = read
                 with self.assertRaises(IOError):
                     mp.read_inverter(c)
+
+
+class MigrationTests(unittest.TestCase):
+    """The live telemetry.db predates the per-phase columns. CREATE TABLE IF NOT EXISTS is a
+    no-op on it, so init_db's ALTERs are the only thing standing between the first deploy and
+    every subsequent INSERT failing — i.e. the poller writing nothing at all."""
+
+    def test_old_database_gains_the_phase_columns_and_accepts_a_reading(self):
+        import sqlite3
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / "telemetry.db"
+            old = sqlite3.connect(db)
+            old.execute("""CREATE TABLE readings (id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL,
+                soc_pct REAL, soc_kwh REAL, pv_w INTEGER, grid_w INTEGER, battery_w INTEGER,
+                inverter_ac_w INTEGER, house_load_w INTEGER, work_mode TEXT, work_mode_raw INTEGER)""")
+            old.execute("INSERT INTO readings (timestamp, grid_w) VALUES ('2026-09-30T00:00:00+00:00', -100)")
+            old.commit()
+            old.close()
+            con = mp.init_db(db)
+            mp.init_db(db).close()  # a second start must not trip over the now-existing columns
+            mp.log_reading(con, mp.read_inverter(seed_client(phases=(-10, -20, 0))))
+            rows = con.execute("SELECT grid_w, meter_l1_w, meter_l2_w, meter_l3_w FROM readings ORDER BY id").fetchall()
+            con.close()
+        self.assertEqual(rows[0], (-100, None, None, None))   # history keeps NULLs, not zeros
+        self.assertEqual(rows[1], (4380, -10, -20, 0))
 
 
 if __name__ == "__main__":

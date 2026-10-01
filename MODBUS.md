@@ -76,6 +76,7 @@ still a list of things to confirm on **your** hardware, and that script is there
 | 33001 | Battery SoH | U16 | ×0.01 % | Source-verified 2026-07-02 against `plugin_solinteg.py` @ `350266f`, same commit as the rest of this file. Ground truth for the wear-cost model's assumed degradation curve. |
 | 33003 | Battery Temperature | U16 | ×0.1 °C | Plain unsigned register, no offset for negative temps in the source plugin — unconfirmed whether this pack can ever report sub-zero (a negative reading would wrap to a huge nonsensical positive value, not a sane negative one). (33002 is unused/reserved.) |
 | 30258 | Battery power (W) | S32 | 1 | **−ve = charging, +ve = discharging** (as reported) |
+| 10994 / 10996 / 10998 | Meter L1 / L2 / L3 power (W) | S32 | 1 | Same sign as 11000, and they sum to it (probed live: −66 −60 −51 = −177). Polled as `meter_l1_w..meter_l3_w`; a phase stuck at exactly 0 is a dead CT (`check_meter_phase_dead`). 10990/10992 return values too (208 / 573 at probe time), meaning unknown. |
 | 11000 | Meter (grid) power (W) | S32 | 1 | **+ve = export, −ve = import** (as reported) |
 | 11028 | Total PV power (W) | U32 | 1 | |
 | 11016 | Inverter AC output (W) | S32 | 1 | **NOT house load** |
