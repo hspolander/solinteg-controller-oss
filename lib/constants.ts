@@ -163,6 +163,23 @@ export const MAX_DEFERRAL_SACRIFICE_ORE = numEnv('SOLINTEG_DEFERRAL_MAX_SACRIFIC
  */
 export const SOLAR_RISK_PREMIUM_ORE_PER_KWH = numEnv('SOLINTEG_SOLAR_RISK_PREMIUM_ORE', 20);
 
+/**
+ * Survival form of the solar-risk premium (optimizeDispatch's opts.solarRiskSurvival): charge
+ * the premium only on the part of a grid buy still in the battery when the next solar arrives,
+ * after self-use has drawn the forecast house deficit out of it. The plain form charges every
+ * bought kWh, so a winter night buy that the heat pump uses up before dawn pays a premium
+ * against tomorrow's solar it can never overlap with. Daytime buys are priced exactly as
+ * before; a summer night buy (little night load, so it survives to sunrise) keeps the full
+ * premium, which is the case the premium exists for.
+ *
+ * ON by default. On the reference deployment, a replay of roughly two years of pre-battery
+ * days, planned on archived weather forecasts across all seasons, found the survival form
+ * cheaper than the plain one in winter and spring/autumn and identical in summer. Dropping the
+ * premium entirely was cheaper still on average but gave up the summer protection against
+ * solar over-delivery after a night buy. Env: SOLINTEG_SOLAR_RISK_SURVIVAL=0 for the plain form.
+ */
+export const SOLAR_RISK_SURVIVAL = (process.env.SOLINTEG_SOLAR_RISK_SURVIVAL ?? '1') === '1';
+
 // ---- Hold mode (opt-in, shadow-only — see lib/plan.ts's holdEnabled wiring) ----
 // Gate parameters for the DP's 'hold' action: freeze SoC and export the solar surplus instead
 // of storing it. Slot-unit conversions (kW → kWh/slot, hours → slots) happen at the use site

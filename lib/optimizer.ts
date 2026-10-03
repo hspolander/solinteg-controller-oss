@@ -178,6 +178,11 @@ function computeFlows(soc: number, socNext: number, solarRem: number, loadRem: n
  *   batteryHeadroom)` öre/kWh, so a buy that a plausible solar over-delivery would make
  *   redundant must clear a real risk margin, not any thin positive edge. Zero whenever no
  *   forecast solar remains (winter nights), so genuine arbitrage is untouched.
+ * @param opts.solarRiskSurvival  charge that premium only on the part of a buy that SURVIVES
+ *   to the next solar slot (see SOLAR_RISK_SURVIVAL in lib/constants.ts). A night buy the
+ *   house will have drawn back out before sunrise cannot be made redundant by tomorrow's
+ *   solar, yet the plain form charges it in full. Daytime buys are unaffected (nothing to
+ *   draw it out before the solar that is already here). Default off: plain form.
  *   Both knobs are planning-only and default OFF: the oracle re-dispatches actual data in
  *   hindsight, where deferral/uncertainty have no meaning — biasing it would poison the
  *   regret-≥0 invariant (lib/oracle.ts). Only lib/plan.ts sets them, for live plans.
@@ -191,6 +196,7 @@ export function optimizeDispatch(
     deferralRateOrePerKwhHour?: number;
     maxDeferralSacrificeOre?: number;
     solarRiskPremiumOre?: number;
+    solarRiskSurvival?: boolean;
     holdEnabled?: boolean;
   },
 ): DispatchSlot[] {
@@ -210,6 +216,11 @@ export function optimizeDispatch(
   return dpCore(slots, startSoc, opts);
 }
 
+// A slot with at least this much forecast solar counts as "the solar has arrived" for the
+// survival form of the solar-risk premium (~200 W average over 15 min). Below it, the trickle
+// at dawn/dusk cannot refill anything worth pricing.
+const SURVIVAL_SOLAR_SLOT_KWH = 0.05;
+
 function dpCore(
   slots: OptimizerSlot[],
   startSoc: number,
@@ -218,6 +229,7 @@ function dpCore(
     loadFactor?: number;
     deferralRateOrePerKwhHour?: number;
     solarRiskPremiumOre?: number;
+    solarRiskSurvival?: boolean;
     holdEnabled?: boolean;
   },
 ): DispatchSlot[] {
@@ -268,6 +280,20 @@ function dpCore(
   for (let i = n - 1; i >= 0; i--) {
     deferOre[i] = deferralRate * 0.25 * (n - 1 - i); // 0.25 h per 15-min slot of earliness
     suffixSolarKwh[i] = suffixSolarKwh[i + 1] + slots[i].solarKwh;
+  }
+  // Survival form (opts.solarRiskSurvival): deficitToSolarKwh[i] = the forecast house deficit
+  // (loadRem) in the slots strictly after i and before the next slot with real solar. Under
+  // self-use that much is drawn from the battery before the sun arrives, so a buy at i only
+  // competes with tomorrow's solar to the extent it is still there afterwards. 0 for a slot
+  // whose successor already has solar (daytime): the plain form's behaviour, unchanged.
+  const survival = solarRiskPremiumOre > 0 && opts?.solarRiskSurvival === true;
+  const deficitToSolarKwh = new Float64Array(n);
+  if (survival) {
+    let acc = 0;
+    for (let i = n - 1; i >= 0; i--) {
+      deficitToSolarKwh[i] = acc;
+      acc = slots[i].solarKwh >= SURVIVAL_SOLAR_SLOT_KWH ? 0 : acc + loadRem[i];
+    }
   }
 
   // Hold gates (opt-in). Precompute per-slot whether the DP MAY freeze SoC and export solar
@@ -364,7 +390,18 @@ function dpCore(
           gImp = gridToBattery + lr;
           gExp = sr - fromSolar;
           if (gExp > SLOT_MAX_KWH) gExp = SLOT_MAX_KWH;
-          riskOre = gridToBattery * (deferOre[i] + solarRiskOre);
+          let premiumKwh = gridToBattery;
+          if (survival && gridToBattery > 0) {
+            // How much fuller the battery is when the next solar arrives BECAUSE of this buy:
+            // with and without it, self-use draws deficitToSolarKwh[i] out, stopping at the
+            // floor. Energy is fungible, so this is the buy's real overlap with tomorrow's
+            // solar, whatever "bought" vs "solar" kWh the battery happens to hold.
+            const after = socOf(j) - deficitToSolarKwh[i];
+            const without = after - gridToBattery * ONE_WAY_EFF;
+            const survives = Math.max(MIN_SOC_KWH, after) - Math.max(MIN_SOC_KWH, without);
+            premiumKwh = Math.min(gridToBattery, Math.max(0, survives) / ONE_WAY_EFF);
+          }
+          riskOre = gridToBattery * deferOre[i] + premiumKwh * solarRiskOre;
         } else {
           const out = -dE * ONE_WAY_EFF;
           const toLoad = out < lr ? out : lr;

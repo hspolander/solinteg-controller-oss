@@ -733,6 +733,75 @@ describe('risk-aware planning (deferral bias + solar risk premium — the 2026-0
     expect(soldKwh(withPremium, 24, 36)).toBeGreaterThan(5);
   });
 
+  // ── Survival form of the premium (opts.solarRiskSurvival) ────────────────────────
+  it('survival form leaves daytime buys exactly as the plain premium prices them', () => {
+    // Every buy here sits in a solar slot whose successor also has solar: nothing can draw the
+    // bought energy out before the sun it competes with, so the two forms must agree exactly.
+    const midday = Array.from({ length: 24 }, (_, i) =>
+      makeSlot(10 + Math.floor(i / 4), i % 4, {
+        buyPrice: 86,
+        sellPrice: 6,
+        solarKwh: 0.25,
+        consumptionKwh: 0.25,
+      }),
+    );
+    const evening = Array.from({ length: 12 }, (_, i) =>
+      makeSlot(18 + Math.floor(i / 4), i % 4, { buyPrice: 190, sellPrice: 98 }),
+    );
+    const slots = [...midday, ...evening];
+    expect(optimizeDispatch(slots, 14, { solarRiskPremiumOre: 20, solarRiskSurvival: true })).toEqual(
+      optimizeDispatch(slots, 14, { solarRiskPremiumOre: 20 }),
+    );
+  });
+
+  // A night of cheap buying, then a modest solar morning (raw solar comparable to the battery's
+  // headroom, so the premium bites), then a dear evening. Only the NIGHT LOAD differs between
+  // the two cases below, and it alone decides whether a night buy can still be in the battery
+  // when the sun arrives.
+  const nightThenSolar = (nightLoadKwh: number) => {
+    const night = Array.from({ length: 40 }, (_, i) =>
+      makeSlot(Math.floor(i / 4), i % 4, {
+        buyPrice: i < 8 ? 100 : 114,
+        sellPrice: 5,
+        consumptionKwh: nightLoadKwh,
+      }),
+    );
+    const day = Array.from({ length: 24 }, (_, i) =>
+      makeSlot(10 + Math.floor(i / 4), i % 4, {
+        buyPrice: 114,
+        sellPrice: 5,
+        solarKwh: 0.5,
+        consumptionKwh: 0.3,
+      }),
+    );
+    const evening = Array.from({ length: 16 }, (_, i) =>
+      makeSlot(16 + Math.floor(i / 4), i % 4, { buyPrice: 114, sellPrice: 5, consumptionKwh: 0.5 }),
+    );
+    return [...night, ...day, ...evening];
+  };
+
+  it('survival form drops the premium on a night buy the house draws back out before sunrise', () => {
+    // Winter shape: 0.8 kWh per quarter overnight is ~29 kWh before the sun, more than the
+    // whole battery. A 00:00-02:00 buy at 100 covering 114-öre night load cannot be made
+    // redundant by the morning solar; the plain premium charges it anyway and kills the trade.
+    const slots = nightThenSolar(0.8);
+    const plainPremium = optimizeDispatch(slots, 3, { solarRiskPremiumOre: 20 });
+    const survival = optimizeDispatch(slots, 3, { solarRiskPremiumOre: 20, solarRiskSurvival: true });
+    const noPremium = optimizeDispatch(slots, 3);
+    expect(boughtKwh(survival, 0, 8)).toBeGreaterThan(boughtKwh(plainPremium, 0, 8) + 1);
+    expect(boughtKwh(survival, 0, 8)).toBeCloseTo(boughtKwh(noPremium, 0, 8), 1);
+  });
+
+  it('survival form keeps the premium on a night buy that would still be there at sunrise', () => {
+    // Summer shape: almost no night load, so a night buy sits in the battery until the solar
+    // arrives, exactly the 2026-07-19 risk the premium exists for. Both forms must hold back.
+    const slots = nightThenSolar(0.02);
+    const plainPremium = optimizeDispatch(slots, 3, { solarRiskPremiumOre: 20 });
+    const survival = optimizeDispatch(slots, 3, { solarRiskPremiumOre: 20, solarRiskSurvival: true });
+    expect(boughtKwh(optimizeDispatch(slots, 3), 0, 8)).toBeGreaterThan(0.5); // the trade exists
+    expect(boughtKwh(survival, 0, 8)).toBeCloseTo(boughtKwh(plainPremium, 0, 8), 1);
+  });
+
   it('premium leaves no-solar (winter night) arbitrage bit-identical to the plain optimum', () => {
     // suffixSolar ≡ 0 → the premium contributes exactly 0.0 öre to every transition.
     const night = Array.from({ length: 20 }, (_, i) =>
