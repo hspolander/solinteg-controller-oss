@@ -237,9 +237,11 @@ from zoneinfo import ZoneInfo
 import common  # sibling module (scripts/services/) — script dir is sys.path[0]
 from inverter_control import (
     ARMED,
+    SOC_FLOOR_PCT,
     Inverter,
     force_charge,
     force_discharge,
+    force_hold,
     return_to_auto,
     clamp_power_w,
 )
@@ -265,15 +267,17 @@ SLOT_HOURS = 0.25
 # lib/__tests__/action-contract.test.ts asserts these two tuples together cover every member of
 # the TS union. Adding an action there fails that test until it is either given a branch below
 # or listed in AUTO_ACTIONS as a deliberate auto mapping. See CONTRIBUTING.md.
-FORCED_ACTIONS = ("charge", "discharge")
-# 'hold' (freeze SoC, export the solar surplus) is a DELIBERATE auto mapping, not an oversight:
-# no known register expresses "don't charge, export the surplus" (MODBUS.md warns against the
-# nearest approximation), so there is nothing else apply_target() could do with it. It is also
-# gated to disarmed installs on the TS side (lib/plan.ts's holdEnabled), precisely because
-# auto's real behaviour - charging the surplus - is the opposite of what hold asks for; see that
-# gate's comment for the full reasoning. Declared here so action-contract.test.ts's "every
-# Action is accounted for" check passes on purpose rather than by accident.
-AUTO_ACTIONS = ("idle", "hold")
+FORCED_ACTIONS = ("charge", "discharge", "hold")
+# 'hold' = freeze the battery at 0 W (inverter_control.force_hold: EMS BattCtrl, 50207 = 0, caps
+# left open). It reaches apply_target() two ways:
+#   - derived HERE from a plan 'idle' slot that leaves load to the grid while keeping charge
+#     (hold_decision): the no-solar "grid covers the house, battery holds" case. This is the one
+#     probed on-device (scripts/tools/probe_hold_freeze.py) and the one an armed install runs;
+#   - emitted by the optimizer (lib/plan.ts's gated hold mode: freeze SoC and export a solar
+#     surplus). That flavour stays forced OFF while control is armed: the freeze has only been
+#     probed WITHOUT solar, so a plan-emitted hold only ever reaches here on a disarmed install,
+#     where writes are no-ops. Both are the same register act, hence one action.
+AUTO_ACTIONS = ("idle",)
 
 # One real source of truth: same env var name lib/constants.ts reads, matching hardcoded
 # fallback default (kept in sync by lib/__tests__/constants-cross-language.test.ts).
@@ -307,6 +311,73 @@ LIVE_LOAD_ROUND_W = int(os.environ.get("DISPATCH_LIVE_LOAD_ROUND_W", "100"))
 LIVE_LOAD_DEADBAND_W = int(os.environ.get("DISPATCH_LIVE_LOAD_DEADBAND_W", "250"))
 LIVE_JSON_PATH = os.environ.get("INVERTER_DATA_PATH", "/opt/solinteg/live.json")
 LIVE_MAX_AGE_S = 120  # same staleness rule as lib/inverter.ts
+
+# HOLD (OFF by default). The optimizer plans "grid covers the house, battery holds" in no-solar
+# deficit slots: an `idle` slot never plans SoC to fall (any fall is labelled 'discharge',
+# lib/optimizer.ts), so idle + grid-covered load means it deliberately chose not to spend the
+# battery there. Self-use spends it anyway, and the leak grows as solar shrinks: on the
+# reference deployment a few kWh a month in summer, tens of kWh by early autumn. Replayed over
+# three past winters on archived weather forecasts, executing it saved a few hundred kr per
+# winter, mostly on cold days. The mechanism, EMS BattCtrl at 0 W with the caps open, was probed
+# on-device (MODBUS.md, scripts/tools/probe_hold_freeze.py) - probe your own unit first.
+HOLD_ENABLED = os.environ.get("SOLINTEG_HOLD_ENABLED", "0") == "1"
+# The two plan-side thresholds mirror lib/chart-utils.ts (HOLD_LOAD_FROM_GRID_KWH,
+# HOLD_SOC_HEADROOM_KWH), so the dashboard's hold bands are exactly the slots executed as holds.
+HOLD_LOAD_FROM_GRID_KWH = 0.15
+HOLD_SOC_HEADROOM_KWH = 1.0
+# Live-side guards. Above this PV surplus a hold would block the battery charging from the sun,
+# which auto does for free, so the slot runs as auto instead.
+HOLD_MAX_SURPLUS_W = float(os.environ.get("SOLINTEG_HOLD_MAX_SURPLUS_W", "100"))
+# Never hold below this SoC: the inverter's own floor behaviour inside EMS mode is unprobed, and
+# the replay found the guard costs nothing (a battery that low has little left worth holding).
+HOLD_MIN_SOC_PCT = float(os.environ.get("SOLINTEG_HOLD_MIN_SOC_PCT", "15"))
+
+
+def read_live_soc_pct(now: datetime):
+    """Live SoC % from live.json, or None if missing/stale — same staleness rule as
+    read_live_reading."""
+    data = common.read_json(LIVE_JSON_PATH)
+    if data is None:
+        return None
+    try:
+        if (now - datetime.fromisoformat(data["timestamp"])).total_seconds() > LIVE_MAX_AGE_S:
+            return None
+        return float(data["soc_pct"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def hold_decision(slot: dict, now: datetime):
+    """Should this plan `idle` slot be executed as a hold? Returns (hold, why).
+
+    All of it must hold, or the slot stays plain auto (today's behaviour):
+      - the feature flag is on;
+      - the plan leaves real load to the grid here (loadFromGridKwh) while the battery sits
+        clearly above the floor after the slot: the planner chose to keep that energy;
+      - live data is fresh, shows no meaningful solar surplus (a hold would stop the battery
+        charging from it) and SoC is at or above HOLD_MIN_SOC_PCT.
+    Missing live data means no hold: auto is the fail-safe, never a guess.
+    """
+    if not HOLD_ENABLED:
+        return False, ""
+    from_grid = float(slot.get("loadFromGridKwh") or 0.0)
+    if from_grid < HOLD_LOAD_FROM_GRID_KWH:
+        return False, ""
+    floor_kwh = SOC_FLOOR_PCT / 100 * BATTERY_KWH
+    soc_after = float(slot.get("socAfter") or 0.0)
+    if soc_after < floor_kwh + HOLD_SOC_HEADROOM_KWH:
+        return False, f"no hold: plan leaves the battery near the floor ({soc_after:.2f} kWh)"
+    live = read_live_reading(now)
+    soc = read_live_soc_pct(now)
+    if live is None or soc is None:
+        return False, "no hold: no fresh live reading"
+    surplus = max(0.0, live[0] - live[1])
+    if surplus > HOLD_MAX_SURPLUS_W:
+        return False, f"no hold: live solar surplus {surplus:.0f} W — auto charges it"
+    if soc < HOLD_MIN_SOC_PCT:
+        return False, f"no hold: SoC {soc:.1f}% below hold minimum {HOLD_MIN_SOC_PCT:.0f}%"
+    return True, (f"hold: plan leaves {from_grid:.2f} kWh of load to the grid and keeps "
+                  f"{soc_after:.1f} kWh in the battery; SoC {soc:.1f}%")
 # Same env var lib/constants.ts's BATTERY_RT_EFF reads (kept in sync by the cross-language test).
 BATTERY_RT_EFF = float(os.environ.get("SOLINTEG_BATTERY_RT_EFF", "0.96"))
 ONE_WAY_EFF = BATTERY_RT_EFF ** 0.5
@@ -690,6 +761,22 @@ def decide(con: sqlite3.Connection, now: datetime):
                 numbers["next_action"] = future["action"]
                 numbers["next_action_time"] = future["startTime"]
                 break
+        # A bug in the hold classifier must degrade to plain auto (today's behaviour), never
+        # throw into the revert-every-iteration error path.
+        try:
+            hold, why = hold_decision(dispatch[idx], now)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("hold classification failed (%s) — staying in auto", exc)
+            hold, why = False, f"hold classification failed: {exc}"
+        if hold:
+            action = "hold"
+            numbers["load_from_grid_kwh"] = round(float(dispatch[idx].get("loadFromGridKwh") or 0.0), 3)
+        if why:
+            detail_hold = why
+        else:
+            detail_hold = ""
+    else:
+        detail_hold = ""
 
     solar_skip, detail = False, ""
     if action == "discharge":
@@ -729,7 +816,12 @@ def decide(con: sqlite3.Connection, now: datetime):
         except Exception as exc:  # noqa: BLE001
             log.warning("solar-funding check failed (%s) — proceeding without it", exc)
             solar_skip, detail = False, f"solar-funding check failed: {exc}"
-    expected_soc_now = plan_expected_soc_now(dispatch, idx, prev_soc, now) if action != "idle" else None
+    if detail_hold:
+        detail = detail_hold
+    # No SoC-divergence check for a hold: it forces no power computed from the plan's baseline,
+    # and a frozen battery cannot run away from the plan in either direction.
+    expected_soc_now = (plan_expected_soc_now(dispatch, idx, prev_soc, now)
+                        if action not in ("idle", "hold") else None)
     return slot_time, action, power_w, expected_soc_now, solar_skip, detail, numbers
 
 
@@ -745,6 +837,8 @@ def apply_target(inv: Inverter, action: str, power_w: int) -> None:
         force_charge(inv, power_w)
     elif action == "discharge":
         force_discharge(inv, power_w)
+    elif action == "hold":
+        force_hold(inv, HOLD_MIN_SOC_PCT)
     else:
         if action not in AUTO_ACTIONS:
             log.warning(
@@ -984,8 +1078,8 @@ def apply_decision(con: sqlite3.Connection, slot_time, action: str, power_w: int
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     con = init_db(DB_PATH)
-    log.info("Dispatch loop starting. ARMED=%s interval=%ds reassert=%ds",
-              ARMED, LOOP_INTERVAL_S, REASSERT_S)
+    log.info("Dispatch loop starting. ARMED=%s HOLD=%s interval=%ds reassert=%ds",
+              ARMED, HOLD_ENABLED, LOOP_INTERVAL_S, REASSERT_S)
     if not ARMED:
         log.warning("Running DISARMED — decisions are computed and logged to "
                      "control_actions, but no register is actually written. "

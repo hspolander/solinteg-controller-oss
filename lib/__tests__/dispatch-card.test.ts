@@ -33,8 +33,8 @@ describe('toneFor', () => {
   it('is PLANERAT for an applied idle', () => {
     expect(toneFor(action({ outcome: 'applied', plannedAction: 'idle' }))).toBe('PLANERAT');
   });
-  it('is PLANERAT for an applied hold — the hardware sits in auto, nothing is forced', () => {
-    expect(toneFor(action({ outcome: 'applied', plannedAction: 'hold' }))).toBe('PLANERAT');
+  it('is AKTIV for an applied hold — the battery is actively frozen at 0 W', () => {
+    expect(toneFor(action({ outcome: 'applied', plannedAction: 'hold' }))).toBe('AKTIV');
   });
   it('is AVVAKTAR for skipped_divergence', () => {
     expect(toneFor(action({ outcome: 'skipped_divergence' }))).toBe('AVVAKTAR');
@@ -70,7 +70,7 @@ describe('actionLabel', () => {
   it('labels an applied idle as Auto', () => {
     expect(actionLabel('idle', 'applied')).toBe('Auto');
   });
-  it('labels hold as Hålläge — the plan declined the surplus, which Auto would hide', () => {
+  it('labels hold as Hålläge', () => {
     expect(actionLabel('hold', 'applied')).toBe('Hålläge');
   });
   it('labels a skipped idle as Överhoppad', () => {
@@ -294,5 +294,20 @@ describe('buildDispatchCardData', () => {
     expect(result?.recentDecisions).toHaveLength(2);
     expect(result?.recentDecisions[0]).toEqual({ time: '11:45', action: 'Auto', powerKw: 0, outcome: 'ok' });
     expect(result?.recentDecisions[1]).toEqual({ time: '12:00', action: 'Laddning', powerKw: 5.949, outcome: 'ok' });
+  });
+});
+
+describe('hold (executor-derived, dispatch_loop.py hold_decision)', () => {
+  const now = new Date('2026-12-10T18:01:00.000Z');
+  it('explains that the grid covers the house so the battery is saved for later', () => {
+    const result = buildDispatchCardData(
+      [action({ outcome: 'applied', plannedAction: 'hold', detailJson: { buyOre: 142.5 } })],
+      now,
+    );
+    expect(result?.current.reason).toContain('Håller batteriet');
+    expect(result?.current.reason).toContain('142.5');
+  });
+  it('a failed hold still reads as an error, not as a hold', () => {
+    expect(actionLabel('hold', 'error_reverted')).toBe('Fel');
   });
 });

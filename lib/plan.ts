@@ -189,13 +189,12 @@ export async function producePlan(): Promise<PlanResult> {
       // holdEnabled: gated hold mode (freeze SoC + export the solar surplus when prices are
       // falling, gross PV > HOLD_MIN_PV_KW, and the refill window's forecast can re-fill the
       // battery to full ×HOLD_REFILL_MARGIN — see lib/constants.ts). OPT-IN and OFF by default
-      // (SOLINTEG_HOLD_ENABLED=1), and additionally FORCED OFF while control is armed: no known
-      // register expresses "don't charge, export the surplus" (MODBUS.md warns against the
-      // nearest approximation, 0x303 with 50207=0), so dispatch_loop.py's apply_target maps
-      // 'hold' to return_to_auto — which charges the surplus, the exact opposite. On an armed
-      // install every hold slot would silently invert the plan and trip the SoC-divergence
-      // guard; until someone field-probes a real hold register, this stays an evaluation
-      // feature for shadow (disarmed) installs. Live plans only; the hindsight oracle never
+      // (SOLINTEG_HOLD_ENABLED=1), and additionally FORCED OFF while control is armed.
+      // dispatch_loop.py now executes 'hold' as a real freeze (inverter_control.force_hold:
+      // 0x303 with 50207=0, caps open), but that freeze has only been probed WITHOUT solar - the
+      // executor's own no-solar hold (hold_decision). Whether it behaves with a PV surplus to
+      // export is unprobed, so this solar flavour stays an evaluation feature for shadow
+      // (disarmed) installs until someone probes it. Live plans only; the hindsight oracle never
       // sets it, so the facit stays hold-free. NB: hold is a pure relaxation of the solution
       // space, so that hold-free facit is NOT an upper bound on a hold-enabled plan — a
       // shadow-scored regret (see lib/oracle.ts) can legitimately go negative when hold helps.

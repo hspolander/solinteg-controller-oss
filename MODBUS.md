@@ -236,6 +236,29 @@ export stayed open and the blast radius stayed small. The economic-displacement 
 the control-register table does **not** transfer to the freeze case: it comes from a nonzero
 charge target outbidding the house for PV, and a freeze commands `50207 = 0`.
 
+**HOLD PROBED ON-DEVICE (`scripts/tools/probe_hold_freeze.py`, reference unit, dark, SoC ~63 %,
+house ~700-840 W): both recipes hold, and the simple one is enough.**
+
+| phase | battery | grid | house | grid L1/L2/L3 |
+|---|---|---|---|---|
+| 0 self-use (baseline) | +692 W | +4 W | 684 W | ~0 / ~0 / ~0 |
+| A **soft hold**: 0x303 + 50207=0, caps OPEN | **+0 W** | −706 W | 706 W | −237 / −235 / −234 |
+| B full freeze: + 50209=0, 50208=0 in-mode | +0 W | −840 W | 840 W | −290 / −261 / −288 |
+
+SoC did not move in either; the grid carried the whole house evenly on all three phases; the
+in-mode cap writes read back as stored; the restore verified. So:
+- **A no-solar hold needs NO restrictive caps.** `0x303` with `50207 = 0` freezes the battery by
+  itself, and that is what `inverter_control.force_hold` and dispatch_loop.py's hold execute.
+  Power 0 also blocks charging from a PV surplus, so the executor holds only in no-solar slots.
+  A hold WITH a solar surplus to export (lib/plan.ts's gated hold mode) is unprobed.
+- **`50208 = 0` is probed** (Phase B) and behaves as documented, with nothing on the EPS/backup
+  port. Check yours before running the probe: with 50208 = 0 the inverter delivers no AC.
+- **The floor question below is mostly moot for a soft hold:** AC input stays open and a frozen
+  battery does not discharge. The executor still refuses to hold below a minimum SoC.
+- Probe lessons: the dongle occasionally garbles a reply, so a one-shot probe must retry each
+  call on a fresh connection; and a dropped SSH session sends SIGHUP, which the inverter_control
+  fail-safe does not catch, so the probe handles it itself.
+
 **OPEN, and worth answering before shipping any restrictive-cap mode: can the inverter's own SoC
 floor still act with AC input blocked?** 52502/52503 hold an on-grid floor and the inverter actively
 grid-charges back up to it when below. With `50209 = 0` (PV-only charge) or `0/0` (freeze), inverter

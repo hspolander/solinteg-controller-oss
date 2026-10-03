@@ -57,11 +57,9 @@ function stockholmTimeLabel(isoUtc: string): string {
 }
 
 export function toneFor(action: LatestControlAction): DispatchTone {
-  // 'hold' groups with 'idle': the hardware is in auto either way (apply_target maps hold to
-  // return_to_auto), so nothing is being actively forced — AKTIV would overstate it.
-  if (action.outcome === 'applied') {
-    return action.plannedAction === 'idle' || action.plannedAction === 'hold' ? 'PLANERAT' : 'AKTIV';
-  }
+  // An applied 'hold' IS actively forced: the battery is frozen at 0 W in EMS mode
+  // (inverter_control.force_hold), so it reads AKTIV like charge/discharge.
+  if (action.outcome === 'applied') return action.plannedAction === 'idle' ? 'PLANERAT' : 'AKTIV';
   return 'AVVAKTAR'; // both skip outcomes and both error outcomes read as "needs attention"
 }
 
@@ -75,8 +73,8 @@ export function actionLabel(action: LatestControlAction['plannedAction'], outcom
   if (outcome === 'error_reverted' || outcome === 'error_revert_failed') return 'Fel';
   if (action === 'charge') return 'Laddning';
   if (action === 'discharge') return 'Urladdning';
-  // The plan's intent, not the hardware's state — the inverter does sit in auto during a hold
-  // slot, but labelling it 'Auto' would hide that the plan chose to decline the surplus.
+  // The battery is frozen at 0 W while the grid (or, disarmed, the planner's solar hold) covers
+  // the house — see dispatch_loop.py FORCED_ACTIONS.
   if (action === 'hold') return 'Hålläge';
   return outcome === 'applied' ? 'Auto' : 'Överhoppad';
 }
@@ -120,6 +118,12 @@ function buildReason(a: LatestControlAction): { reason: string; warning?: string
       }
       const priceNote = d.buyOre != null ? ` (slipper köpa för ${d.buyOre.toFixed(1)} öre/kWh)` : '';
       return { reason: `Laddar ur ${powerKw.toFixed(1)} kW — täcker husets förbrukning${priceNote}.` };
+    }
+    if (a.plannedAction === 'hold') {
+      // The battery is deliberately frozen: the grid covers the house now so the stored energy
+      // is there for a dearer slot later (dispatch_loop.py hold_decision).
+      const priceNote = d.buyOre != null ? ` för ${d.buyOre.toFixed(1)} öre/kWh` : '';
+      return { reason: `Håller batteriet — nätet täcker huset just nu${priceNote}, energin sparas till dyrare timmar.` };
     }
     // idle
     if (a.detail && (a.detail.startsWith('no optimizer plan') || a.detail.startsWith('now falls outside'))) {

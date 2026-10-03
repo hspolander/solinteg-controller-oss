@@ -202,5 +202,48 @@ class MiscTests(InverterControlTestCase):
         self.assertRaises(RuntimeError, ic._charge_sign)
 
 
+
+class ForceHoldTests(InverterControlTestCase):
+    """force_hold: EMS BattCtrl at 0 W with the caps OPEN (probed on-device). The
+    caps must never be written restrictive here: nothing a hold writes may need undoing beyond
+    the mode itself."""
+
+    def test_cold_start_writes_open_caps_then_zero_power_then_mode(self):
+        inv = make_inverter(soc_pct=60.0)
+        self.assertTrue(ic.force_hold(inv, 15.0))
+        writes = inv.client.write_calls()
+        addrs = [a for a, _ in writes]
+        self.assertIn((ic.REG_MAX_AC_OUTPUT, ic.GRID_CAP_RAW), writes)
+        self.assertIn((ic.REG_MAX_AC_INPUT, (-ic.GRID_CAP_RAW) & 0xFFFF), writes)
+        self.assertNotIn((ic.REG_MAX_AC_OUTPUT, 0), writes)
+        self.assertNotIn((ic.REG_MAX_AC_INPUT, 0), writes)
+        self.assertLess(addrs.index(ic.REG_BATT_POWER_TARGET), addrs.index(ic.REG_WORK_MODE))
+        self.assertEqual(inv.client.regs[ic.REG_BATT_POWER_TARGET], 0)
+        self.assertEqual(inv.client.regs[ic.REG_WORK_MODE], ic.WORK_MODE_EMS_BATTCTRL)
+        self.assertTrue(ic._forced_active)
+
+    def test_from_a_discharge_only_the_power_register_is_written(self):
+        inv = make_inverter(soc_pct=60.0)
+        set_already_in_ems_mode(inv, priority=1)
+        ic.force_hold(inv, 15.0)
+        self.assertEqual(inv.client.write_calls(), [(ic.REG_BATT_POWER_TARGET, 0)])
+
+    def test_below_the_minimum_it_returns_to_auto_instead(self):
+        inv = make_inverter(soc_pct=12.0)
+        self.assertFalse(ic.force_hold(inv, 15.0))
+        self.assertEqual(inv.client.regs[ic.REG_WORK_MODE], ic.WORK_MODE_GENERAL)
+        self.assertNotIn(ic.WORK_MODE_EMS_BATTCTRL, [v for a, v in inv.client.write_calls() if a == ic.REG_WORK_MODE])
+        self.assertFalse(ic._forced_active)
+
+    def test_return_to_auto_after_a_hold_reasserts_open_caps_before_the_mode(self):
+        inv = make_inverter(soc_pct=60.0)
+        ic.force_hold(inv, 15.0)
+        n = len(inv.client.write_calls())
+        ic.return_to_auto(inv)
+        after = [a for a, _ in inv.client.write_calls()[n:]]
+        self.assertLess(after.index(ic.REG_MAX_AC_INPUT), after.index(ic.REG_WORK_MODE))
+        self.assertEqual(inv.client.regs[ic.REG_WORK_MODE], ic.WORK_MODE_GENERAL)
+
+
 if __name__ == "__main__":
     unittest.main()

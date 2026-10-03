@@ -808,7 +808,7 @@ def probe_conditions_ready(con: sqlite3.Connection, now: datetime):
     planned_action, outcome, armed = last
     if not armed:
         return None
-    if planned_action in ("charge", "discharge") and outcome == "applied":
+    if planned_action in ("charge", "discharge", "hold") and outcome == "applied":
         return None
 
     return (ONESHOT_PREFIX + "probe_ready:" + stockholm_date(now),

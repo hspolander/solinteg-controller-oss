@@ -17,7 +17,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -223,13 +223,24 @@ class ApplyTargetRouting(unittest.TestCase):
 
     def setUp(self):
         self.calls = []
-        self._orig = (dl.force_charge, dl.force_discharge, dl.return_to_auto)
+        self._orig = (dl.force_charge, dl.force_discharge, dl.return_to_auto, dl.force_hold)
         dl.force_charge = lambda inv, w: self.calls.append(("charge", w))
         dl.force_discharge = lambda inv, w: self.calls.append(("discharge", w))
         dl.return_to_auto = lambda inv: self.calls.append(("auto", None))
+        dl.force_hold = lambda inv, min_soc: self.calls.append(("hold", min_soc))
 
     def tearDown(self):
-        dl.force_charge, dl.force_discharge, dl.return_to_auto = self._orig
+        dl.force_charge, dl.force_discharge, dl.return_to_auto, dl.force_hold = self._orig
+
+    def test_hold_routes_to_force_hold_with_the_soc_minimum(self):
+        dl.apply_target(object(), "hold", 0)
+        self.assertEqual(self.calls, [("hold", dl.HOLD_MIN_SOC_PCT)])
+
+    def test_hold_is_a_forced_action(self):
+        # One action for both hold flavours (executor-derived no-solar hold, and the planner's
+        # gated solar hold): both are the same register act, a battery frozen at 0 W.
+        self.assertIn("hold", dl.FORCED_ACTIONS)
+        self.assertNotIn("hold", dl.AUTO_ACTIONS)
 
     def test_charge_forces_a_charge_setpoint(self):
         dl.apply_target(object(), "charge", 1500)
@@ -252,24 +263,13 @@ class ApplyTargetRouting(unittest.TestCase):
         # The scenario this exists for: the optimizer emits an action this executor does not
         # implement. Auto is still the right fail-safe, but it must not be silent — auto
         # CHARGES from surplus, which for a hold-style action would be the opposite of what
-        # was planned. "frobnicate" stands in for any action neither declared nor implemented;
-        # 'hold' itself is now a deliberate AUTO_ACTIONS member (see FORCED_ACTIONS/AUTO_ACTIONS'
-        # own comment) and must NOT warn — that is test_hold_maps_to_auto_without_a_warning below.
+        # was planned. "frobnicate" stands in for any action neither declared nor implemented.
         with self.assertLogs("solinteg.dispatch", level="WARNING") as caught:
             dl.apply_target(object(), "frobnicate", 0)
         self.assertEqual(self.calls, [("auto", None)])
         joined = "\n".join(caught.output)
         self.assertIn("unrecognised dispatch action", joined)
         self.assertIn("frobnicate", joined)
-
-    def test_hold_maps_to_auto_without_a_warning(self):
-        # 'hold' is a DECLARED auto mapping (AUTO_ACTIONS), not an oversight — no register
-        # expresses "don't charge, export the surplus" (MODBUS.md), so auto is genuinely the
-        # only thing apply_target can do with it. It must route exactly like 'idle': to auto,
-        # and quietly, since a warning here would be a false alarm on every hold slot.
-        with self.assertNoLogs("solinteg.dispatch", level="WARNING"):
-            dl.apply_target(object(), "hold", 0)
-        self.assertEqual(self.calls, [("auto", None)])
 
     def test_declared_vocabularies_are_disjoint(self):
         # An action in both tuples would make the contract test's union check pass while
@@ -576,6 +576,74 @@ class CheckSocDivergenceTests(unittest.TestCase):
         dl.check_soc_divergence(FakeInverter(50.0), 12.8, "t0", "charge", numbers)
         self.assertIn("soc_drift_kwh", numbers)
         self.assertIn("soc_drift_limit_kwh", numbers)
+
+
+
+class HoldDecisionTests(unittest.TestCase):
+    """hold_decision() turns a plan `idle` slot into an executed hold. Every guard here exists
+    because getting it wrong is silent: a hold in a sunny slot blocks free PV charging, and a
+    hold on stale data freezes the battery against a house the plan never saw."""
+
+    NOW = datetime(2026, 12, 10, 18, 0, tzinfo=timezone.utc)
+    SLOT = {"action": "idle", "loadFromGridKwh": 0.6, "socAfter": 14.0}
+
+    def setUp(self):
+        self._orig = (dl.HOLD_ENABLED, dl.read_live_reading, dl.read_live_soc_pct)
+        dl.HOLD_ENABLED = True
+        self.live = (0.0, 2400.0)   # pv_w, house_load_w: a winter evening
+        self.soc = 55.0
+        dl.read_live_reading = lambda now: self.live
+        dl.read_live_soc_pct = lambda now: self.soc
+
+    def tearDown(self):
+        dl.HOLD_ENABLED, dl.read_live_reading, dl.read_live_soc_pct = self._orig
+
+    def test_planned_grid_covered_slot_on_a_dark_evening_holds(self):
+        hold, why = dl.hold_decision(self.SLOT, self.NOW)
+        self.assertTrue(hold)
+        self.assertIn("hold:", why)
+
+    def test_flag_off_never_holds(self):
+        dl.HOLD_ENABLED = False
+        self.assertEqual(dl.hold_decision(self.SLOT, self.NOW), (False, ""))
+
+    def test_slot_without_grid_covered_load_is_plain_auto(self):
+        self.assertFalse(dl.hold_decision({**self.SLOT, "loadFromGridKwh": 0.05}, self.NOW)[0])
+
+    def test_battery_near_the_floor_is_not_worth_holding(self):
+        # 8 % of 25.6 = 2.05 kWh floor; under floor + 1 kWh the plan is not "keeping" anything.
+        self.assertFalse(dl.hold_decision({**self.SLOT, "socAfter": 2.5}, self.NOW)[0])
+
+    def test_live_solar_surplus_means_auto_so_the_battery_can_charge(self):
+        self.live = (3000.0, 800.0)
+        hold, why = dl.hold_decision(self.SLOT, self.NOW)
+        self.assertFalse(hold)
+        self.assertIn("surplus", why)
+
+    def test_low_live_soc_means_auto(self):
+        self.soc = 12.0
+        hold, why = dl.hold_decision(self.SLOT, self.NOW)
+        self.assertFalse(hold)
+        self.assertIn("minimum", why)
+
+    def test_no_fresh_live_data_means_auto(self):
+        self.live = None
+        self.assertFalse(dl.hold_decision(self.SLOT, self.NOW)[0])
+
+
+class ApplyDecisionHoldTests(ApplyDecisionTests):
+    """A hold through the real apply path: no divergence check (expected_soc_kwh is None), the
+    loop is no longer in auto afterwards, and the row says 'hold', so a leakage query over
+    planned_action = 'idle' rows measures what is left after holds."""
+
+    def test_hold_applies_skips_divergence_and_leaves_auto(self):
+        outcome, in_auto = dl.apply_decision(
+            self.con, "t0", "hold", 0, expected_soc_kwh=None, solar_skipped_now=False,
+            detail="hold: ...", numbers={}, loop_in_auto=True)
+        self.assertEqual(outcome, "applied")
+        self.assertFalse(in_auto)
+        self.assertEqual(self.applied, [("hold", 0)])
+        self.assertEqual(self.rows()[0][:3], ("hold", 0, "applied"))
 
 
 if __name__ == "__main__":

@@ -99,7 +99,8 @@ describe('Action contract: lib/optimizer.ts <-> scripts/services/dispatch_loop.p
     // returning [] and every assertion would vacuously pass. Pin the current values so the
     // test fails loudly instead of going quiet.
     expect(tsActionUnion()).toEqual(['charge', 'discharge', 'hold', 'idle']);
-    expect(pyTuple('FORCED_ACTIONS')).toEqual(['charge', 'discharge']);
-    expect(pyTuple('AUTO_ACTIONS')).toEqual(['hold', 'idle']);
+    // 'hold' moved from AUTO to FORCED when inverter_control.force_hold was probed on-device.
+    expect(pyTuple('FORCED_ACTIONS')).toEqual(['charge', 'discharge', 'hold']);
+    expect(pyTuple('AUTO_ACTIONS')).toEqual(['idle']);
   });
 });

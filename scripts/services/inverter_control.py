@@ -354,6 +354,43 @@ def force_discharge(inv: Inverter, power_w: int) -> None:
     _forced_active = True
 
 
+def force_hold(inv: Inverter, min_soc_pct: float) -> bool:
+    """Freeze the battery: EMS BattCtrl at 0 W, caps left OPEN, so the grid covers the house.
+
+    The one deliberate exception to "never park 0x303 at 50207=0" (force_charge/force_discharge
+    refuse 0 W for that reason): in a no-solar deficit slot, blocking self-consumption IS the
+    point. Probed on-device (MODBUS.md, scripts/tools/probe_hold_freeze.py): battery
+    at 0 W, grid carried the whole house on all three phases, SoC unchanged, with NO restrictive
+    cap written. That matters: nothing here can be left behind that return_to_auto would have to
+    undo beyond the mode itself. Same register sequence as force_discharge at power 0, so a
+    discharge -> hold transition takes the fast path (one write).
+
+    The caller (dispatch_loop) only asks for a hold when there is no live solar surplus, because
+    power 0 also blocks charging from PV. Returns False, having returned to auto instead, below
+    min_soc_pct: the inverter's own SoC floor behaviour inside EMS mode is unprobed, and a
+    battery that low has little left worth holding anyway.
+    """
+    global _forced_active
+    soc = inv.soc_pct()
+    if soc < min_soc_pct:
+        log.info("force_hold: SoC %.1f%% < hold minimum %.1f%% — returning to auto instead", soc, min_soc_pct)
+        return_to_auto(inv)
+        return False
+    already_set = _already_set_for(inv, priority=1)
+    log.info("force_hold: battery held at 0 W, SoC %.1f%%%s", soc,
+             " (fast path — already in EMS mode)" if already_set else "")
+    if not already_set:
+        inv.write_u16(REG_MAX_AC_OUTPUT, GRID_CAP_RAW)
+        inv.write_u16(REG_MAX_AC_INPUT, (-GRID_CAP_RAW) & 0xFFFF)
+        inv.write_u16(REG_PRIORITY, 1)
+    inv.write_u16(REG_BATT_POWER_TARGET, 0)
+    if not already_set:
+        time.sleep(0.3)
+        inv.write_u16(REG_WORK_MODE, WORK_MODE_EMS_BATTCTRL)
+    _forced_active = True
+    return True
+
+
 # ── Fail-safe: revert to auto on exit/crash/signal ──────────────────────────────
 # _forced_active tracks whether THIS process actually put the inverter into a forced
 # EMS BattCtrl setpoint (via force_charge/force_discharge) that hasn't been reverted
