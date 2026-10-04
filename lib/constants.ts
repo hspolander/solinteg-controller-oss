@@ -180,6 +180,23 @@ export const SOLAR_RISK_PREMIUM_ORE_PER_KWH = numEnv('SOLINTEG_SOLAR_RISK_PREMIU
  */
 export const SOLAR_RISK_SURVIVAL = (process.env.SOLINTEG_SOLAR_RISK_SURVIVAL ?? '1') === '1';
 
+/**
+ * Need-window form of the deferral bias (optimizeDispatch's opts.deferralUntilNeeded): a
+ * grid-funded charge's earliness is measured to when the bought energy would be NEEDED (the
+ * first slot where the forecast house deficit since the buy exceeds what the battery already
+ * holds above the floor), not to the horizon end. The slope that makes the planner prefer the
+ * later of near-equal slots is unchanged; what goes is the LEVEL, which on a long plan reaches
+ * many öre/kWh and taxed buys that cannot be deferred at all (a winter night buy feeding the
+ * heat pump within the hour paid as if it could wait until tomorrow night). A morning buy for
+ * an evening sell on a solar day is not needed until evening, so it keeps its protection.
+ * Sells keep the full ramp.
+ *
+ * ON by default. On the reference deployment's archived-forecast replay it was cheaper than
+ * the plain ramp in winter, about even otherwise, and kept the summer protection that dropping
+ * the bias entirely gave up. Env: SOLINTEG_DEFERRAL_UNTIL_NEEDED=0 for the plain ramp.
+ */
+export const DEFERRAL_UNTIL_NEEDED = (process.env.SOLINTEG_DEFERRAL_UNTIL_NEEDED ?? '1') === '1';
+
 // ---- Hold mode (opt-in, shadow-only — see lib/plan.ts's holdEnabled wiring) ----
 // Gate parameters for the DP's 'hold' action: freeze SoC and export the solar surplus instead
 // of storing it. Slot-unit conversions (kW → kWh/slot, hours → slots) happen at the use site

@@ -68,6 +68,7 @@ import {
   DEFERRAL_RATE_ORE_PER_KWH_HOUR,
   SOLAR_RISK_PREMIUM_ORE_PER_KWH,
   SOLAR_RISK_SURVIVAL,
+  DEFERRAL_UNTIL_NEEDED,
   LIVE_LOAD_PROFILE_DAYS,
 } from '../constants';
 import { producePlan } from '../plan';
@@ -171,6 +172,7 @@ describe('producePlan — happy path wiring', () => {
       deferralRateOrePerKwhHour: DEFERRAL_RATE_ORE_PER_KWH_HOUR,
       solarRiskPremiumOre: SOLAR_RISK_PREMIUM_ORE_PER_KWH,
       solarRiskSurvival: SOLAR_RISK_SURVIVAL,
+      deferralUntilNeeded: DEFERRAL_UNTIL_NEEDED,
       holdEnabled: false,
     });
 

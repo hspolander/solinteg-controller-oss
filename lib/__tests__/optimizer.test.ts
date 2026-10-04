@@ -651,6 +651,44 @@ describe('risk-aware planning (deferral bias + solar risk premium — the 2026-0
     expect(soldKwh(deferred, 24, 28)).toBeGreaterThan(10);
   });
 
+  it('need-window form keeps the 07-19 protection: a buy not needed until the sell still defers', () => {
+    // No house load, so the bought energy is not needed before the peak: its window runs to the
+    // horizon end exactly as in the plain form, and every buy still slides late.
+    const cheap = Array.from({ length: 24 }, (_, i) =>
+      makeSlot(Math.floor(i / 4), i % 4, { buyPrice: 85 + i * 0.05, sellPrice: 10 }),
+    );
+    const peak = Array.from({ length: 4 }, (_, i) => makeSlot(6, i, { buyPrice: 310, sellPrice: 300 }));
+    const slots = [...cheap, ...peak];
+    expect(
+      optimizeDispatch(slots, MIN_SOC, { deferralRateOrePerKwhHour: 0.4, deferralUntilNeeded: true }),
+    ).toEqual(optimizeDispatch(slots, MIN_SOC, { deferralRateOrePerKwhHour: 0.4 }));
+  });
+
+  it('need-window form drops the level that taxes a winter night buy feeding immediate load', () => {
+    // A 36 h plan: the plain ramp charges a 00:00 buy 0.4 × ~36 h ≈ 14 öre/kWh, as if it could wait
+    // until tomorrow night, though the heat pump (0.8 kWh/quarter) needs it within the hour.
+    // That level kills a real 100 -> 114 öre night trade. With the window ending where the energy
+    // is needed, the trade is back. The sacrifice cap is lifted to measure the bias itself.
+    const night = Array.from({ length: 40 }, (_, i) =>
+      makeSlot(Math.floor(i / 4), i % 4, { buyPrice: i < 8 ? 100 : 114, sellPrice: 5, consumptionKwh: 0.8 }),
+    );
+    const rest = Array.from({ length: 104 }, (_, i) =>
+      makeSlot(10 + Math.floor(i / 4), i % 4, { buyPrice: 114, sellPrice: 5, consumptionKwh: 0.3 }),
+    );
+    const slots = [...night, ...rest];
+    const uncapped = { maxDeferralSacrificeOre: Number.POSITIVE_INFINITY };
+    const none = optimizeDispatch(slots, MIN_SOC);
+    const plain = optimizeDispatch(slots, MIN_SOC, { deferralRateOrePerKwhHour: 0.4, ...uncapped });
+    const needWindow = optimizeDispatch(slots, MIN_SOC, {
+      deferralRateOrePerKwhHour: 0.4,
+      deferralUntilNeeded: true,
+      ...uncapped,
+    });
+    expect(boughtKwh(none, 0, 8)).toBeGreaterThan(5); // the trade exists
+    expect(boughtKwh(plain, 0, 8)).toBeLessThan(boughtKwh(none, 0, 8) - 2); // plain level kills it
+    expect(boughtKwh(needWindow, 0, 8)).toBeCloseTo(boughtKwh(none, 0, 8), 0);
+  });
+
   it('sells defer from an evening peak to a near-equal next-morning peak (holds overnight)', () => {
     // A sold kWh can only be re-acquired ~75-80 öre dearer (moms + skatt/överföring), so among
     // near-equal sell prices later strictly dominates: the energy stays available overnight for

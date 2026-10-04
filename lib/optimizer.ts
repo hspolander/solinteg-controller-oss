@@ -178,6 +178,12 @@ function computeFlows(soc: number, socNext: number, solarRem: number, loadRem: n
  *   batteryHeadroom)` öre/kWh, so a buy that a plausible solar over-delivery would make
  *   redundant must clear a real risk margin, not any thin positive edge. Zero whenever no
  *   forecast solar remains (winter nights), so genuine arbitrage is untouched.
+ * @param opts.deferralUntilNeeded  measure a grid-funded charge's deferral window up to when
+ *   the bought energy would be NEEDED (see DEFERRAL_UNTIL_NEEDED in lib/constants.ts), not to
+ *   the horizon end. The ramp's slope (prefer the later of near-equal slots) is unchanged; what
+ *   goes is its LEVEL acting as a tax on a buy that has no later moment to defer to, e.g. a
+ *   winter night buy feeding the heat pump within the hour. Sells keep the full ramp. Default
+ *   off: plain form.
  * @param opts.solarRiskSurvival  charge that premium only on the part of a buy that SURVIVES
  *   to the next solar slot (see SOLAR_RISK_SURVIVAL in lib/constants.ts). A night buy the
  *   house will have drawn back out before sunrise cannot be made redundant by tomorrow's
@@ -197,6 +203,7 @@ export function optimizeDispatch(
     maxDeferralSacrificeOre?: number;
     solarRiskPremiumOre?: number;
     solarRiskSurvival?: boolean;
+    deferralUntilNeeded?: boolean;
     holdEnabled?: boolean;
   },
 ): DispatchSlot[] {
@@ -230,6 +237,7 @@ function dpCore(
     deferralRateOrePerKwhHour?: number;
     solarRiskPremiumOre?: number;
     solarRiskSurvival?: boolean;
+    deferralUntilNeeded?: boolean;
     holdEnabled?: boolean;
   },
 ): DispatchSlot[] {
@@ -286,6 +294,29 @@ function dpCore(
   // self-use that much is drawn from the battery before the sun arrives, so a buy at i only
   // competes with tomorrow's solar to the extent it is still there afterwards. 0 for a slot
   // whose successor already has solar (daytime): the plain form's behaviour, unchanged.
+  // Need-window form of the deferral bias (opts.deferralUntilNeeded): prefixDeficit[k] = the
+  // forecast house deficit (loadRem) in slots 0..k-1. A buy at i into a battery holding soc
+  // starts being USED at the first slot after i where the deficit since i exceeds what the
+  // battery already holds above the floor; buying any later than that is not an option, so
+  // that slot, not the horizon end, bounds how long the buy could have been deferred.
+  const needWindow = deferralRate > 0 && opts?.deferralUntilNeeded === true;
+  const prefixDeficit = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) prefixDeficit[i + 1] = prefixDeficit[i] + loadRem[i];
+  // Hours from slot i until energy bought at i would be needed, given `held` kWh already above
+  // the floor. Binary search: the smallest k > i with deficit(i+1..k) > held. Capped at the
+  // horizon end, which is the plain form's window.
+  const hoursUntilNeeded = (i: number, held: number): number => {
+    const target = prefixDeficit[i + 1] + held;
+    if (prefixDeficit[n] <= target) return 0.25 * (n - 1 - i);
+    let lo = i + 1;
+    let hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (prefixDeficit[mid + 1] > target) hi = mid;
+      else lo = mid + 1;
+    }
+    return 0.25 * (lo - i);
+  };
   const survival = solarRiskPremiumOre > 0 && opts?.solarRiskSurvival === true;
   const deficitToSolarKwh = new Float64Array(n);
   if (survival) {
@@ -401,7 +432,11 @@ function dpCore(
             const survives = Math.max(MIN_SOC_KWH, after) - Math.max(MIN_SOC_KWH, without);
             premiumKwh = Math.min(gridToBattery, Math.max(0, survives) / ONE_WAY_EFF);
           }
-          riskOre = gridToBattery * deferOre[i] + premiumKwh * solarRiskOre;
+          const buyDeferOre =
+            needWindow && gridToBattery > 0
+              ? deferralRate * hoursUntilNeeded(i, Math.max(0, soc - MIN_SOC_KWH))
+              : deferOre[i];
+          riskOre = gridToBattery * buyDeferOre + premiumKwh * solarRiskOre;
         } else {
           const out = -dE * ONE_WAY_EFF;
           const toLoad = out < lr ? out : lr;

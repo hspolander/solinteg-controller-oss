@@ -16,6 +16,7 @@ import {
   DEFERRAL_RATE_ORE_PER_KWH_HOUR,
   SOLAR_RISK_PREMIUM_ORE_PER_KWH,
   SOLAR_RISK_SURVIVAL,
+  DEFERRAL_UNTIL_NEEDED,
   SOLAR_FORECAST_MODEL,
 } from './constants';
 
@@ -204,6 +205,7 @@ export async function producePlan(): Promise<PlanResult> {
         deferralRateOrePerKwhHour: DEFERRAL_RATE_ORE_PER_KWH_HOUR,
         solarRiskPremiumOre: SOLAR_RISK_PREMIUM_ORE_PER_KWH,
         solarRiskSurvival: SOLAR_RISK_SURVIVAL,
+        deferralUntilNeeded: DEFERRAL_UNTIL_NEEDED,
         holdEnabled:
           process.env.SOLINTEG_HOLD_ENABLED === '1' &&
           process.env.SOLINTEG_CONTROL_ARMED !== '1',
