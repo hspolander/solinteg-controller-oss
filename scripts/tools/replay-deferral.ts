@@ -70,6 +70,8 @@ import {
   DEFERRAL_RATE_ORE_PER_KWH_HOUR,
   SOLAR_RISK_PREMIUM_ORE_PER_KWH,
   MAX_DEFERRAL_SACRIFICE_ORE,
+  SOLAR_RISK_SURVIVAL,
+  DEFERRAL_UNTIL_NEEDED,
 } from '../../lib/constants';
 
 // Baselines from the reference deployment's first review with real grid charging to look at
@@ -163,6 +165,11 @@ function analyse(run: Run): Analysed {
     loadFactor: LOAD_FORECAST_MARGIN,
     deferralRateOrePerKwhHour: DEFERRAL_RATE_ORE_PER_KWH_HOUR,
     solarRiskPremiumOre: SOLAR_RISK_PREMIUM_ORE_PER_KWH,
+    // The live planner's forms. Runs planned before your install adopted them must be replayed
+    // with SOLINTEG_SOLAR_RISK_SURVIVAL=0 / SOLINTEG_DEFERRAL_UNTIL_NEEDED=0, or the FIDELITY
+    // block reports false structural drift.
+    solarRiskSurvival: SOLAR_RISK_SURVIVAL,
+    deferralUntilNeeded: DEFERRAL_UNTIL_NEEDED,
   };
   const kept = optimizeDispatch(run.slots, run.startSoc, opts);
   // The two candidates the guard chooses between. maxDeferralSacrificeOre=Infinity forces the
