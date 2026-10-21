@@ -95,6 +95,7 @@ import sqlite3
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 # Sibling modules (scripts/services/) — script dir is sys.path[0].
@@ -718,6 +719,47 @@ def check_disk_space(path: str = "/"):
     return None
 
 
+# Unit files are installed by hand (`sudo cp deploy/<unit> /etc/systemd/system/` + daemon-reload,
+# deploy/README.md) because that step needs root, and deploy/to-nuc.sh only ships the app tree.
+# So a unit-file change ships in the app tree and then silently never takes effect until someone
+# remembers the copy. This compares the two.
+UNIT_SOURCE_DIR = Path(__file__).resolve().parents[2] / "deploy"
+UNIT_INSTALL_DIR = Path(os.environ.get("HEALTHCHECK_UNIT_INSTALL_DIR", "/etc/systemd/system"))
+
+
+def check_unit_file_drift(source_dir: Path = UNIT_SOURCE_DIR, install_dir: Path = UNIT_INSTALL_DIR):
+    """A deployed deploy/solinteg-*.service|.timer that differs from (or is missing in) the
+    installed copy. LOW priority: nothing is broken yet — the OLD unit is still running — but a
+    change someone shipped is not in force. Line endings are normalised so a CRLF checkout can't
+    false-alarm. Fingerprinted on the set of files, so a newly drifted file re-alerts."""
+    if not source_dir.is_dir():
+        return None  # not running from a deployed tree (dev box, tests elsewhere)
+    differs, missing = [], []
+    for src in sorted(source_dir.glob("solinteg-*.service")) + sorted(source_dir.glob("solinteg-*.timer")):
+        dst = install_dir / src.name
+        try:
+            installed = dst.read_bytes()
+        except FileNotFoundError:
+            missing.append(src.name)
+            continue
+        except OSError:
+            continue  # unreadable: not this check's question
+        if src.read_bytes().replace(b"\r\n", b"\n") != installed.replace(b"\r\n", b"\n"):
+            differs.append(src.name)
+    if not differs and not missing:
+        return None
+    parts = []
+    if differs:
+        parts.append(f"differ from the installed copy: {', '.join(differs)}")
+    if missing:
+        parts.append(f"are not installed: {', '.join(missing)}")
+    return ("unit_file_drift", notify.PRIORITY_LOW, "Solinteg: unit file not installed",
+            f"Deployed unit files {'; '.join(parts)}. A deploy doesn't install unit files, so "
+            f"the change is not in force. On the NUC: sudo cp /opt/solinteg/app/deploy/<unit> "
+            f"/etc/systemd/system/ && sudo systemctl daemon-reload && restart the unit.",
+            "+".join(differs) + "|" + "+".join(missing))
+
+
 def oracle_review_ready(con: sqlite3.Connection):
     """One-shot notice: judging the oracle's regret numbers needs a body of scored days
     before medians mean anything — page once when that body exists, instead of relying on
@@ -832,6 +874,7 @@ def run_checks(con: sqlite3.Connection, now: datetime):
         check_control_errors(con, now),
         check_meter_phase_dead(con, now),
         check_disk_space(),
+        check_unit_file_drift(),
     ]
     return [c for c in checks if c is not None]
 

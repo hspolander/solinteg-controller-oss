@@ -882,5 +882,58 @@ class WeatherFallbackCheckTests(unittest.TestCase):
         self.assertEqual(calls, 1)
 
 
+class UnitFileDriftTests(unittest.TestCase):
+    """check_unit_file_drift: a unit change that shipped in the app tree but was never copied to
+    /etc/systemd/system is silently not in force — deploys can't install units (no password)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.src, self.dst = root / "deploy", root / "etc"
+        self.src.mkdir()
+        self.dst.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write(self, d, name, text):
+        (d / name).write_bytes(text.encode())
+
+    def test_identical_units_are_quiet(self):
+        for name in ("solinteg-web.service", "solinteg-oracle.timer"):
+            self.write(self.src, name, "[Unit]\nDescription=x\n")
+            self.write(self.dst, name, "[Unit]\nDescription=x\n")
+        self.assertIsNone(hc.check_unit_file_drift(self.src, self.dst))
+
+    def test_crlf_checkout_is_not_drift(self):
+        self.write(self.src, "solinteg-web.service", "[Unit]\r\nDescription=x\r\n")
+        self.write(self.dst, "solinteg-web.service", "[Unit]\nDescription=x\n")
+        self.assertIsNone(hc.check_unit_file_drift(self.src, self.dst))
+
+    def test_a_changed_unit_alerts_low_and_names_the_file(self):
+        self.write(self.src, "solinteg-dispatch.service", "[Service]\nEnvironment=A=2\n")
+        self.write(self.dst, "solinteg-dispatch.service", "[Service]\nEnvironment=A=1\n")
+        key, prio, _title, msg, fp = hc.check_unit_file_drift(self.src, self.dst)
+        self.assertEqual(key, "unit_file_drift")
+        self.assertEqual(prio, hc.notify.PRIORITY_LOW)
+        self.assertIn("solinteg-dispatch.service", msg)
+        self.assertIn("daemon-reload", msg)
+        self.assertEqual(fp, "solinteg-dispatch.service|")
+
+    def test_a_unit_never_installed_is_reported_separately(self):
+        self.write(self.src, "solinteg-new.timer", "[Timer]\n")
+        _key, _prio, _title, msg, fp = hc.check_unit_file_drift(self.src, self.dst)
+        self.assertIn("not installed: solinteg-new.timer", msg)
+        self.assertEqual(fp, "|solinteg-new.timer")
+
+    def test_non_unit_files_in_deploy_are_ignored(self):
+        self.write(self.src, "solinteg-deploy.sudoers", "x")
+        self.write(self.src, "schema.sql", "x")
+        self.assertIsNone(hc.check_unit_file_drift(self.src, self.dst))
+
+    def test_no_deployed_tree_means_no_check(self):
+        self.assertIsNone(hc.check_unit_file_drift(self.src / "absent", self.dst))
+
+
 if __name__ == "__main__":
     unittest.main()

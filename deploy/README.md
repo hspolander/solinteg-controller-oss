@@ -427,6 +427,12 @@ sudo smartctl -a /dev/nvme0n1 | grep -i "test_result\|health"  # check the resul
 it runs with the next healthcheck cycle. Alerts if free space on `/` drops below
 `DISK_FREE_MIN_PCT` (default 10%).
 
+**12g. Unit-file drift alert** - also part of the healthcheck, no install step. `deploy/to-nuc.sh`
+ships `deploy/*.service|.timer` into the app tree but does not install them (that needs root), so
+a changed unit would silently stay on its old version. `check_unit_file_drift` compares the
+shipped copies with `/etc/systemd/system/` and pushes a LOW alert naming the file. Fix it with the
+`sudo cp` + `daemon-reload` + restart steps from the unit's own section above.
+
 **Done since:** DHCP reservations for both the NUC and the inverter (see "Network notes" below -
 the inverter's is now issued by the NUC's own `dnsmasq` rather than the router, see §13) and
 Ubuntu Pro (attached 2026-07-07 - ESM Apps, ESM Infra, and Livepatch all enabled, confirm with
