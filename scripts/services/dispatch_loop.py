@@ -191,7 +191,12 @@ Environment variables (beyond inverter_control.py's own SOLINTEG_* / SOLINTEG_CO
                                 (default "1" — on). Kill switch, not a tuning knob: flip to
                                 "0" and restart the service if this ever needs to be ruled
                                 out while investigating something else.
-  DISPATCH_LIVE_LOAD_ROUND_W    live-tracked discharge target is rounded to the nearest this
+  DISPATCH_DISCHARGE_FOLLOW     "0" | "shadow" | "1" (default "shadow"): run discharge slots whose
+                                planned grid position is ~zero in auto instead of live-load
+                                tracking (follow_decision). "shadow" changes nothing but tags
+                                eligible rows (detail_json follow_eligible=1).
+  DISPATCH_FOLLOW_MAX_GRID_W    |planned grid| at or under this counts as ~zero (default 300).
+  DISPATCH_LIVE_LOAD_ROUND_W   live-tracked discharge target is rounded to the nearest this
                                 many watts (default 100) — precision of the written setpoint,
                                 not the write-frequency control (that's the deadband below).
   DISPATCH_LIVE_LOAD_DEADBAND_W same-slot same-action retargets smaller than this (default
@@ -278,6 +283,14 @@ FORCED_ACTIONS = ("charge", "discharge", "hold")
 #     probed WITHOUT solar, so a plan-emitted hold only ever reaches here on a disarmed install,
 #     where writes are no-ops. Both are the same register act, hence one action.
 AUTO_ACTIONS = ("idle",)
+# Actions the EXECUTOR derives on its own, which the optimizer never emits (so they sit outside
+# the contract above). "follow" is a plan `discharge` slot whose grid position is ~zero,
+# executed in auto so the inverter covers the house itself; see follow_decision().
+EXECUTOR_ACTIONS = ("follow",)
+# Actions the inverter executes in auto/General mode. Write-gating treats them alike: no timed
+# re-assert (General doesn't decay, and re-poking would overwrite a mode set in the inverter's
+# own app) and no register write when the loop already left the inverter in auto.
+AUTO_MODE_ACTIONS = ("idle", "follow")
 
 # One real source of truth: same env var name lib/constants.ts reads, matching hardcoded
 # fallback default (kept in sync by lib/__tests__/constants-cross-language.test.ts).
@@ -332,6 +345,22 @@ HOLD_MAX_SURPLUS_W = float(os.environ.get("SOLINTEG_HOLD_MAX_SURPLUS_W", "100"))
 # the replay found the guard costs nothing (a battery that low has little left worth holding).
 HOLD_MIN_SOC_PCT = float(os.environ.get("SOLINTEG_HOLD_MIN_SOC_PCT", "15"))
 
+# FOLLOW (OFF unless set to "1"; "shadow" by default). Live-load tracking
+# (live_discharge_power_w) chases load spikes from Python, so it lags by up to POLL_INTERVAL +
+# LOOP_INTERVAL_S at both ends of every spike: the start leaks to the grid at the buy price, and
+# the end exports the battery's surplus at the sell price. On the reference deployment, ~90% of
+# large load falls under EMS-mode tracking exported on the next poll (avg ~4 kW), against none in
+# auto; short immersion-heater pulses in cold weather make that many overshoots a night. When the
+# plan's own grid position for a discharge slot is ~zero, "the battery covers the house" is
+# exactly what auto does natively, with no lag in either direction. ±300 W is inside the DP's
+# SoC discretisation (193 levels over the pack ≈ 0.13 kWh ≈ 0.5 kW per slot on a 25.6 kWh pack),
+# i.e. noise, not a planned exchange; most discharge slots qualify. Auto's floor is the
+# inverter's own on-grid SoC protection (set_soc_floor), the same one force_discharge already
+# hands over to at the floor. Run in shadow first and compare the tagged rows on YOUR install.
+# "0" = off, "shadow" = decide as before but log which slots would follow, "1" = execute.
+DISCHARGE_FOLLOW = os.environ.get("DISPATCH_DISCHARGE_FOLLOW", "shadow")
+FOLLOW_MAX_GRID_W = float(os.environ.get("DISPATCH_FOLLOW_MAX_GRID_W", "300"))
+
 
 def read_live_soc_pct(now: datetime):
     """Live SoC % from live.json, or None if missing/stale — same staleness rule as
@@ -378,6 +407,26 @@ def hold_decision(slot: dict, now: datetime):
         return False, f"no hold: SoC {soc:.1f}% below hold minimum {HOLD_MIN_SOC_PCT:.0f}%"
     return True, (f"hold: plan leaves {from_grid:.2f} kWh of load to the grid and keeps "
                   f"{soc_after:.1f} kWh in the battery; SoC {soc:.1f}%")
+
+
+def follow_decision(slot: dict):
+    """Is this plan `discharge` slot one auto can execute natively? Returns (eligible, why).
+
+    Eligible when the feature is on (or in shadow) and the plan's net grid exchange for the slot
+    is within ±FOLLOW_MAX_GRID_W: the plan means "cover the house", not "sell" or "cover part of
+    it". Needs no live data — auto reads the house load itself — so a stale live.json, which
+    leaves live-load tracking on the plan-only figure, is no reason to fall back here.
+    """
+    if DISCHARGE_FOLLOW not in ("1", "shadow"):
+        return False, ""
+    grid_kwh = slot.get("gridKwh")
+    if grid_kwh is None:
+        return False, ""
+    planned_grid_w = float(grid_kwh) / SLOT_HOURS * 1000
+    if abs(planned_grid_w) > FOLLOW_MAX_GRID_W:
+        return False, ""
+    return True, (f"follow: planned grid {planned_grid_w:+.0f} W is ~zero, so auto covers the "
+                  f"house load natively")
 # Same env var lib/constants.ts's BATTERY_RT_EFF reads (kept in sync by the cross-language test).
 BATTERY_RT_EFF = float(os.environ.get("SOLINTEG_BATTERY_RT_EFF", "0.96"))
 ONE_WAY_EFF = BATTERY_RT_EFF ** 0.5
@@ -779,6 +828,7 @@ def decide(con: sqlite3.Connection, now: datetime):
         detail_hold = ""
 
     solar_skip, detail = False, ""
+    follow, why_follow = False, ""
     if action == "discharge":
         # The plan's net grid exchange for this slot (+import/−export, DispatchSlot.gridKwh)
         # — lets the dashboard say whether this discharge sells to the grid or just covers
@@ -786,6 +836,17 @@ def decide(con: sqlite3.Connection, now: datetime):
         grid_kwh = dispatch[idx].get("gridKwh")
         if grid_kwh is not None:
             numbers["grid_kwh"] = round(float(grid_kwh), 3)
+        # A bug in the follow classifier must degrade to live-load tracking (the old
+        # behaviour), never throw into the revert-every-iteration error path.
+        try:
+            follow, why_follow = follow_decision(dispatch[idx])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("follow classification failed (%s) — using live-load tracking", exc)
+            follow, why_follow = False, ""
+    if follow and DISCHARGE_FOLLOW == "1":
+        action, power_w, detail = "follow", 0, why_follow
+        numbers["follow"] = 1
+    elif action == "discharge":
         # A bug here must degrade to the plan-only figure (the old behaviour), not throw —
         # same reasoning as the charge-side guard below.
         try:
@@ -794,6 +855,10 @@ def decide(con: sqlite3.Connection, now: datetime):
         except Exception as exc:  # noqa: BLE001
             log.warning("live-load discharge tracking failed (%s) — using plan-only power", exc)
             detail = f"live-load tracking failed: {exc}"
+        if follow:
+            # Shadow mode: unchanged behaviour, but the row records that auto would have run it.
+            numbers["follow_eligible"] = 1
+            detail = f"{detail} [shadow: would follow]"
         if power_w == 0:
             # Live pv/load says no battery discharge is needed right now (e.g. the sun broke
             # through mid-slot and the surplus covers the house). force_discharge(0) would
@@ -839,6 +904,8 @@ def apply_target(inv: Inverter, action: str, power_w: int) -> None:
         force_discharge(inv, power_w)
     elif action == "hold":
         force_hold(inv, HOLD_MIN_SOC_PCT)
+    elif action == "follow":
+        return_to_auto(inv)  # auto/self-use covers the house load itself, without our poll lag
     else:
         if action not in AUTO_ACTIONS:
             log.warning(
@@ -920,11 +987,11 @@ def needs_apply(target, last_target, effective_action: str, effective_power: int
     small_power_move = (
         last_target is not None
         and target[:2] == last_target[:2]
-        and effective_action != "idle"
+        and effective_action not in AUTO_MODE_ACTIONS
         and abs(effective_power - last_target[2]) < LIVE_LOAD_DEADBAND_W
     )
     return (target != last_target and not small_power_move) or (
-        due_for_reassert and effective_action != "idle"
+        due_for_reassert and effective_action not in AUTO_MODE_ACTIONS
     )
 
 
@@ -1043,11 +1110,11 @@ def apply_decision(con: sqlite3.Connection, slot_time, action: str, power_w: int
         # register write. The row below is STILL logged — it carries the skip outcomes, and
         # armed-coverage measurement reads row cadence as "loop alive" (silence >
         # ARMED_SEGMENT_CAP_MS counts as down — lib/oracle.ts).
-        if not (applied_action == "idle" and loop_in_auto):
+        if not (applied_action in AUTO_MODE_ACTIONS and loop_in_auto):
             if inv is None:
                 inv = Inverter()
             apply_target(inv, applied_action, applied_power)
-        loop_in_auto = applied_action == "idle"
+        loop_in_auto = applied_action in AUTO_MODE_ACTIONS
         log_action(con, slot_time, applied_action, applied_power, outcome, detail, detail_json=numbers)
         log.info("slot=%s action=%s power=%dW armed=%s -> %s%s",
                   slot_time, applied_action, applied_power, ARMED, outcome,
@@ -1078,8 +1145,8 @@ def apply_decision(con: sqlite3.Connection, slot_time, action: str, power_w: int
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     con = init_db(DB_PATH)
-    log.info("Dispatch loop starting. ARMED=%s HOLD=%s interval=%ds reassert=%ds",
-              ARMED, HOLD_ENABLED, LOOP_INTERVAL_S, REASSERT_S)
+    log.info("Dispatch loop starting. ARMED=%s HOLD=%s FOLLOW=%s interval=%ds reassert=%ds",
+              ARMED, HOLD_ENABLED, DISCHARGE_FOLLOW, LOOP_INTERVAL_S, REASSERT_S)
     if not ARMED:
         log.warning("Running DISARMED — decisions are computed and logged to "
                      "control_actions, but no register is actually written. "

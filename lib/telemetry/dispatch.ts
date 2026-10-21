@@ -30,7 +30,8 @@ export interface LatestControlAction {
   slotTime: string | null; // naive Stockholm local slot start, matches DispatchSlot.startTime
   // mirrors optimizer.ts's Action. 'hold' rows come from the executor's no-solar hold
   // (dispatch_loop.py hold_decision) or, on disarmed installs only, the planner's gated hold mode.
-  plannedAction: 'charge' | 'discharge' | 'idle' | 'hold';
+  // 'follow' is executor-derived only (dispatch_loop.py follow_decision).
+  plannedAction: 'charge' | 'discharge' | 'idle' | 'hold' | 'follow';
   powerW: number | null;
   armed: boolean;
   outcome: string; // 'applied' | 'skipped_divergence' | 'skipped_solar_shortfall' | 'error_reverted' | 'error_revert_failed'

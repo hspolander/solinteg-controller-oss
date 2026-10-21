@@ -76,6 +76,7 @@ export function actionLabel(action: LatestControlAction['plannedAction'], outcom
   // The battery is frozen at 0 W while the grid (or, disarmed, the planner's solar hold) covers
   // the house — see dispatch_loop.py FORCED_ACTIONS.
   if (action === 'hold') return 'Hålläge';
+  if (action === 'follow') return 'Täcker huset';
   return outcome === 'applied' ? 'Auto' : 'Överhoppad';
 }
 
@@ -124,6 +125,13 @@ function buildReason(a: LatestControlAction): { reason: string; warning?: string
       // is there for a dearer slot later (dispatch_loop.py hold_decision).
       const priceNote = d.buyOre != null ? ` för ${d.buyOre.toFixed(1)} öre/kWh` : '';
       return { reason: `Håller batteriet — nätet täcker huset just nu${priceNote}, energin sparas till dyrare timmar.` };
+    }
+    if (a.plannedAction === 'follow') {
+      // A load-covering discharge run in auto: the inverter follows the house load itself, so
+      // short spikes (e.g. an immersion heater) neither leak to the grid nor overshoot into an export
+      // (dispatch_loop.py follow_decision).
+      const priceNote = d.buyOre != null ? ` (slipper köpa för ${d.buyOre.toFixed(1)} öre/kWh)` : '';
+      return { reason: `Batteriet täcker huset i automatiskt läge — växelriktaren följer lasten direkt${priceNote}.` };
     }
     // idle
     if (a.detail && (a.detail.startsWith('no optimizer plan') || a.detail.startsWith('now falls outside'))) {

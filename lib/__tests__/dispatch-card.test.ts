@@ -311,3 +311,19 @@ describe('hold (executor-derived, dispatch_loop.py hold_decision)', () => {
     expect(actionLabel('hold', 'error_reverted')).toBe('Fel');
   });
 });
+
+describe('follow (executor-derived, dispatch_loop.py follow_decision)', () => {
+  const now = new Date('2026-12-10T05:01:00.000Z');
+  it('labels an applied follow as covering the house and reads it as active, not planned-idle', () => {
+    expect(actionLabel('follow', 'applied')).toBe('Täcker huset');
+    expect(toneFor(action({ outcome: 'applied', plannedAction: 'follow' }))).toBe('AKTIV');
+  });
+  it('explains that auto follows the load, with the avoided buy price', () => {
+    const result = buildDispatchCardData(
+      [action({ outcome: 'applied', plannedAction: 'follow', detailJson: { buyOre: 151.2 } })],
+      now,
+    );
+    expect(result?.current.reason).toContain('automatiskt läge');
+    expect(result?.current.reason).toContain('151.2');
+  });
+});

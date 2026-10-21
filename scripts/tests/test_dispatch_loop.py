@@ -242,6 +242,16 @@ class ApplyTargetRouting(unittest.TestCase):
         self.assertIn("hold", dl.FORCED_ACTIONS)
         self.assertNotIn("hold", dl.AUTO_ACTIONS)
 
+    def test_follow_returns_to_auto(self):
+        dl.apply_target(object(), "follow", 0)
+        self.assertEqual(self.calls, [("auto", None)])
+
+    def test_follow_is_an_executor_action_executed_in_auto(self):
+        self.assertIn("follow", dl.EXECUTOR_ACTIONS)
+        self.assertNotIn("follow", dl.FORCED_ACTIONS + dl.AUTO_ACTIONS)
+        self.assertIn("follow", dl.AUTO_MODE_ACTIONS)
+        self.assertNotIn("hold", dl.AUTO_MODE_ACTIONS)  # hold is EMS 0 W, not auto
+
     def test_charge_forces_a_charge_setpoint(self):
         dl.apply_target(object(), "charge", 1500)
         self.assertEqual(self.calls, [("charge", 1500)])
@@ -336,6 +346,15 @@ class NeedsApplyTests(unittest.TestCase):
         last = ("t0", "discharge", 3000)
         small = 3000 + dl.LIVE_LOAD_DEADBAND_W - 1
         self.assertTrue(dl.needs_apply(("t0", "discharge", small), last, "discharge", small, True))
+
+    def test_unchanged_follow_target_is_never_reasserted_on_a_timer(self):
+        # follow runs in General mode, same as idle: a timed re-poke would overwrite a mode set
+        # by hand in the inverter's own app.
+        t = ("t0", "follow", 0)
+        self.assertFalse(dl.needs_apply(t, t, "follow", 0, due_for_reassert=True))
+
+    def test_discharge_to_follow_within_a_slot_applies(self):
+        self.assertTrue(dl.needs_apply(("t0", "follow", 0), ("t0", "discharge", 3000), "follow", 0, False))
 
     def test_an_action_change_within_a_slot_is_never_deadband_suppressed(self):
         # charge -> discharge is a direction reversal, not load noise, however small the delta.
@@ -644,6 +663,80 @@ class ApplyDecisionHoldTests(ApplyDecisionTests):
         self.assertFalse(in_auto)
         self.assertEqual(self.applied, [("hold", 0)])
         self.assertEqual(self.rows()[0][:3], ("hold", 0, "applied"))
+
+
+class FollowDecisionTests(unittest.TestCase):
+    """follow_decision() picks the discharge slots auto can execute natively. Getting it wrong
+    the other way is silent too: auto covers the WHOLE house load, so a slot planned to sell, or
+    to cover only part of the load, must stay on live-load tracking."""
+
+    def setUp(self):
+        self._orig = dl.DISCHARGE_FOLLOW
+        dl.DISCHARGE_FOLLOW = "1"
+
+    def tearDown(self):
+        dl.DISCHARGE_FOLLOW = self._orig
+
+    def slot(self, grid_kwh):
+        return {"action": "discharge", "gridKwh": grid_kwh, "socAfter": 12.0}
+
+    def test_near_zero_planned_grid_follows(self):
+        follow, why = dl.follow_decision(self.slot(-0.019))  # -76 W, a typical near-zero plan
+        self.assertTrue(follow)
+        self.assertIn("follow:", why)
+
+    def test_both_edges_of_the_band_are_inclusive(self):
+        edge = dl.FOLLOW_MAX_GRID_W / 1000 * dl.SLOT_HOURS
+        self.assertTrue(dl.follow_decision(self.slot(edge))[0])
+        self.assertTrue(dl.follow_decision(self.slot(-edge))[0])
+
+    def test_a_planned_sale_stays_on_tracking(self):
+        self.assertFalse(dl.follow_decision(self.slot(-1.0))[0])  # -4 kW export
+
+    def test_partial_cover_stays_on_tracking(self):
+        self.assertFalse(dl.follow_decision(self.slot(0.25))[0])  # +1 kW import planned
+
+    def test_missing_grid_figure_stays_on_tracking(self):
+        self.assertFalse(dl.follow_decision({"action": "discharge"})[0])
+
+    def test_off_never_follows(self):
+        dl.DISCHARGE_FOLLOW = "0"
+        self.assertEqual(dl.follow_decision(self.slot(0.0)), (False, ""))
+
+    def test_shadow_still_classifies(self):
+        # decide() keeps tracking in shadow and only tags the row; the classifier must still say yes.
+        dl.DISCHARGE_FOLLOW = "shadow"
+        self.assertTrue(dl.follow_decision(self.slot(0.0))[0])
+
+
+class ApplyDecisionFollowTests(ApplyDecisionTests):
+    """A follow through the real apply path: it runs the SoC-divergence check (so drift still
+    triggers replans), and it is auto as far as write-gating and loop_in_auto are concerned."""
+
+    def test_follow_from_a_forced_mode_writes_and_leaves_the_loop_in_auto(self):
+        outcome, in_auto = dl.apply_decision(
+            self.con, "t0", "follow", 0, expected_soc_kwh=12.8, solar_skipped_now=False,
+            detail="follow: ...", numbers={}, loop_in_auto=False)
+        self.assertEqual(outcome, "applied")
+        self.assertTrue(in_auto)
+        self.assertEqual(self.applied, [("follow", 0)])
+        self.assertEqual(self.rows()[0][:3], ("follow", 0, "applied"))
+
+    def test_follow_while_already_in_auto_logs_a_row_but_writes_no_register(self):
+        outcome, in_auto = dl.apply_decision(
+            self.con, "t1", "follow", 0, expected_soc_kwh=12.8, solar_skipped_now=False,
+            detail="follow: ...", numbers={}, loop_in_auto=True)
+        self.assertEqual(outcome, "applied")
+        self.assertEqual(self.applied, [])
+        self.assertEqual(len(self.rows()), 1)  # the slot-boundary row the oracle reads
+
+    def test_follow_still_runs_the_divergence_check(self):
+        numbers = {}
+        dl.apply_decision(
+            self.con, "t0", "follow", 0, expected_soc_kwh=12.8 + 2.0, solar_skipped_now=False,
+            detail="follow: ...", numbers=numbers, loop_in_auto=True)
+        self.assertIn("soc_drift_kwh", numbers)
+        self.assertIn("drift", self.replans)
 
 
 if __name__ == "__main__":

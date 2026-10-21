@@ -27,7 +27,7 @@ import {
   toOptimizerSlots,
 } from '../../lib/oracle';
 import { optimizeDispatch, BATTERY_KWH } from '../../lib/optimizer';
-import { BATTERY_RT_EFF } from '../../lib/constants';
+import { BATTERY_RT_EFF, BATTERY_WEAR_COST_ORE_PER_KWH } from '../../lib/constants';
 
 const SLOT_MS = 900_000;
 const ONE_WAY_EFF = Math.sqrt(BATTERY_RT_EFF);
@@ -60,8 +60,8 @@ function flows(soc: number, socNext: number, solarRem: number, loadRem: number) 
     const need = dE / ONE_WAY_EFF;
     const fromSolar = Math.min(solarRem, need);
     const gridToBattery = need - fromSolar;
-    let solarExport = solarRem - fromSolar;
-    let gridExport = solarExport;
+    const solarExport = solarRem - fromSolar;
+    const gridExport = solarExport;
     const gridImport = gridToBattery + loadRem;
     return { gridImport, gridExport };
   } else {
@@ -120,7 +120,6 @@ function main() {
   let batteryImportOre = 0;
   let batteryExportOre = 0;
   let wearOre = 0;
-  const BATTERY_WEAR_COST_ORE_PER_KWH = require('../../lib/constants').BATTERY_WEAR_COST_ORE_PER_KWH;
 
   let curSoc = startSoc.soc;
   for (let i = 0; i < n; i++) {
