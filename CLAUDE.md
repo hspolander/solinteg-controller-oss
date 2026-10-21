@@ -139,9 +139,11 @@ different market or vendor):
   both opt-in via `optimizeDispatch` opts, set ONLY by `lib/plan.ts` for live plans — the
   hindsight oracle must never carry them (deferral/uncertainty are meaningless in hindsight and
   would poison the regret-≥0 invariant). (1) **Deferral bias**: grid-funded charges and
-  battery-to-grid sells cost `rate × hoursUntilHorizonEnd` extra öre/kWh, so among near-equal
+  battery-to-grid sells cost `rate × hours of earliness` extra öre/kWh, so among near-equal
   prices the action lands as late as possible and the hourly/triggered replans can still cancel
-  it if reality diverges; a two-pass guard prices both plans at TRUE prices and refuses to give
+  it if reality diverges. By default a buy's earliness is measured to when its energy is NEEDED
+  (need-window form, `DEFERRAL_UNTIL_NEEDED`), not to the horizon end, so a buy that cannot wait
+  isn't taxed; sells keep the full ramp to horizon end. A two-pass guard prices both plans at TRUE prices and refuses to give
   up more than `MAX_DEFERRAL_SACRIFICE_ORE` (~0.5 kr) of real value, so a genuinely better early
   price is never deferred over (tests: "grid-buys land in the LATEST near-equal-price slots…",
   "sells defer from an evening peak…", "sacrifice guard…"). (2) **Solar risk premium**:
@@ -149,14 +151,23 @@ different market or vendor):
   öre/kWh (RAW forecast solar, not load-netted surplus — the premium prices forecast error,
   and the incident day's forecast netted to zero surplus yet filled the battery), so a
   thin-margin buy that a plausible solar over-delivery would make redundant
-  doesn't happen until the solar is behind it — zero with no solar ahead, leaving winter
-  arbitrage bit-identical (tests: "grid-buys wait out the forecast solar…", "premium leaves
-  no-solar (winter night) arbitrage bit-identical…"). Constants + full rationale in
-  `lib/constants.ts` (`DEFERRAL_RATE_ORE_PER_KWH_HOUR`, `MAX_DEFERRAL_SACRIFICE_ORE`,
-  `SOLAR_RISK_PREMIUM_ORE_PER_KWH`); env kill switches set each to 0. What stays deliberately
+  doesn't happen until the solar is behind it — zero with no solar ahead (tests: "grid-buys
+  wait out the forecast solar…", "premium leaves no-solar (winter night) arbitrage
+  bit-identical…"). By default only the bought energy still in the battery when solar arrives
+  pays it (survival form, `SOLAR_RISK_SURVIVAL`), so a night buy the house uses up before
+  sunrise pays nothing. Constants + full rationale in
+  `lib/constants.ts` (`DEFERRAL_RATE_ORE_PER_KWH_HOUR`, `DEFERRAL_UNTIL_NEEDED`,
+  `MAX_DEFERRAL_SACRIFICE_ORE`, `SOLAR_RISK_PREMIUM_ORE_PER_KWH`, `SOLAR_RISK_SURVIVAL`); env
+  kill switches set each to 0. What stays deliberately
   UNBIASED: load-covering discharges (their timing is dictated by the load), and no seasonal
   logic anywhere — winter night-buying and "don't sell what the night load needs" remain
   emergent from prices/solar exactly as before.
+- **Hold** (`dispatch_loop.py`, opt-in via `SOLINTEG_HOLD_ENABLED=1`, off by default): an
+  `idle` slot where the plan has grid covering the house is executed as a battery freeze (EMS
+  BattCtrl at 0 W) instead of auto/self-use, which would spend the battery the plan meant to
+  keep. Thresholds mirror `lib/chart-utils.ts`, so the dashboard's hold bands are exactly the
+  executed holds; PV surplus and a minimum SoC fall back to auto. Verify the register behaviour
+  on YOUR inverter first (MODBUS.md). `action-contract.test.ts` pins every action in TS and Python.
 - **Refund-aware planning**: grid energy stored and fed back gets its energy tax refunded
   (Swedish refund type 739; 36 öre/kWh in 2026). `opts.refundCreditOre` (set only by
   `lib/plan.ts`, never the oracle) makes a second plan with that credit on exports in NO-solar
