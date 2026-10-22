@@ -39,16 +39,23 @@ case "$1" in
     # Strip one harmless trailing terminator (";" plus surrounding whitespace) before checking
     # for a second, chained statement — a bare trailing ";" is normal SQL, not an attack.
     query=$(printf '%s' "$query" | sed -e 's/[[:space:]]*;[[:space:]]*$//')
-    # Single SELECT statement only. Reject anything that could write, attach another file,
-    # load an extension (arbitrary code as root), or chain a second statement.
+    # Single read-only statement only. Reject anything that could write, attach another file,
+    # load an extension (arbitrary code as root), or chain a second statement. `-readonly` below
+    # is what actually stops writes; the keyword list is for ATTACH (read any other database as
+    # root) and load_extension (code as root). Keywords are matched as WHOLE TOKENS (since
+    # 2026-10-22; before that a substring match refused aliases like n_drops and columns like
+    # created_at): SQL can only invoke them as tokens, and comments, quotes and case all leave a
+    # non-word character or nothing on each side, so the token match still catches them.
+    # `pragma_` stays blocked as a prefix so the pragma table-valued functions do too.
     lower=$(printf '%s' "$query" | tr '[:upper:]' '[:lower:]')
-    if [[ "$query" == *";"* ]] || [[ "$lower" == .* ]] || \
-       [[ "$lower" =~ (pragma|attach|detach|load_extension|vacuum|insert|update|delete|drop|alter|create) ]]; then
+    banned='(^|[^a-z0-9_])(pragma|attach|detach|load_extension|vacuum|insert|update|delete|drop|alter|create)([^a-z0-9_]|$)'
+    if [[ "$query" == *";"* ]] || [[ "$lower" == .* ]] || [[ "$lower" =~ $banned ]] || \
+       [[ "$lower" =~ (^|[^a-z0-9_])pragma_ ]]; then
       echo "rejected: only a single read-only SELECT statement is allowed" >&2
       exit 1
     fi
-    if [[ ! "$lower" =~ ^[[:space:]]*select ]]; then
-      echo "rejected: query must start with SELECT" >&2
+    if [[ ! "$lower" =~ ^[[:space:]]*(select|with)([^a-z0-9_]|$) ]]; then
+      echo "rejected: query must start with SELECT or WITH" >&2
       exit 1
     fi
     exec sqlite3 -readonly -header -column "$DB" "$query"

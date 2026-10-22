@@ -9,14 +9,18 @@
 #   SELECT date(timestamp,'+2 hours') AS d, COUNT(*) FROM readings GROUP BY d
 #   EOF
 #
-# The wrapper's rules, checked here first so a rejection names its cause:
-#   - the query must START with SELECT (no WITH: use subqueries);
-#   - the keyword filter matches SUBSTRINGS anywhere, aliases included: pragma, attach, detach,
-#     load_extension, vacuum, insert, update, delete, drop, alter, create (so `n_drops`,
-#     `before_drop`, `created_at AS ...` are all rejected);
+# The wrapper's rules (scripts/services/telemetry-ro.sh), checked here first so a rejection
+# names its cause:
+#   - the query must start with SELECT or WITH;
+#   - banned keywords, matched as WHOLE TOKENS: pragma (and any pragma_* function), attach,
+#     detach, load_extension, vacuum, insert, update, delete, drop, alter, create. Aliases and
+#     columns that merely contain one (n_drops, created_at) are fine;
 #   - no `;` except one trailing one.
+# The host runs whatever copy of the wrapper was last installed by hand; an older one rejects WITH
+# and matches keywords as substrings.
 # Also remember: if the host clock is UTC (the usual server default), 'localtime' is UTC; add
-# your own offset for local-day buckets. And `solinteg-telemetry-ro logs` only accepts `-N days`.
+# your own offset for local-day buckets. `solinteg-telemetry-ro logs` takes '-N minutes|hours|days'
+# spelled out ('-15 min' is rejected on purpose).
 set -euo pipefail
 NUC="${NUC:?set NUC=user@host for the box running telemetry.db}"
 src="${1:?usage: nuc-sql.sh <file.sql | ->}"
@@ -25,17 +29,17 @@ if [ "$src" = "-" ]; then sql=$(cat); else sql=$(cat "$src"); fi
 trimmed=$(printf '%s' "$sql" | sed -e 's/[[:space:]]*;[[:space:]]*$//')
 lower=$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')
 first=$(printf '%s' "$lower" | tr -s '[:space:]' ' ' | sed -e 's/^ //' | cut -d' ' -f1)
-if [ "$first" != "select" ]; then
-  echo "nuc-sql: the wrapper only accepts queries starting with SELECT (got '$first'); rewrite WITH as a subquery" >&2
+if [ "$first" != "select" ] && [ "$first" != "with" ]; then
+  echo "nuc-sql: the wrapper only accepts queries starting with SELECT or WITH (got '$first')" >&2
   exit 2
 fi
 if [[ "$trimmed" == *";"* ]]; then
   echo "nuc-sql: only one statement allowed (found ';' before the end)" >&2
   exit 2
 fi
-hit=$(printf '%s' "$lower" | grep -o -E 'pragma|attach|detach|load_extension|vacuum|insert|update|delete|drop|alter|create' | sort -u | tr '\n' ' ' || true)
+hit=$(printf '%s' "$lower" | grep -o -E '(^|[^a-z0-9_])(pragma|attach|detach|load_extension|vacuum|insert|update|delete|drop|alter|create)([^a-z0-9_]|$)|(^|[^a-z0-9_])pragma_' | tr -cd 'a-z_\n' | sort -u | tr '\n' ' ' || true)
 if [ -n "$hit" ]; then
-  echo "nuc-sql: the wrapper would reject this — forbidden substring(s): $hit(check aliases and column names too)" >&2
+  echo "nuc-sql: the wrapper would reject this — banned keyword(s): $hit" >&2
   exit 2
 fi
 

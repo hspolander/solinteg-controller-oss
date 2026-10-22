@@ -90,15 +90,24 @@ check "load_extension rejected"          1 "$(run sql "$LOADEXT")"
 check "PRAGMA rejected"                  1 "$(run sql 'PRAGMA journal_mode')"
 check "VACUUM rejected"                  1 "$(run sql 'VACUUM')"
 check "dot-command rejected"             1 "$(run sql '.tables')"
-check "non-SELECT rejected"              1 "$(run sql 'WITH x AS (SELECT 1) SELECT * FROM x')"
+check "non-SELECT/WITH rejected"         1 "$(run sql 'EXPLAIN SELECT 1')"
 run sql 'SELECT 1' >/dev/null
 check "sqlite3 invoked read-only"        yes "$(outHas 'readonly')"
 
-# KNOWN over-rejection, pinned deliberately rather than fixed: the keyword check is a substring
-# match on the whole query, so a column whose NAME contains a banned word is refused too. Over-
-# rejecting is the safe direction for a program running as root passwordlessly — if you hit it,
-# project a different column rather than loosening the guard.
-check "column named created_at over-rejected" 1 "$(run sql 'SELECT created_at FROM oracle_daily')"
+# 2026-10-22: WITH and whole-token keyword matching. The substring match used to refuse any
+# alias or column containing a banned word (created_at, n_drops, before_drop) and any CTE, which
+# cost a rewrite on most non-trivial queries. `sqlite3 -readonly` is what stops writes; the keyword
+# list exists for ATTACH (read any other database as root) and load_extension (code as root), and
+# SQL can only invoke those as whole tokens, so matching tokens loses nothing. These pin both sides.
+check "CTE accepted"                     0 "$(run sql 'WITH x AS (SELECT 1 AS n) SELECT n FROM x')"
+check "column created_at accepted"       0 "$(run sql 'SELECT created_at FROM oracle_daily')"
+check "alias n_drops accepted"           0 "$(run sql 'SELECT COUNT(*) AS n_drops FROM readings')"
+check "CTE feeding a DELETE rejected"    1 "$(run sql 'WITH x AS (SELECT 1) DELETE FROM readings')"
+check "ATTACH after a comment rejected"  1 "$(run sql 'SELECT 1 /**/ATTACH')"
+check "ATTACH in any case rejected"      1 "$(run sql 'select 1 where 0 union select 1 aTtAcH')"
+QUOTEDEXT='SELECT "load_extension"(1)'
+check "quoted load_extension rejected"   1 "$(run sql "$QUOTEDEXT")"
+check "pragma table function rejected"   1 "$(run sql 'SELECT * FROM pragma_table_info(1)')"
 
 echo "--- heartbeat ---"
 check "heartbeat reads the file"         0 "$(run heartbeat)"
