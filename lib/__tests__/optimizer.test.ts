@@ -899,13 +899,22 @@ describe('refund-aware planning (energy-tax refund on grid-charged energy fed ba
     expect(optimizeDispatch(slots, 20, { refundCreditOre: refund36 })).toEqual(optimizeDispatch(slots, 20));
   });
 
-  it('a year with no confirmed refund rate earns nothing (fail closed)', () => {
-    const slots = nightThenMorningPeak().map((s) => ({ ...s, startTime: s.startTime.replace('2026', '2031') }));
-    expect(energyTaxRefundOre('2031-01-01T03:00:00')).toBe(0);
+  it('a later year without its own rate carries the latest known rate forward', () => {
+    // The refund should keep working each new year with no code change. Planning on last year's
+    // rate is near-exact; planning on 0 would switch the feature off every 1 January. (A refund
+    // claim is computed with the actual rate anyway.)
     expect(energyTaxRefundOre('2026-12-31T23:45:00')).toBe(36);
-    expect(optimizeDispatch(slots, MIN_SOC, { refundCreditOre: energyTaxRefundOre })).toEqual(
-      optimizeDispatch(slots, MIN_SOC),
-    );
+    expect(energyTaxRefundOre('2027-01-01T00:00:00')).toBe(36);
+    expect(energyTaxRefundOre('2031-06-01T03:00:00')).toBe(36);
+    const slots = nightThenMorningPeak().map((s) => ({ ...s, startTime: s.startTime.replace('2026', '2031') }));
+    const d = optimizeDispatch(slots, MIN_SOC, { refundCreditOre: energyTaxRefundOre });
+    expect(bought(d)).toBeGreaterThan(10); // the refund-only night buy still happens in 2031
+    expect(d).toEqual(optimizeDispatch(slots, MIN_SOC, { refundCreditOre: refund36 }));
+  });
+
+  it('before the refund existed (pre-2026) an export earns nothing', () => {
+    expect(energyTaxRefundOre('2025-12-31T23:45:00')).toBe(0);
+    expect(energyTaxRefundOre('2024-03-01T12:00:00')).toBe(0);
   });
 
   it('refundEarnedOre: losses are not refundable, and the house eats solar-origin energy first', () => {

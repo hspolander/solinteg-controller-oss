@@ -172,8 +172,9 @@ different market or vendor):
   (Swedish refund type 739; 36 öre/kWh in 2026). `opts.refundCreditOre` (set only by
   `lib/plan.ts`, never the oracle) makes a second plan with that credit on exports in NO-solar
   slots only, and keeps it only if true cash + the refund it really earns (`refundEarnedOre`)
-  beats the plain plan. Rate per calendar year in `ENERGY_TAX_REFUND_ORE_BY_YEAR`; a year
-  missing there earns nothing, so add each new year by hand. Kill switch
+  beats the plain plan. Rate per calendar year in `ENERGY_TAX_REFUND_ORE_BY_YEAR`; a later year
+  with no entry carries the latest rate forward (add the confirmed rate when published to stay
+  exact). Kill switch
   `SOLINTEG_REFUND_CREDIT=0` (use it outside Sweden, or if you don't file the refund claim).
 - **Battery wear cost**: every kWh of battery throughput (charge or discharge) carries a small
   cost (`BATTERY_WEAR_COST_ORE_PER_KWH` in `lib/constants.ts`) so the DP won't cycle the battery

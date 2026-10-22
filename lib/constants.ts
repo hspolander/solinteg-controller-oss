@@ -203,10 +203,13 @@ export const DEFERRAL_UNTIL_NEEDED = (process.env.SOLINTEG_DEFERRAL_UNTIL_NEEDED
  * is stored in a battery and fed back to the grid. Excl. VAT, storage losses not refundable,
  * solar-origin energy earns nothing. Claimed per calendar year.
  *
- * öre per exported kWh, by calendar year of the export. A year missing here earns NO credit
- * (fail closed): the rate or the rule itself can change, so each new year must be added by
- * hand once its rate is confirmed. 2026: 36.0 öre (Skatteverket "Skatt på el"). Outside Sweden,
- * or without a refund claim, set SOLINTEG_REFUND_CREDIT=0.
+ * öre per exported kWh, by calendar year of the export. 2026: 36.0 öre (Skatteverket "Skatt
+ * på el"). A LATER year with no entry carries the latest known rate forward, so refund-aware
+ * planning keeps working each 1 January without a code change: the rate moves a little each
+ * year with indexation, so last year's figure is near-exact, while 0 would switch the feature
+ * off. Add the confirmed rate when it is published to stay exact. Years before the first entry
+ * earn nothing (the refund did not exist). Outside Sweden, without a refund claim, or if the
+ * rule is ever repealed, set SOLINTEG_REFUND_CREDIT=0.
  */
 export const ENERGY_TAX_REFUND_ORE_BY_YEAR: Record<number, number> = { 2026: 36.0 };
 
@@ -226,9 +229,12 @@ export const ENERGY_TAX_REFUND_ORE_BY_YEAR: Record<number, number> = { 2026: 36.
  */
 export const REFUND_CREDIT_ENABLED = (process.env.SOLINTEG_REFUND_CREDIT ?? '1') === '1';
 
-/** The refund (öre/kWh) an export starting at this naive Stockholm-local slot time earns. */
+/** The refund (öre/kWh) an export starting at this naive Stockholm-local slot time earns: that
+ *  year's rate, else the latest earlier year's (carried forward), else 0 before the refund began. */
 export function energyTaxRefundOre(startTime: string): number {
-  return ENERGY_TAX_REFUND_ORE_BY_YEAR[+startTime.slice(0, 4)] ?? 0;
+  const year = +startTime.slice(0, 4);
+  const known = Object.keys(ENERGY_TAX_REFUND_ORE_BY_YEAR).map(Number).filter((y) => y <= year);
+  return known.length ? ENERGY_TAX_REFUND_ORE_BY_YEAR[Math.max(...known)] : 0;
 }
 
 // ---- Hold mode (opt-in, shadow-only — see lib/plan.ts's holdEnabled wiring) ----
