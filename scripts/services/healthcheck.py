@@ -86,6 +86,12 @@ Environment (beyond notify.py's own NTFY_*):
                                 just used a live forecast before the WRITE path (not just the
                                 fallback chain) counts as broken (default 7200 = 2h). See
                                 check_solar_cache_write_broken.
+  SOC_COLLAPSE_WINDOW_S        check_soc_collapse look-back (default 3600)
+  SOC_COLLAPSE_SPAN_S          span a drop is measured over (default 120)
+  SOC_COLLAPSE_DROP_PCT        drop in SoC points within that span that counts as a BMS
+                                re-scale (default 4; size it against your battery, see the check)
+  SOC_COLLAPSE_FLOOR_PCT       SoC below which the battery is clearly under its floor
+                                (default SOLINTEG_SOC_FLOOR_PCT - 3)
   INVERTER_DHCP_UNIT           systemd unit serving the inverter's DHCP lease, if you run one
                                 (e.g. dnsmasq on the isolated link in deploy/network-isolation/).
                                 Default empty = check_inverter_dhcp off
@@ -165,6 +171,15 @@ METER_PHASE_DEAD_SHARE = float(os.environ.get("METER_PHASE_DEAD_SHARE", "0.95"))
 # window that is mostly empty (just after a poller restart, or the deploy that adds the columns)
 # can't page on a handful of rows.
 METER_PHASE_MIN_SAMPLES = int(os.environ.get("METER_PHASE_MIN_SAMPLES", "180"))
+# check_soc_collapse: look-back window, the drop (percentage points) below the highest SoC of
+# the preceding SOC_COLLAPSE_SPAN_S that counts as a collapse, and the absolute SoC below which
+# the battery is under its floor by more than drift (default: 3 points under the inverter_control
+# floor, SOLINTEG_SOC_FLOOR_PCT). See the check's docstring for how to size the drop.
+SOC_COLLAPSE_WINDOW_S = int(os.environ.get("SOC_COLLAPSE_WINDOW_S", "3600"))
+SOC_COLLAPSE_SPAN_S = int(os.environ.get("SOC_COLLAPSE_SPAN_S", "120"))
+SOC_COLLAPSE_DROP_PCT = float(os.environ.get("SOC_COLLAPSE_DROP_PCT", "4"))
+SOC_COLLAPSE_FLOOR_PCT = float(os.environ.get(
+    "SOC_COLLAPSE_FLOOR_PCT", str(float(os.environ.get("SOLINTEG_SOC_FLOOR_PCT", "8")) - 3)))
 ORACLE_REVIEW_MIN_DAYS = int(os.environ.get("ORACLE_REVIEW_MIN_DAYS", "16"))
 # Default 0 = OFF, deliberately: this is a "go run this probe" nag, and the question it scouts
 # for has already been answered once on the reference deployment (see MODBUS.md). Opt in by
@@ -656,6 +671,76 @@ def check_meter_phase_dead(con: sqlite3.Connection, now: datetime):
             "dead_" + "+".join(name for name, _, _ in dead))
 
 
+def check_soc_collapse(con: sqlite3.Connection, now: datetime):
+    """Did the BMS just re-scale its SoC estimate down, or has the battery fallen well below
+    its floor?
+
+    On the reference deployment (LFP pack), during a forced discharge at a displayed ~9 %, the
+    BMS cut the discharge to 0 W and walked SoC down to ~0 % over about 100 s. The pack was
+    really empty while the estimate still said ~9 % (coulomb-count drift, which an LFP BMS can
+    only correct at the low or high knee because the voltage curve is flat in between). The
+    inverter's own on-grid floor (52503) then grid-charged it at ~5 kW back to the floor.
+    Harmless once, but nothing noticed. A repeat is the signal that matters, above all one soon
+    after a 100 % charge, which points at cell imbalance rather than drift. Cell voltages are not
+    exposed over Modbus on every BMS, so this telemetry signature may be the only early warning.
+
+    Two signatures, each against the poller's readings:
+      - collapse: a sample at least SOC_COLLAPSE_DROP_PCT points below the highest SoC of the
+        preceding SOC_COLLAPSE_SPAN_S. Size it against physics: your fastest real discharge
+        moves SoC by (max battery power / capacity) per hour. On the reference pack (11 kW,
+        25.6 kWh) that is ~1.4 points per 120 s, so the default of 4 is ~2.8x anything the
+        battery can do on its own. A smaller pack or a faster inverter needs a higher value.
+        Comparing against the window max rather than the previous sample matters: a second
+        writer briefly interleaving rows a couple of points apart fires a step-wise test.
+      - below_floor: SoC under SOC_COLLAPSE_FLOOR_PCT (default 3 points under the floor).
+    Backtested over four months of the reference deployment's readings: both fired on the one
+    real event only.
+    """
+    since = now - timedelta(seconds=SOC_COLLAPSE_WINDOW_S)
+    try:
+        rows = con.execute(
+            "SELECT timestamp, soc_pct FROM readings WHERE timestamp >= ? AND timestamp <= ? "
+            "AND soc_pct IS NOT NULL ORDER BY timestamp",
+            ((since - timedelta(seconds=SOC_COLLAPSE_SPAN_S)).isoformat(), now.isoformat()),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    parsed = [(datetime.fromisoformat(ts), soc) for ts, soc in rows]
+    worst = None  # (drop, from_soc, to_soc, at)
+    lowest = None  # (soc, at)
+    for i, (t, soc) in enumerate(parsed):
+        if t < since:
+            continue  # lead-in rows only feed the span max below
+        if lowest is None or soc < lowest[0]:
+            lowest = (soc, t)
+        prior = [s for pt, s in parsed[:i] if (t - pt).total_seconds() <= SOC_COLLAPSE_SPAN_S]
+        if prior:
+            peak = max(prior)
+            if worst is None or peak - soc > worst[0]:
+                worst = (peak - soc, peak, soc, t)
+    local = lambda t: t.astimezone(STOCKHOLM).strftime("%H:%M")
+    if worst is not None and worst[0] >= SOC_COLLAPSE_DROP_PCT:
+        drop, peak, soc, at = worst
+        return ("soc_collapse", notify.PRIORITY_HIGH,
+                f"Solinteg: battery SoC dropped {drop:.1f} points in under "
+                f"{SOC_COLLAPSE_SPAN_S // 60} min",
+                f"At {local(at)} SoC went from {peak:.1f} % to {soc:.1f} %, faster than the battery "
+                f"can discharge. Most likely the BMS correcting its estimate: the pack was emptier "
+                f"than reported. Once is drift. A repeat soon after a 100 % charge suggests cell "
+                f"imbalance, so ask your installer or the battery vendor for cell data. Expect "
+                f"the inverter to grid-charge back to its floor.",
+                "collapse")
+    if lowest is not None and lowest[0] < SOC_COLLAPSE_FLOOR_PCT:
+        soc, at = lowest
+        return ("soc_collapse", notify.PRIORITY_HIGH,
+                f"Solinteg: battery SoC at {soc:.1f} %, well below the floor",
+                f"Lowest reading in the last {SOC_COLLAPSE_WINDOW_S // 60} min: {soc:.1f} % at "
+                f"{local(at)}. Either the BMS re-scaled its estimate or the inverter's own floor "
+                f"(52502/52503) isn't holding. Check what 52503 reads.",
+                "below_floor")
+    return None
+
+
 def check_todays_plan(con: sqlite3.Connection, today: str, now: datetime):
     # Both rows only exist once the FIRST dashboard render after Stockholm midnight has
     # logged the new day's snapshot + plan (solinteg-telemetry.timer runs a few minutes past
@@ -939,6 +1024,7 @@ def run_checks(con: sqlite3.Connection, now: datetime):
         check_solar_cache_write_broken(con, now),
         check_control_errors(con, now),
         check_meter_phase_dead(con, now),
+        check_soc_collapse(con, now),
         check_disk_space(),
         check_unit_file_drift(),
     ]

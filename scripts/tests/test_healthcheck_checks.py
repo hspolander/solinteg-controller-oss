@@ -384,5 +384,66 @@ class CheckMeterPhaseDeadTests(unittest.TestCase):
         self.assertIsNone(hc.check_meter_phase_dead(con, NOW))
 
 
+class SocCollapseTests(unittest.TestCase):
+    """check_soc_collapse: a BMS re-scale must fire, real discharges and an interleaved-writer
+    glitch must not."""
+
+    @staticmethod
+    def db(series):
+        """series: (seconds_ago, soc_pct) pairs."""
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE readings (timestamp TEXT, soc_pct REAL)")
+        con.executemany("INSERT INTO readings VALUES (?, ?)", [(ago(s), soc) for s, soc in series])
+        return con
+
+    def test_a_bms_rescale_fires_as_a_collapse(self):
+        # The reference deployment's real event: 20 s samples, 9.2 → 0.1 in ~100 s.
+        socs = [9.6, 9.4, 9.2, 8.1, 6.3, 4.6, 2.8, 1.0, 0.1, 0.3, 0.4]
+        issue = hc.check_soc_collapse(self.db([(600 - 20 * i, s) for i, s in enumerate(socs)]), NOW)
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue[KEY], "soc_collapse")
+        self.assertEqual(issue[PRIORITY], notify.PRIORITY_HIGH)
+        self.assertEqual(issue[4], "collapse")
+        self.assertIn("9.2", issue[3])
+
+    def test_a_full_power_discharge_does_not_fire(self):
+        # 11 kW on 25.6 kWh ≈ 0.72 points/min.
+        series = [(3000 - 20 * i, 60 - 0.24 * i) for i in range(150)]
+        self.assertIsNone(hc.check_soc_collapse(self.db(series), NOW))
+
+    def test_an_interleaved_writer_glitch_does_not_fire(self):
+        # Two writers ~2.5 points apart, alternating every few seconds.
+        series = []
+        for i in range(30):
+            series.append((900 - 20 * i, 36.0 + 0.1 * i))
+            series.append((892 - 20 * i, 38.5 + 0.1 * i))
+        self.assertIsNone(hc.check_soc_collapse(self.db(series), NOW))
+
+    def test_routine_lows_near_the_floor_do_not_fire(self):
+        self.assertIsNone(hc.check_soc_collapse(self.db([(600 - 20 * i, 6.0) for i in range(30)]), NOW))
+
+    def test_sitting_well_below_the_floor_fires_as_below_floor(self):
+        series = [(1800 - 20 * i, 6.0 - 0.02 * i) for i in range(90)]
+        issue = hc.check_soc_collapse(self.db(series), NOW)
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue[4], "below_floor")
+
+    def test_an_event_older_than_the_window_is_history(self):
+        socs = [9.2, 8.1, 6.3, 4.6, 2.8, 1.0]
+        old = [(hc.SOC_COLLAPSE_WINDOW_S + 600 - 20 * i, s) for i, s in enumerate(socs)]
+        recent = [(600 - 20 * i, 30.0) for i in range(30)]
+        self.assertIsNone(hc.check_soc_collapse(self.db(old + recent), NOW))
+
+    def test_rows_after_now_are_ignored(self):
+        socs = [9.2, 8.1, 6.3, 4.6, 2.8, 1.0]
+        future = [(-600 - 20 * i, s) for i, s in enumerate(socs)]
+        steady = [(600 - 20 * i, 30.0) for i in range(30)]
+        self.assertIsNone(hc.check_soc_collapse(self.db(steady + future), NOW))
+
+    def test_empty_or_missing_table_does_not_crash(self):
+        self.assertIsNone(hc.check_soc_collapse(self.db([]), NOW))
+        self.assertIsNone(hc.check_soc_collapse(sqlite3.connect(":memory:"), NOW))
+
+
 if __name__ == "__main__":
     unittest.main()
