@@ -19,6 +19,9 @@ unreachable from anything except this box).
    `sudo netplan apply`.
 3. Find the inverter's MAC (via `ip neigh` while it's still on your home LAN, or its label).
    Fill in `dnsmasq-eth-inverter.conf.example`, install, `sudo systemctl restart dnsmasq`.
+   Set `INVERTER_DHCP_UNIT=dnsmasq` in `solinteg.env` so the healthcheck alerts if it stops.
+   Watch for other `/etc/dnsmasq.d/` files: `ubuntu-fan` (a docker.io recommend) adds
+   `bind-interfaces`, which conflicts with `bind-dynamic` and stops dnsmasq at the next boot.
 4. Move the inverter's Ethernet cable to the new isolated NIC.
 5. Enable IP forwarding: uncomment `net/ipv4/ip_forward=1` in `/etc/ufw/sysctl.conf`.
 6. Insert `ufw-before.rules.snippet`'s NAT block into `/etc/ufw/before.rules` (with your own

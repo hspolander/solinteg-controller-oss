@@ -86,12 +86,18 @@ Environment (beyond notify.py's own NTFY_*):
                                 just used a live forecast before the WRITE path (not just the
                                 fallback chain) counts as broken (default 7200 = 2h). See
                                 check_solar_cache_write_broken.
+  INVERTER_DHCP_UNIT           systemd unit serving the inverter's DHCP lease, if you run one
+                                (e.g. dnsmasq on the isolated link in deploy/network-isolation/).
+                                Default empty = check_inverter_dhcp off
+  SOLINTEG_HOST                the inverter's IP (from solinteg.env), used only to read its ARP
+                                entry for the poller_stale diagnosis
 """
 import json
 import logging
 import os
 import shutil
 import sqlite3
+import subprocess
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -147,6 +153,9 @@ SOLAR_FORECAST_CACHE_PATH = os.environ.get(
 # of hours rather than waiting out the full SOLAR_FORECAST_CACHE_MAX_AGE_H (default 8h) before
 # anything downstream would even notice the file was stale.
 SOLAR_CACHE_WRITE_LAG_MAX_S = int(os.environ.get("SOLAR_CACHE_WRITE_LAG_MAX_S", "7200"))
+INVERTER_DHCP_UNIT = os.environ.get("INVERTER_DHCP_UNIT", "")
+INVERTER_HOST = os.environ.get("SOLINTEG_HOST", "")
+ARP_TABLE_PATH = Path("/proc/net/arp")
 # check_meter_phase_dead: look-back window, the flow another phase must carry for a sample to
 # count, and the share of those samples a phase must read EXACTLY 0 to be called dead...
 METER_PHASE_WINDOW_S = int(os.environ.get("METER_PHASE_WINDOW_S", "21600"))
@@ -215,8 +224,64 @@ def check_poller_stale(con: sqlite3.Connection, now: datetime):
     if age > POLLER_STALE_S:
         return ("poller_stale", notify.PRIORITY_HIGH, "Solinteg: inverter poller looks dead",
                 f"Last reading was {age:.0f}s ago (expected every 30s). "
-                f"Check solinteg-poller on the NUC.")
+                f"{inverter_link_hint()}")
     return None
+
+
+def inverter_link_hint(host: str = INVERTER_HOST, arp_path: Path = ARP_TABLE_PATH,
+                       dhcp_unit: str = INVERTER_DHCP_UNIT) -> str:
+    """Where to look first when readings stop: the network or the poller. Reads the kernel's ARP
+    entry for the inverter, which the poller's own connect attempts keep fresh, so this sends no
+    traffic. Not a ping: the sandboxed unit (NoNewPrivileges) can't ping on a default Ubuntu
+    box. Not a TCP probe of :502 either: the dongle takes one Modbus connection at a time. On the
+    reference deployment the old "check solinteg-poller" message pointed the wrong way for 4 h
+    while the real fault was the DHCP server not handing the dongle a lease."""
+    generic = "Check solinteg-poller on the NUC."
+    if not host:
+        return generic
+    try:
+        lines = arp_path.read_text().splitlines()[1:]
+    except OSError:
+        return generic
+    for line in lines:
+        fields = line.split()
+        if len(fields) >= 4 and fields[0] == host:
+            # Flags 0x2 = ATF_COM, a resolved entry; anything else is incomplete or failed.
+            if int(fields[2], 16) & 0x2:
+                return (f"The inverter ({host}) is on the link (ARP resolved), so look at "
+                        f"solinteg-poller / the Modbus side.")
+            break
+    first = (f"`systemctl status {dhcp_unit}` (it hands the dongle its lease)" if dhcp_unit
+             else "its DHCP lease on your router")
+    return (f"The inverter ({host}) is NOT on the link (no resolved ARP entry): check {first}, "
+            f"then the cable and the dongle, before the poller.")
+
+
+def check_inverter_dhcp(unit: str = INVERTER_DHCP_UNIT):
+    """The DHCP server for the inverter's link is not running. Opt-in (INVERTER_DHCP_UNIT), for
+    setups where this box serves the lease, like deploy/network-isolation/. HIGH: the dongle is
+    DHCP-only, so the link dies at its next lease renewal or reboot, taking Modbus and all
+    control with it. On the reference deployment a package (ubuntu-fan, pulled in by docker.io)
+    added a dnsmasq.d file with `bind-interfaces`, which conflicts with `bind-dynamic`; the
+    running dnsmasq didn't care, and the next reboot left it failed. Alerting on the unit's
+    state catches that before the lease expires, not after."""
+    if not unit:
+        return None
+    try:
+        result = subprocess.run(["systemctl", "is-active", unit],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None  # no systemd here (dev box, tests): not this check's question
+    state = result.stdout.strip() or "unknown"
+    if state == "active":
+        return None
+    return ("inverter_dhcp_down", notify.PRIORITY_HIGH,
+            f"Solinteg: inverter DHCP ({unit}) is down",
+            f"{unit} is '{state}'. The inverter dongle gets its address from it, so Modbus "
+            f"stops at the next lease renewal or dongle reboot if it isn't already. On the NUC: "
+            f"`journalctl -u {unit} -b` for the reason (one known cause: a conflicting "
+            f"bind-interfaces in /etc/dnsmasq.d/), fix it, then `sudo systemctl restart {unit}`.",
+            state)
 
 
 def check_weather_stale(con: sqlite3.Connection, now: datetime):
@@ -867,6 +932,7 @@ def run_checks(con: sqlite3.Connection, now: datetime):
     today = stockholm_date(now)
     checks = [
         check_poller_stale(con, now),
+        check_inverter_dhcp(),
         check_weather_stale(con, now),
         check_todays_plan(con, today, now),
         check_solar_source_degraded(con, now),

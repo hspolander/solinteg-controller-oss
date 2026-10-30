@@ -18,7 +18,9 @@ Run: py -m unittest scripts.tests.test_healthcheck_checks -v   (from the repo ro
      or: py -m unittest discover -s scripts/tests
 """
 import sqlite3
+import subprocess
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -195,6 +197,83 @@ class CheckTodaysPlanTests(unittest.TestCase):
         con = con_with("price_snapshots", "optimizer_runs")
         now = self.midnight_plus(20 * 3600)
         self.assertIsNotNone(hc.check_todays_plan(con, self.TODAY, now))
+
+
+class InverterLinkHintTests(unittest.TestCase):
+    """The poller_stale body must point at the network when the inverter has dropped off the
+    link, not at the poller."""
+
+    HEADER = "IP address       HW type     Flags       HW address            Mask     Device\n"
+
+    def arp(self, *rows: str) -> Path:
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".arp", delete=False)
+        tmp.write(self.HEADER + "".join(r + "\n" for r in rows))
+        tmp.close()
+        self.addCleanup(Path(tmp.name).unlink)
+        return Path(tmp.name)
+
+    def test_resolved_entry_points_at_the_poller(self):
+        path = self.arp("192.168.99.2     0x1         0x2         AA:BB:CC:DD:EE:FF     *        eth-inverter")
+        self.assertIn("on the link", hc.inverter_link_hint("192.168.99.2", path))
+
+    def test_incomplete_entry_points_at_the_dhcp_unit_when_one_is_configured(self):
+        path = self.arp("192.168.99.2     0x1         0x0         00:00:00:00:00:00     *        eth-inverter")
+        hint = hc.inverter_link_hint("192.168.99.2", path, "dnsmasq")
+        self.assertIn("NOT on the link", hint)
+        self.assertIn("systemctl status dnsmasq", hint)
+
+    def test_incomplete_entry_without_a_dhcp_unit_points_at_the_router_lease(self):
+        path = self.arp("192.168.99.2     0x1         0x0         00:00:00:00:00:00     *        eth-inverter")
+        hint = hc.inverter_link_hint("192.168.99.2", path, "")
+        self.assertIn("NOT on the link", hint)
+        self.assertNotIn("systemctl", hint)
+
+    def test_no_entry_at_all_points_at_the_network(self):
+        path = self.arp("192.168.1.50     0x1         0x2         AA:BB:CC:DD:EE:01     *        eno1")
+        self.assertIn("NOT on the link", hc.inverter_link_hint("192.168.99.2", path))
+
+    def test_prefix_of_another_ip_does_not_match(self):
+        path = self.arp("192.168.99.20    0x1         0x2         AA:BB:CC:DD:EE:02     *        eth-inverter")
+        self.assertIn("NOT on the link", hc.inverter_link_hint("192.168.99.2", path))
+
+    def test_no_host_or_unreadable_table_falls_back_to_generic(self):
+        self.assertEqual(hc.inverter_link_hint("", Path("/nonexistent")), "Check solinteg-poller on the NUC.")
+        self.assertEqual(hc.inverter_link_hint("192.168.99.2", Path("/nonexistent/arp")),
+                         "Check solinteg-poller on the NUC.")
+
+
+class CheckInverterDhcpTests(unittest.TestCase):
+    """A DHCP-only dongle plus a dead DHCP server is a Modbus outage waiting for the next lease
+    renewal or reboot."""
+
+    def fake_state(self, stdout: str):
+        return mock.patch.object(hc.subprocess, "run",
+                                 return_value=subprocess.CompletedProcess([], 0, stdout=stdout, stderr=""))
+
+    def test_off_by_default(self):
+        self.assertEqual(hc.INVERTER_DHCP_UNIT, "")
+        with mock.patch.object(hc.subprocess, "run") as run:
+            self.assertIsNone(hc.check_inverter_dhcp(""))
+            run.assert_not_called()
+
+    def test_active_is_silent(self):
+        with self.fake_state("active\n"):
+            self.assertIsNone(hc.check_inverter_dhcp("dnsmasq"))
+
+    def test_failed_alerts_high_fingerprinted_on_state(self):
+        with self.fake_state("failed\n"):
+            alert = hc.check_inverter_dhcp("dnsmasq")
+        self.assertEqual(alert[KEY], "inverter_dhcp_down")
+        self.assertEqual(alert[PRIORITY], notify.PRIORITY_HIGH)
+        self.assertEqual(alert[4], "failed")
+
+    def test_inactive_also_alerts(self):
+        with self.fake_state("inactive\n"):
+            self.assertIsNotNone(hc.check_inverter_dhcp("dnsmasq"))
+
+    def test_no_systemctl_is_silent(self):
+        with mock.patch.object(hc.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIsNone(hc.check_inverter_dhcp("dnsmasq"))
 
 
 class CheckDiskSpaceTests(unittest.TestCase):
