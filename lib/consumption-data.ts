@@ -74,14 +74,14 @@ export const hddNormalByMonth: number[] = [12.3, 11.1, 9.3, 5.6, 1.4, 0.2, 0, 0,
 // grid meter was mis-wired before June on the reference deployment): April is measured for
 // the first time instead of interpolated, March's midday trough rises from 1.1% to 3.3%, and
 // May's peak moves 18h -> 16h. February stays on three winters of meter history rather than
-// one battery-era winter that disagrees with it. Expect your own site to
-// differ; regenerate rather than inheriting these.
+// one battery-era winter that disagrees with it. OCTOBER now comes from the deployment's own
+// measured load too (29 days; evening 31.7% -> 22.8%, peak 18h -> 16h, nights ~3%/h from the
+// heat pump), replacing a single pre-PV month with a 0.3% midday trough. Expect your own site
+// to differ; regenerate rather than inheriting these.
 //
 // Winter shape: morning (06-07) and
 // evening (16-18) peaks ~5-6%/h, midday trough ~2-2.5%/h — the uniform 4.17%/h assumption
-// under-allocated load at exactly the price-peak hours by ~30-40%. October's extreme
-// midday trough rests on a single pre-PV month (31 days) — noisier than the winter rows
-// (85-124 days each), but shoulder-month stakes are low.
+// under-allocated load at exactly the price-peak hours by ~30-40%.
 export const hourShareByMonth: number[][] = [
   [0.0465, 0.0468, 0.0474, 0.0474, 0.0465, 0.0460, 0.0519, 0.0531, 0.0421, 0.0335, 0.0273, 0.0236, 0.0251, 0.0251, 0.0297, 0.0429, 0.0526, 0.0513, 0.0472, 0.0406, 0.0414, 0.0407, 0.0440, 0.0474],
   [0.0485, 0.0466, 0.0457, 0.0475, 0.0472, 0.0467, 0.0569, 0.0549, 0.0473, 0.0370, 0.0279, 0.0245, 0.0198, 0.0170, 0.0241, 0.0293, 0.0439, 0.0579, 0.0521, 0.0444, 0.0438, 0.0410, 0.0467, 0.0493],
@@ -92,7 +92,7 @@ export const hourShareByMonth: number[][] = [
   [0.0267, 0.0271, 0.0263, 0.0261, 0.0266, 0.0276, 0.0309, 0.0435, 0.0473, 0.0447, 0.0454, 0.0514, 0.0472, 0.0505, 0.0498, 0.0499, 0.0750, 0.0632, 0.0465, 0.0415, 0.0422, 0.0404, 0.0378, 0.0326],
   [0.0243, 0.0233, 0.0246, 0.0236, 0.0238, 0.0254, 0.0360, 0.0436, 0.0488, 0.0446, 0.0470, 0.0591, 0.0552, 0.0509, 0.0474, 0.0489, 0.0662, 0.0660, 0.0458, 0.0484, 0.0443, 0.0387, 0.0327, 0.0312],
   [0.0231, 0.0236, 0.0249, 0.0264, 0.0274, 0.0272, 0.0483, 0.0445, 0.0544, 0.0509, 0.0481, 0.0506, 0.0498, 0.0437, 0.0436, 0.0431, 0.0735, 0.0621, 0.0498, 0.0495, 0.0455, 0.0346, 0.0278, 0.0274],
-  [0.0381, 0.0431, 0.0440, 0.0425, 0.0465, 0.0522, 0.0870, 0.0776, 0.0483, 0.0206, 0.0130, 0.0108, 0.0106, 0.0028, 0.0084, 0.0230, 0.0346, 0.0654, 0.0911, 0.0679, 0.0509, 0.0412, 0.0401, 0.0402],
+  [0.0307, 0.0309, 0.0302, 0.0323, 0.0325, 0.0350, 0.0514, 0.0532, 0.0489, 0.0409, 0.0372, 0.0453, 0.0506, 0.0460, 0.0399, 0.0427, 0.0608, 0.0587, 0.0448, 0.0434, 0.0422, 0.0391, 0.0308, 0.0325],
   [0.0426, 0.0427, 0.0428, 0.0445, 0.0472, 0.0506, 0.0594, 0.0575, 0.0472, 0.0318, 0.0237, 0.0214, 0.0221, 0.0226, 0.0305, 0.0427, 0.0617, 0.0631, 0.0490, 0.0407, 0.0397, 0.0350, 0.0383, 0.0432],
   [0.0468, 0.0472, 0.0515, 0.0478, 0.0474, 0.0505, 0.0525, 0.0487, 0.0404, 0.0360, 0.0308, 0.0290, 0.0261, 0.0277, 0.0331, 0.0414, 0.0504, 0.0511, 0.0454, 0.0359, 0.0363, 0.0365, 0.0415, 0.0459],
 ];
