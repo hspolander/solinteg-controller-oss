@@ -26,7 +26,7 @@ echo '{"ok":true}' > "$HEARTBEAT"
 printf 'SOLINTEG_CONTROL_ARMED=1\n' > "$ENV_FILE"
 
 # sqlite3/journalctl are exec'd, so a PATH stub is enough to see what they were asked to do.
-for cmd in sqlite3 journalctl; do
+for cmd in sqlite3 journalctl runuser; do
   cat > "$T/stub/$cmd" <<EOF
 #!/usr/bin/env bash
 echo "$cmd \$*"
@@ -93,6 +93,9 @@ check "dot-command rejected"             1 "$(run sql '.tables')"
 check "non-SELECT/WITH rejected"         1 "$(run sql 'EXPLAIN SELECT 1')"
 run sql 'SELECT 1' >/dev/null
 check "sqlite3 invoked read-only"        yes "$(outHas 'readonly')"
+# 2026-11-11: -safe and the drop to solinteg (see the comment in telemetry-ro.sh).
+check "sqlite3 invoked with -safe"       yes "$(outHas 'sqlite3 -safe ')"
+check "sql runs as solinteg, not root"   yes "$(outHas '^runuser -u solinteg -- sqlite3 ')"
 
 # 2026-10-22: WITH and whole-token keyword matching. The substring match used to refuse any
 # alias or column containing a banned word (created_at, n_drops, before_drop) and any CTE, which
@@ -108,6 +111,23 @@ check "ATTACH in any case rejected"      1 "$(run sql 'select 1 where 0 union se
 QUOTEDEXT='SELECT "load_extension"(1)'
 check "quoted load_extension rejected"   1 "$(run sql "$QUOTEDEXT")"
 check "pragma table function rejected"   1 "$(run sql 'SELECT * FROM pragma_table_info(1)')"
+
+# 2026-11-11: the sqlite3 CLI's file functions. readfile() read any file as root through the
+# passwordless sudo, and writefile() could write a sudoers file. fsdir() is the one -safe does
+# NOT block (its data column is the file's contents), so the token list is load-bearing.
+READF="SELECT length(readfile('/etc/hostname'))"
+check "readfile rejected"                1 "$(run sql "$READF")"
+WRITEF="SELECT writefile('/etc/sudoers.d/x','a')"
+check "writefile rejected"               1 "$(run sql "$WRITEF")"
+check "edit rejected"                    1 "$(run sql 'SELECT edit(1)')"
+check "fts3_tokenizer rejected"          1 "$(run sql 'SELECT fts3_tokenizer(1)')"
+FSDIR="SELECT data FROM fsdir('/etc/shadow')"
+check "fsdir rejected"                   1 "$(run sql "$FSDIR")"
+QFSDIR='SELECT data FROM "FSDIR"(1)'
+check "quoted upper-case fsdir rejected" 1 "$(run sql "$QFSDIR")"
+check "zipfile rejected"                 1 "$(run sql 'SELECT * FROM zipfile(1)')"
+check "sqlar_uncompress rejected"        1 "$(run sql 'SELECT sqlar_uncompress(1,2)')"
+check "column edited_at accepted"        0 "$(run sql 'SELECT edited_at FROM x')"
 
 echo "--- heartbeat ---"
 check "heartbeat reads the file"         0 "$(run heartbeat)"

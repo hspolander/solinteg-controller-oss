@@ -184,6 +184,12 @@ sudo solinteg-telemetry-ro heartbeat
 If `scripts/services/telemetry-ro.sh` changes, re-copy it to `/usr/local/bin/solinteg-telemetry-ro` and
 re-apply the chown/chmod above — the sudoers rule points at that installed path, not the repo.
 
+The `sql` subcommand runs `sqlite3 -safe -readonly` as the **solinteg** user (`runuser`), not as
+root, and rejects the sqlite3 CLI's file functions by name. Before 2026-11-11 it did neither, and
+`readfile()`/`writefile()` made the wrapper passwordless root, so **re-install it if your copy is
+older**. `-safe` needs sqlite3 ≥ 3.37 and does not cover `fsdir()`, so keep that token in the
+banned list.
+
 ## 11. Remote access (Tailscale)
 
 The dashboard is reachable off-LAN via Tailscale only — no router ports are open, and

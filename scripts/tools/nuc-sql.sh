@@ -13,11 +13,13 @@
 # names its cause:
 #   - the query must start with SELECT or WITH;
 #   - banned keywords, matched as WHOLE TOKENS: pragma (and any pragma_* function), attach,
-#     detach, load_extension, vacuum, insert, update, delete, drop, alter, create. Aliases and
-#     columns that merely contain one (n_drops, created_at) are fine;
+#     detach, load_extension, vacuum, insert, update, delete, drop, alter, create, and the sqlite3
+#     CLI's file functions readfile, writefile, edit, fts3_tokenizer, fsdir, zipfile (and any
+#     sqlar_* function). Aliases and columns that merely contain one (n_drops, created_at) are fine;
 #   - no `;` except one trailing one.
 # The host runs whatever copy of the wrapper was last installed by hand; an older one rejects WITH
-# and matches keywords as substrings.
+# and matches keywords as substrings, and one older than 2026-11-11 runs the CLI's file functions
+# as root: re-install it (deploy/README.md) rather than relying on this client-side pre-check.
 # Also remember: if the host clock is UTC (the usual server default), 'localtime' is UTC; add
 # your own offset for local-day buckets. `solinteg-telemetry-ro logs` takes '-N minutes|hours|days'
 # spelled out ('-15 min' is rejected on purpose).
@@ -37,7 +39,7 @@ if [[ "$trimmed" == *";"* ]]; then
   echo "nuc-sql: only one statement allowed (found ';' before the end)" >&2
   exit 2
 fi
-hit=$(printf '%s' "$lower" | grep -o -E '(^|[^a-z0-9_])(pragma|attach|detach|load_extension|vacuum|insert|update|delete|drop|alter|create)([^a-z0-9_]|$)|(^|[^a-z0-9_])pragma_' | tr -cd 'a-z_\n' | sort -u | tr '\n' ' ' || true)
+hit=$(printf '%s' "$lower" | grep -o -E '(^|[^a-z0-9_])(pragma|attach|detach|load_extension|vacuum|insert|update|delete|drop|alter|create|readfile|writefile|edit|fts3_tokenizer|fsdir|zipfile)([^a-z0-9_]|$)|(^|[^a-z0-9_])(pragma_|sqlar_)' | tr -cd 'a-z_\n' | sort -u | tr '\n' ' ' || true)
 if [ -n "$hit" ]; then
   echo "nuc-sql: the wrapper would reject this — banned keyword(s): $hit" >&2
   exit 2

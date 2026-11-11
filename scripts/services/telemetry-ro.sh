@@ -2,8 +2,8 @@
 # Root-owned, read-only wrapper for routine telemetry health checks. Installed at
 # /usr/local/bin/solinteg-telemetry-ro (see deploy/solinteg-telemetry-ro.sudoers) so your own
 # login user can run passwordless `sudo solinteg-telemetry-ro ...` for routine health checks
-# without a general NOPASSWD sudo grant. Runs as root (not the solinteg user) so it can read
-# telemetry.db/the heartbeat file without ever touching solinteg's other files (env secrets).
+# without a general NOPASSWD sudo grant. Runs as root for `logs` and `heartbeat`; the `sql`
+# subcommand drops to the solinteg user before starting sqlite3 (see the comment there).
 #
 # Every subcommand is a fixed, validated shape — no arbitrary SQL, no arbitrary journalctl
 # unit/args — because the sudoers rule that invokes this only restricts WHICH PROGRAM runs
@@ -47,10 +47,21 @@ case "$1" in
     # created_at): SQL can only invoke them as tokens, and comments, quotes and case all leave a
     # non-word character or nothing on each side, so the token match still catches them.
     # `pragma_` stays blocked as a prefix so the pragma table-valued functions do too.
+    #
+    # 2026-11-11: the sqlite3 CLI (not the library) ships file functions, and until then this
+    # wrapper ran them as root: readfile() could read any file and writefile() could write one
+    # (e.g. a sudoers file), so the "read-only" wrapper was passwordless root. Three layers now:
+    #   1. the banned tokens below include readfile, writefile, edit, fts3_tokenizer, fsdir,
+    #      zipfile and sqlar_*;
+    #   2. `-safe` (sqlite >= 3.37) refuses readfile/writefile/edit/load_extension/zipfile/
+    #      fts3_tokenizer and ATTACH. It does NOT block fsdir(), whose `data` column returns file
+    #      contents (checked against sqlite 3.45.1), which is why layer 1 must name fsdir;
+    #   3. the query runs as solinteg via runuser, not as root, so a future bypass reaches only
+    #      what the services can already read.
     lower=$(printf '%s' "$query" | tr '[:upper:]' '[:lower:]')
-    banned='(^|[^a-z0-9_])(pragma|attach|detach|load_extension|vacuum|insert|update|delete|drop|alter|create)([^a-z0-9_]|$)'
+    banned='(^|[^a-z0-9_])(pragma|attach|detach|load_extension|vacuum|insert|update|delete|drop|alter|create|readfile|writefile|edit|fts3_tokenizer|fsdir|zipfile)([^a-z0-9_]|$)'
     if [[ "$query" == *";"* ]] || [[ "$lower" == .* ]] || [[ "$lower" =~ $banned ]] || \
-       [[ "$lower" =~ (^|[^a-z0-9_])pragma_ ]]; then
+       [[ "$lower" =~ (^|[^a-z0-9_])(pragma_|sqlar_) ]]; then
       echo "rejected: only a single read-only SELECT statement is allowed" >&2
       exit 1
     fi
@@ -58,7 +69,7 @@ case "$1" in
       echo "rejected: query must start with SELECT or WITH" >&2
       exit 1
     fi
-    exec sqlite3 -readonly -header -column "$DB" "$query"
+    exec runuser -u solinteg -- sqlite3 -safe -readonly -header -column "$DB" "$query"
     ;;
   logs)
     [ $# -eq 3 ] || usage
