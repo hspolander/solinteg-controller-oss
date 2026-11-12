@@ -6,7 +6,29 @@ import {
   currentSlotIndexInPrices,
   toSlot,
   fetchDay,
+  validateDay,
+  stockholmMidnightUtc,
+  SPOT_MIN_ORE,
+  SPOT_MAX_ORE,
 } from '../prices';
+
+/** A complete, valid feed day: one slot per 15 min from that date's Stockholm midnight to the
+ *  next (96, or 92/100 on the DST days). Times in UTC ("Z"); validateDay only parses them. */
+function fullDay(date: string, sek: number | ((i: number) => number) = 0.5) {
+  const [y, m, d] = date.split('-').map(Number);
+  const start = stockholmMidnightUtc(y, m - 1, d).getTime();
+  const next = new Date(Date.UTC(y, m - 1, d + 1));
+  const end = stockholmMidnightUtc(next.getUTCFullYear(), next.getUTCMonth(), next.getUTCDate()).getTime();
+  const out = [];
+  for (let t = start, i = 0; t < end; t += 900_000, i++) {
+    out.push({
+      SEK_per_kWh: typeof sek === 'function' ? sek(i) : sek,
+      time_start: new Date(t).toISOString(),
+      time_end: new Date(t + 900_000).toISOString(),
+    });
+  }
+  return out;
+}
 import { EXPORT_BONUS_ORE, SUPPLIER_SURCHARGE_ORE, VAT_RATE } from '../constants';
 
 // ─── stockholmParts ───────────────────────────────────────────────────────────
@@ -265,12 +287,9 @@ describe('fetchDay', () => {
   });
 
   it('maps every returned slot', async () => {
-    vi.stubGlobal('fetch', ok([
-      { SEK_per_kWh: 0.5, time_start: '2026-08-09T00:00:00+02:00', time_end: '2026-08-09T00:15:00+02:00' },
-      { SEK_per_kWh: 0.6, time_start: '2026-08-09T00:15:00+02:00', time_end: '2026-08-09T00:30:00+02:00' },
-    ]));
+    vi.stubGlobal('fetch', ok(fullDay('2026-08-09', (i) => (i === 1 ? 0.6 : 0.5))));
     const slots = await fetchDay('2026-08-09');
-    expect(slots).toHaveLength(2);
+    expect(slots).toHaveLength(96);
     expect(slots![1].price).toBeCloseTo(60 + EXPORT_BONUS_ORE, 2);
   });
 
@@ -291,8 +310,65 @@ describe('fetchDay', () => {
     await expect(fetchDay('2026-08-10')).resolves.toBeNull();
   });
 
+  // 2026-11-11 review: a malformed day must behave like "not published" (today -> no plan,
+  // dispatch idles; tomorrow -> hasTomorrow false), never reach the optimizer.
+  it('returns null for a truncated day', async () => {
+    vi.stubGlobal('fetch', ok(fullDay('2026-08-09').slice(0, 95)));
+    await expect(fetchDay('2026-08-09')).resolves.toBeNull();
+  });
+
+  it('returns null for a day with a non-finite price', async () => {
+    vi.stubGlobal('fetch', ok(fullDay('2026-08-09', (i) => (i === 40 ? (null as unknown as number) : 0.5))));
+    await expect(fetchDay('2026-08-09')).resolves.toBeNull();
+  });
+
   it('returns null when the body is not an array', async () => {
     vi.stubGlobal('fetch', ok({ error: 'nope' }));
     await expect(fetchDay('2026-08-10')).resolves.toBeNull();
+  });
+});
+
+describe('validateDay', () => {
+  it('accepts a normal day and both DST days at their own lengths', () => {
+    expect(fullDay('2026-08-09')).toHaveLength(96);
+    expect(validateDay(fullDay('2026-08-09'), '2026-08-09')).toBeNull();
+    expect(fullDay('2026-03-29')).toHaveLength(92);
+    expect(validateDay(fullDay('2026-03-29'), '2026-03-29')).toBeNull();
+    expect(fullDay('2026-10-25')).toHaveLength(100);
+    expect(validateDay(fullDay('2026-10-25'), '2026-10-25')).toBeNull();
+  });
+
+  it('accepts a month-end summer day (next midnight rolls into the next month)', () => {
+    expect(validateDay(fullDay('2026-07-31'), '2026-07-31')).toBeNull();
+  });
+
+  it('rejects 96 slots on a 92-slot DST day', () => {
+    const wrong = fullDay('2026-08-09').map((s, i) => ({ ...s, time_start: new Date(stockholmMidnightUtc(2026, 2, 29).getTime() + i * 900_000).toISOString() }));
+    expect(validateDay(wrong, '2026-03-29')).toMatch(/96 slots, expected 92/);
+  });
+
+  it('rejects hourly data (24 slots)', () => {
+    expect(validateDay(fullDay('2026-08-09').slice(0, 24), '2026-08-09')).toMatch(/24 slots/);
+  });
+
+  it('rejects NaN, Infinity and a string price', () => {
+    for (const bad of [NaN, Infinity, '0.5' as unknown as number]) {
+      expect(validateDay(fullDay('2026-08-09', (i) => (i === 5 ? bad : 0.5)), '2026-08-09')).toMatch(/slot 5/);
+    }
+  });
+
+  it('accepts the market-limit extremes and rejects beyond them', () => {
+    expect(validateDay(fullDay('2026-08-09', SPOT_MAX_ORE / 100), '2026-08-09')).toBeNull();
+    expect(validateDay(fullDay('2026-08-09', SPOT_MIN_ORE / 100), '2026-08-09')).toBeNull();
+    // A SEK/kWh value delivered in öre (x100) is the unit error this exists for.
+    expect(validateDay(fullDay('2026-08-09', (i) => (i === 7 ? 55 : 0.5)), '2026-08-09')).toMatch(/slot 7: 5500\.00 öre/);
+    expect(validateDay(fullDay('2026-08-09', -6.5), '2026-08-09')).toMatch(/outside/);
+  });
+
+  it("rejects a day that isn't the requested date, and a gap or duplicate slot", () => {
+    expect(validateDay(fullDay('2026-08-10'), '2026-08-09')).toMatch(/slot 0/);
+    const dup = fullDay('2026-08-09');
+    dup[50] = { ...dup[49] };
+    expect(validateDay(dup, '2026-08-09')).toMatch(/slot 50/);
   });
 });

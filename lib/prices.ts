@@ -55,7 +55,47 @@ export async function fetchDay(dateStr: string): Promise<PriceSlot[] | null> {
   if (!res.ok) return null;
   const raw = (await res.json()) as ElprisSlot[];
   if (!Array.isArray(raw) || raw.length === 0) return null;
+  const problem = validateDay(raw, dateStr);
+  if (problem) {
+    console.warn(`prices: rejecting ${dateStr} (${PRICE_ZONE}): ${problem}`);
+    return null;
+  }
   return raw.map(toSlot);
+}
+
+/** Raw spot bounds, öre/kWh excl VAT. Nord Pool's harmonised day-ahead clearing limits are
+ *  -500 / +4000 EUR/MWh (about -575 / +4600 öre at ~11.5 SEK/EUR); anything outside is not a
+ *  real price. Deliberately NOT fitted to history (2026-07..11 sell prices ran -0.61..553.85 öre):
+ *  a rejected day means no plan and an idle battery, so a bound tight enough to reject a genuine
+ *  spike would fail exactly on the day prices matter most. These catch unit errors and garbage. */
+export const SPOT_MIN_ORE = -600;
+export const SPOT_MAX_ORE = 5000;
+const SLOT_MS = 15 * 60_000;
+
+/**
+ * Why a published day must not reach the planner, or null if it is fine (2026-11-11 review).
+ * A rejected day is treated exactly like "not published": today -> no plan, dispatch idles;
+ * tomorrow -> hasTomorrow false. Checks: the slot count is the Stockholm date's own (96, or
+ * 92/100 on the DST days), every slot is a finite in-range number, and the slots are contiguous
+ * 15-minute steps starting at that date's midnight.
+ */
+export function validateDay(raw: ElprisSlot[], dateStr: string): string | null {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const start = stockholmMidnightUtc(y, m - 1, d).getTime();
+  // Normalise d+1 first: stockholmMidnightUtc does not roll 32 over into the next month.
+  const next = new Date(Date.UTC(y, m - 1, d + 1));
+  const end = stockholmMidnightUtc(next.getUTCFullYear(), next.getUTCMonth(), next.getUTCDate()).getTime();
+  const expected = Math.round((end - start) / SLOT_MS);
+  if (raw.length !== expected) return `${raw.length} slots, expected ${expected}`;
+  for (let i = 0; i < raw.length; i++) {
+    const s = raw[i];
+    const ore = typeof s?.SEK_per_kWh === 'number' ? s.SEK_per_kWh * 100 : NaN;
+    if (!Number.isFinite(ore)) return `slot ${i}: price is not a finite number`;
+    if (ore < SPOT_MIN_ORE || ore > SPOT_MAX_ORE) return `slot ${i}: ${ore.toFixed(2)} öre outside [${SPOT_MIN_ORE}, ${SPOT_MAX_ORE}]`;
+    const t = typeof s.time_start === 'string' ? Date.parse(s.time_start) : NaN;
+    if (t !== start + i * SLOT_MS) return `slot ${i}: starts at ${String(s.time_start)}, expected a contiguous 15-min step`;
+  }
+  return null;
 }
 
 export function stockholmParts(date: Date) {
